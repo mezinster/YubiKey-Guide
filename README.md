@@ -70,19 +70,19 @@ Several portable storage devices (such as microSD cards) for storing encrypted b
 
 # Prepare environment
 
-A dedicated, secure operating environment is recommended to generate cryptographic keys.
+A dedicated and hardened operating environment should be used to generate materials.
 
-The following is a general ranking of environments least to most hospitable to generating materials:
+The following is a ranked list of least to most defensible environments to consider:
 
 1. Public, shared or other computer owned by someone else
 1. Daily-use personal operating system with unrestricted network access
-1. Virtualized operating system with limited capabilities (using [virt-manager](https://virt-manager.org/), VirtualBox or VMware, for example)
+1. Virtualized system with limited capabilities (using [virt-manager](https://virt-manager.org/), VirtualBox or VMware, for example)
 1. Dedicated and hardened [Debian](https://www.debian.org/) or [OpenBSD](https://www.openbsd.org/) installation
 1. Ephemeral [Debian Live](https://www.debian.org/CD/live/) or [Tails](https://tails.boum.org/index.en.html) booted without primary storage attached
 1. Hardened hardware and firmware (e.g., [Coreboot](https://www.coreboot.org/), [Intel ME removed](https://github.com/corna/me_cleaner))
 1. Air-gapped system without network capabilities, preferably ARM-based Raspberry Pi or other architecturally diverse equivalent
 
-Debian Live is used in this guide to balance usability and security, with some additional instructions for OpenBSD.
+Debian Live is used in this guide to balance usability and security, with additional instructions for OpenBSD.
 
 Download the latest Debian Live image and signature files:
 
@@ -194,12 +194,8 @@ doas pkg_add gnupg pcsc-tools
 Download and install [Homebrew](https://brew.sh/) and the following packages:
 
 ```console
-brew install \
-    gnupg yubikey-personalization ykman pinentry-mac wget
+brew install gnupg yubikey-personalization ykman pinentry-mac wget
 ```
-
-> [!NOTE]
-> An additional Python package dependency may need to be installed to use [`ykman`](https://support.yubico.com/support/solutions/articles/15000012643-yubikey-manager-cli-ykman-user-guide) - `pip install yubikey-manager`
 
 Or using [MacPorts](https://www.macports.org/install.php), install the following packages:
 
@@ -332,10 +328,10 @@ Depending on how you plan to use GnuPG, set these values respectively[^1]:
 export IDENTITY="YubiKey User <yubikey@example.domain>"
 ```
 
-Or use any attribute which will uniquely identity the key (this may be incompatible with certain use cases):
+Or use any attribute which will uniquely identify the key (this may be incompatible with certain use cases):
 
 ```console
-export IDENTITY="My Cool YubiKey - 2025"
+export IDENTITY="My Cool YubiKey - 2026"
 ```
 
 ## Key
@@ -350,9 +346,9 @@ export KEY_TYPE=rsa4096
 
 Determine the desired Subkey validity duration.
 
-Setting a Subkey expiry forces identity and credential lifecycle management. However, setting an expiry on the Certify key is pointless, because it can just be used to extend itself[^2].
+Setting a Subkey expiration forces identity and credential lifecycle management. However, setting an expiry on the Certify key is pointless, because it can just be used to extend itself[^2].
 
-This guide recommends a two year expiration for Subkeys to balance security and usability, however longer durations are possible to reduce maintenance frequency.
+This guide recommends a two-year expiration for Subkeys to balance security and usability, however longer durations are possible to reduce maintenance frequency.
 
 When Subkeys expire, they may still be used to decrypt with GnuPG and authenticate with SSH, however they can **not** be used to encrypt nor sign new messages.
 
@@ -361,7 +357,7 @@ Subkeys must be renewed or rotated using the Certify key - see [Updating keys](#
 Set Subkeys to expire on a planned date:
 
 ```console
-export EXPIRATION=2027-07-01
+export EXPIRATION=2028-07-01
 ```
 
 The expiration date may also be relative, for example set to two years from today:
@@ -446,14 +442,14 @@ This is an optional step for use cases requiring [additional identities](https:/
 
 An alternative would be to have distinct keys but you would then require multiple YubiKeys, as each can only hold a single key for each type (signing, encryption, authentication). Nevertheless, there can be good reasons to have multiple YubiKeys:
 
-- if you have different email addresses for professional versus personal use cases, having distinct keys allow you to disassociate the identities
-- if you are also using the YubiKey as a U2F or FIDO2 device, having multiple YubiKeys is generally recommended as a backup measure
+- if you have different email addresses for professional versus personal use cases, having distinct keys allows you to disassociate identities
+- if you are also using YubiKey as a U2F or FIDO2 device, having multiple YubiKeys is generally recommended as a backup measure
 
 Define an array containing additional user IDs. Each array element must be wrapped in quotes and each element must be space-delimited:
 
 ```console
 declare -a additional_uids
-additional_uids=("Super Cool YubiKey 2025" "uid 1 <uid1@example.org>")
+additional_uids=("Super Cool YubiKey 2026" "uid 1 <uid1@example.org>")
 ```
 
 Add the additional user IDs to the Certify key:
@@ -493,7 +489,7 @@ echo "$CERTIFY_PASS" | \
         --quick-add-key "$KEYFP" "$KEY_TYPE" encrypt "$EXPIRATION"
 ```
 
-Followed by the Authentication Subkey:
+Then generate the Authentication Subkey:
 
 > [!NOTE]
 > Some systems no longer accept RSA for SSH authentication; to use [Ed25519](https://ed25519.cr.yp.to/), set the `KEY_TYPE` variable to `ed25519` before generating Authentication Subkey.
@@ -512,15 +508,15 @@ List available secret keys:
 gpg -K
 ```
 
-The output will display **[C]ertify, [S]ignature, [E]ncryption and [A]uthentication** keys:
+The output should display **[C]ertify, [S]ignature, [E]ncryption and [A]uthentication** keys:
 
 ```console
-sec   rsa4096/0xF0F2CFEB04341FB5 2025-07-01 [C]
+sec   rsa4096/0xF0F2CFEB04341FB5 2026-07-01 [C]
       Key fingerprint = 4E2C 1FA3 372C BA96 A06A  C34A F0F2 CFEB 0434 1FB5
 uid                   [ultimate] YubiKey User <yubikey@example>
-ssb   rsa4096/0xB3CD10E502E19637 2025-07-01 [S] [expires: 2027-07-01]
-ssb   rsa4096/0x30CBE8C4B085B9F7 2025-07-01 [E] [expires: 2027-07-01]
-ssb   rsa4096/0xAD9E24E1B8CB9600 2025-07-01 [A] [expires: 2027-07-01]
+ssb   rsa4096/0xB3CD10E502E19637 2026-07-01 [S] [expires: 2028-07-01]
+ssb   rsa4096/0x30CBE8C4B085B9F7 2026-07-01 [E] [expires: 2028-07-01]
+ssb   rsa4096/0xAD9E24E1B8CB9600 2026-07-01 [A] [expires: 2028-07-01]
 ```
 
 # Backup keys
@@ -550,9 +546,12 @@ The following process is recommended to be repeated several times on multiple po
 > [ext2](https://en.wikipedia.org/wiki/Ext2) volumes (without encryption) can be mounted on Linux and OpenBSD.
 > Use [FAT32](https://en.wikipedia.org/wiki/Fat32) or [NTFS](https://en.wikipedia.org/wiki/Ntfs) volumes for macOS and Windows compatibility instead.
 
+> [!CAUTION]
+> Confirm the destination (`of`) before issuing `dd` commands as they are destructive! This guide uses `/dev/sdc` - this value may be different on your system.
+
 **Linux**
 
-Attach a portable storage device and check its label, in this case `/dev/sdc`:
+Attach a portable storage device and confirm its label - in this example `/dev/sdc`:
 
 ```console
 $ sudo dmesg | tail
@@ -562,9 +561,6 @@ sd 2:0:0:0: [sdc] Attached SCSI removable disk
 $ sudo fdisk -l /dev/sdc
 Disk /dev/sdc: 14.9 GiB, 15931539456 bytes, 31116288 sectors
 ```
-
-> [!CAUTION]
-> Confirm the destination (`of`) before issuing the following command - it is destructive! This guide uses `/dev/sdc` throughout, but this value may be different on your system.
 
 Zero the header to prepare for encryption:
 
@@ -583,7 +579,7 @@ w
 EOF
 ```
 
-Create a small (at least 20 Mb is recommended to account for the LUKS header size) partition for storing secret materials:
+Create a small (at least 20 MB is recommended to account for the LUKS header size) partition for storing secret materials:
 
 ```console
 sudo fdisk /dev/sdc <<EOF
@@ -881,19 +877,26 @@ ykman openpgp access set-retries 5 5 5 -f -a $ADMIN_PIN
 
 ## Set attributes
 
-Use previously set values:
+Set a public identifier for the gpg subsystem:
+```console
+export GPG_LOGIN_ATTR="My Cool YubiKey - 2025"
+```
+> [!IMPORTANT]
+> Anyone with access to the yubikey can see this attribute, even without authentication. It is recommended not to include personally identifiable information in this field to prevent a bad actor from associating a lost yubikey with its owner.
+
+Update the login attribute:
 
 ```console
 gpg --command-fd=0 --pinentry-mode=loopback --edit-card <<EOF
 admin
 login
-$IDENTITY
+$GPG_LOGIN_ATTR
 $ADMIN_PIN
 quit
 EOF
 ```
 
-[Smart card attributes](https://gnupg.org/howtos/card-howto/en/smartcard-howto-single.html) can also be set with `gpg --edit-card` and `admin` mode. Use `help` to see available options. The `login` attribute is [required](https://github.com/drduh/YubiKey-Guide/issues/461).
+[Smart card attributes](https://gnupg.org/howtos/card-howto/en/smartcard-howto-single.html) can also be set with `gpg --edit-card` and `admin` mode. Use `help` to see available options. The [login](https://www.gnupg.org/documentation/manuals/gnupg/gpg_002dcard.html) attribute is [required](https://github.com/drduh/YubiKey-Guide/issues/461).
 
 Run `gpg --card-status` to verify results (*Login data* field).
 
@@ -954,12 +957,12 @@ EOF
 Verify Subkeys are on YubiKey with `gpg -K` - indicated by `ssb>`:
 
 ```console
-sec   rsa4096/0xF0F2CFEB04341FB5 2025-07-01 [C]
+sec   rsa4096/0xF0F2CFEB04341FB5 2026-07-01 [C]
       Key fingerprint = 4E2C 1FA3 372C BA96 A06A  C34A F0F2 CFEB 0434 1FB5
 uid                   [ultimate] YubiKey User <yubikey@example>
-ssb>  rsa4096/0xB3CD10E502E19637 2025-07-01 [S] [expires: 2027-07-01]
-ssb>  rsa4096/0x30CBE8C4B085B9F7 2025-07-01 [E] [expires: 2027-07-01]
-ssb>  rsa4096/0xAD9E24E1B8CB9600 2025-07-01 [A] [expires: 2027-07-01]
+ssb>  rsa4096/0xB3CD10E502E19637 2026-07-01 [S] [expires: 2028-07-01]
+ssb>  rsa4096/0x30CBE8C4B085B9F7 2026-07-01 [E] [expires: 2028-07-01]
+ssb>  rsa4096/0xAD9E24E1B8CB9600 2026-07-01 [A] [expires: 2028-07-01]
 ```
 
 The `>` after a tag indicates the key is stored on a smart card.
@@ -974,7 +977,7 @@ Verify the following steps were performed correctly:
   * `echo $LUKS_PASS` to see it again; [`passphrase.html`](https://raw.githubusercontent.com/drduh/YubiKey-Guide/master/templates/passphrase.html) or [`passphrase.txt`](https://raw.githubusercontent.com/drduh/YubiKey-Guide/master/templates/passphrase.txt) to transcribe it
 - [ ] Saved the Certify key and Subkeys to encrypted portable storage, to be kept offline
   * At least two backups are recommended, stored at separate locations
-- [ ] Exported a copy of the public key where is can be easily accessed later
+- [ ] Exported a copy of the public key where it can be easily accessed later
   * Separate device or non-encrypted partition was used
 - [ ] Memorized or wrote down the User PIN and Admin PIN, which are unique and changed from default values
   * `echo $USER_PIN $ADMIN_PIN` to see them again; [`passphrase.html`](https://raw.githubusercontent.com/drduh/YubiKey-Guide/master/templates/passphrase.html) or [`passphrase.txt`](https://raw.githubusercontent.com/drduh/YubiKey-Guide/master/templates/passphrase.txt) to transcribe them
@@ -1127,18 +1130,18 @@ PIN retry counter : 3 3 3
 Signature counter : 0
 KDF setting ......: on
 Signature key ....: CF5A 305B 808B 7A0F 230D  A064 B3CD 10E5 02E1 9637
-      created ....: 2025-07-01 12:00:00
+      created ....: 2026-07-01 12:00:00
 Encryption key....: A5FA A005 5BED 4DC9 889D  38BC 30CB E8C4 B085 B9F7
-      created ....: 2025-07-01 12:00:00
+      created ....: 2026-07-01 12:00:00
 Authentication key: 570E 1355 6D01 4C04 8B6D  E2A3 AD9E 24E1 B8CB 9600
-      created ....: 2025-07-01 12:00:00
-General key info..: sub  rsa4096/0xB3CD10E502E19637 2025-07-01 YubiKey User <yubikey@example>
-sec#  rsa4096/0xF0F2CFEB04341FB5  created: 2025-07-01  expires: never
-ssb>  rsa4096/0xB3CD10E502E19637  created: 2025-07-01  expires: 2027-07-01
+      created ....: 2026-07-01 12:00:00
+General key info..: sub  rsa4096/0xB3CD10E502E19637 2026-07-01 YubiKey User <yubikey@example>
+sec#  rsa4096/0xF0F2CFEB04341FB5  created: 2026-07-01  expires: never
+ssb>  rsa4096/0xB3CD10E502E19637  created: 2026-07-01  expires: 2028-07-01
                                   card-no: 0006 05553211
-ssb>  rsa4096/0x30CBE8C4B085B9F7  created: 2025-07-01  expires: 2027-07-01
+ssb>  rsa4096/0x30CBE8C4B085B9F7  created: 2026-07-01  expires: 2028-07-01
                                   card-no: 0006 05553211
-ssb>  rsa4096/0xAD9E24E1B8CB9600  created: 2025-07-01  expires: 2027-07-01
+ssb>  rsa4096/0xAD9E24E1B8CB9600  created: 2026-07-01  expires: 2028-07-01
                                   card-no: 0006 05553211
 ```
 
@@ -1219,7 +1222,7 @@ gpg --verify signed.txt
 The output will be similar to:
 
 ```console
-gpg: Signature made Mon 01 Jan 2025 12:00:00 PM UTC
+gpg: Signature made Wed 01 Jul 2026 12:00:00 PM UTC
 gpg:                using RSA key CF5A305B808B7A0F230DA064B3CD10E502E19637
 gpg: Good signature from "YubiKey User <yubikey@example>" [ultimate]
 Primary key fingerprint: 4E2C 1FA3 372C BA96 A06A  C34A F0F2 CFEB 0434 1FB5
@@ -1301,22 +1304,27 @@ Create `$HOME/Library/LaunchAgents/gnupg.gpg-agent.plist` with the following con
 
 ```
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-    <dict>
-        <key>Label</key>
-        <string>gnupg.gpg-agent</string>
-        <key>RunAtLoad</key>
-        <true/>
-        <key>KeepAlive</key>
-        <false/>
-        <key>ProgramArguments</key>
-        <array>
-            <string>/usr/local/MacGPG2/bin/gpg-connect-agent</string>
-            <string>/bye</string>
-        </array>
-    </dict>
+	<dict>
+		<key>Label</key>
+		<string>gnupg.gpg-agent</string>
+		<key>RunAtLoad</key>
+		<true/>
+		<key>KeepAlive</key>
+		<false/>
+		<key>EnvironmentVariables</key>
+		<dict>
+			<key>PATH</key>
+			<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/local/MacGPG2/bin:/bin</string>
+		</dict>
+		<key>ProgramArguments</key>
+		<array>
+			<string>/usr/bin/env</string>
+			<string>gpg-connect-agent</string>
+			<string>/bye</string>
+		</array>
+	</dict>
 </plist>
 ```
 
@@ -1326,11 +1334,11 @@ Load it:
 launchctl load $HOME/Library/LaunchAgents/gnupg.gpg-agent.plist
 ```
 
-Create `$HOME/Library/LaunchAgents/gnupg.gpg-agent-symlink.plist` with the following contens:
+Create `$HOME/Library/LaunchAgents/gnupg.gpg-agent-symlink.plist` with the following contents:
 
 ```
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/ProperyList-1.0/dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0/dtd">
 <plist version="1.0">
     <dict>
         <key>Label</key>
@@ -1538,13 +1546,13 @@ In the case of YubiKey usage, to extract the public key from the ssh agent:
 ssh-add -L | grep "cardno:000605553211" > ~/.ssh/id_rsa_yubikey.pub
 ```
 
-Then explicitly associate this YubiKey-stored key for used with a host, `github.com` for example, as follows:
+Then explicitly associate this YubiKey-stored key for use with a host - `github.com` for example, as follows:
 
 ```console
 $ cat << EOF >> ~/.ssh/config
 Host github.com
-    IdentitiesOnly yes
-    IdentityFile ~/.ssh/id_rsa_yubikey.pub
+  IdentitiesOnly yes
+  IdentityFile ~/.ssh/id_rsa_yubikey.pub
 EOF
 ```
 
@@ -1829,7 +1837,7 @@ YubiKey can be used to decrypt and sign emails and attachments using [Thunderbir
 
 ### Thunderbird
 
-Follow [instructions on the mozilla wiki](https://wiki.mozilla.org/Thunderbird:OpenPGP:Smartcards#Configure_an_email_account_to_use_an_external_GnuPG_key) to setup your YubiKey with your thunderbird client using the external gpg provider.
+Follow [instructions on the mozilla wiki](https://wiki.mozilla.org/Thunderbird:OpenPGP:Smartcards#Configure_an_email_account_to_use_an_external_GnuPG_key) to setup YubiKey with Thunderbird using the external GPG provider.
 
 > [!NOTE]
 > Thunderbird will [fail](https://github.com/drduh/YubiKey-Guide/issues/448) to decrypt emails if the ASCII `armor` option is enabled in `gpg.conf`. If you see the error `gpg: [don't know]: invalid packet (ctb=2d)` or `message cannot be decrypted (there are unknown problems with this encrypted message)` simply remove this option.
@@ -1956,7 +1964,7 @@ Copy the original private key materials (after updating the encrypted storage di
 ```console
 export GNUPGHOME=$(mktemp -d -t $(date +%Y.%m.%d)-XXXX)
 
-cp -avi /mnt/encrypted-storage/2025.12.31-AbCd/* $GNUPGHOME/
+cp -avi /mnt/encrypted-storage/2026.07.01-AbCd/* $GNUPGHOME/
 ```
 
 Confirm the identity is available, set the key id and fingerprint:
@@ -1984,7 +1992,7 @@ export CERTIFY_PASS=ABCD-0123-IJKL-4567-QRST-UVWX
 Set the updated expiration date:
 
 ```console
-export EXPIRATION=2027-09-01
+export EXPIRATION=2028-09-01
 ```
 
 Renew the Subkeys:
@@ -2026,7 +2034,7 @@ Follow the original procedure to [Create Subkeys](#create-subkeys).
 
 Previous Subkeys can be deleted from the identity.
 
-Finish by transfering new Subkeys to YubiKey.
+Finish by transferring new Subkeys to YubiKey.
 
 Copy the **new** temporary working directory to encrypted storage, which is still mounted:
 
@@ -2164,7 +2172,7 @@ This section is primarily focused on Debian / Ubuntu based systems, but the same
 
 Whether you're using a VM, installing on dedicated hardware, or running a Live OS temporarily, start *without* a network connection and disable any unnecessary services listening on all interfaces before connecting to the network.
 
-The reasoning for this is because services like cups or avahi can be listening by default. While this isn't an immediate problem it simply broadens the attack surface. Not everyone will have a dedicated subnet or trusted network equipment they can control, and for the purposes of this guide, these steps treat *any* network as untrusted / hostile.
+This is because services like `cups` or `avahi` can be listening by default. While this isn't an immediate problem it simply broadens the attack surface. Not everyone will have a dedicated subnet or trusted network equipment they can control, and for the purposes of this guide, these steps treat *any* network as untrusted / hostile.
 
 **Disable listening services**
 
@@ -2188,9 +2196,9 @@ sudo ufw enable
 
 On systems without `ufw`, `nftables` is replacing `iptables`. The [nftables wiki has examples](https://wiki.nftables.org/wiki-nftables/index.php/Simple_ruleset_for_a_workstation) for a baseline *deny inbound, allow outbound* policy. The `fw.inet.basic` policy covers both IPv4 and IPv6.
 
-(Remember to download this README and any other resources to another external drive when creating the bootable media, to have this information ready to use offline)
+Download this README and any other resources to another external drive when creating the bootable media, to have this information ready to use offline.
 
-Regardless of which policy you use, write the contents to a file (e.g. `nftables.conf`) and apply the policy with the following comand:
+Regardless of which policy you use, write the contents to a file (e.g. `nftables.conf`) and apply the policy with the following command:
 
 ```bash
 sudo nft -f ./nftables.conf
@@ -2203,18 +2211,30 @@ sudo nft -f ./nftables.conf
 If you want to look at every process's command line arguments you can use `ps axjf`. This prints a process tree which may have a large number of lines but should be easy to read on a live image or fresh install.
 
 ```bash
-sudo ss -anp -A inet    # Dump all network state information
-ps axjf                 # List all processes in a process tree
-ps aux                  # BSD syntax, list all processes but no process tree
+# Dump network state information
+sudo ss -anp -A inet
+
+# List all processes in a process tree
+ps axjf
+
+# BSD syntax, list all processes but no process tree
+ps aux
 ```
 
 If you find any additional processes listening on the network that aren't needed, take note and disable them with one of the following:
 
 ```bash
-sudo systemctl stop <process-name>                      # Stops services managed by systemctl
-sudo pkill -f '<process-name-or-command-line-string>'   # Terminate the process by matching it's command line string
-pgrep -f '<process-name-or-command-line-string>'        # Obtain the PID
-sudo kill <pid>                                         # Terminate the process via its PID
+# Stop services managed by systemctl
+sudo systemctl stop <process-name>
+
+# Terminate the process by matching its command line string
+sudo pkill -f '<process-name-or-command-line-string>'
+
+# Obtain the process ID
+pgrep -f '<process-name-or-command-line-string>'
+
+# Terminate the process ID
+sudo kill <pid>
 ```
 
 Now connect networking.
@@ -2269,7 +2289,7 @@ Now connect networking.
 
 - If SSH authentication still fails - add up to 3 `-v` flags to the `ssh` command to increase verbosity.
 
-- If it still fails, it may be useful to stop the background `sshd` daemon process service on the server (e.g. using `sudo systemctl stop sshd`) and instead start it in the foreground with extensive debugging output, using `/usr/sbin/sshd -eddd`. Note that the server will not fork and will only process one connection, therefore has to be re-started after every `ssh` test.
+- If it still fails, it may be useful to stop the background `sshd` daemon process service on the server (e.g. using `sudo systemctl stop sshd`) and instead start it in the foreground with extensive debugging output, using `/usr/sbin/sshd -eddd`. Note that the server will not fork and will only process one connection, therefore has to be restarted after every `ssh` test.
 
 - If you receive the error, `Please insert the card with serial number` see [Using Multiple Keys](#using-multiple-yubikeys).
 
@@ -2288,7 +2308,7 @@ gpg: [stdin]: encryption failed: Unusable public key
 
 - If the _pinentry_ graphical dialog does not show and this error appears: `sign_and_send_pubkey: signing failed: agent refused operation`, install the `dbus-user-session` package and restart for the `dbus` user session to be fully inherited. This is because `pinentry` complains about `No $DBUS_SESSION_BUS_ADDRESS found`, falls back to `curses` but doesn't find the expected `tty`
 
-- If, when you try the above `--card-status` command, you get receive the error, `gpg: selecting card failed: No such device` or `gpg: OpenPGP card not available: No such device`, it's possible that the latest release of pcscd now requires polkit rules to operate properly. Create the following file to allow users in the `wheel` group to use the card. Be sure to restart pcscd when you're done to allow the new rules to take effect.
+- If, when you try the above `--card-status` command, you receive the error, `gpg: selecting card failed: No such device` or `gpg: OpenPGP card not available: No such device`, it's possible that the latest release of pcscd now requires polkit rules to operate properly. Create the following file to allow users in the `wheel` group to use the card. Be sure to restart pcscd when you're done to allow the new rules to take effect.
 
 ```console
 cat << EOF >  /etc/polkit-1/rules.d/99-pcscd.rules
@@ -2320,7 +2340,7 @@ EOF
 # Additional resources
 
 * [Yubico - PGP](https://developers.yubico.com/PGP/)
-* [Yubico - Yubikey Personalization](https://developers.yubico.com/yubikey-personalization/)
+* [Yubico - YubiKey Personalization](https://developers.yubico.com/yubikey-personalization/)
 * [A Visual Explanation of GPG Subkeys (2022)](https://rgoulter.com/blog/posts/programming/2022-06-10-a-visual-explanation-of-gpg-subkeys.html)
 * [dhess/nixos-yubikey](https://github.com/dhess/nixos-yubikey)
 * [lsasolutions/makegpg](https://gitlab.com/lsasolutions/makegpg)
