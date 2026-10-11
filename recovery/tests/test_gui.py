@@ -31,24 +31,35 @@ class GuiAvailable(unittest.TestCase):
         self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
 
 
-def when_dialog_up(root, action):
-    """Calls action(dialog) from the event loop once a modal dialog holds the grab."""
+def grab_holder(root):
+    """The Tcl name of the window holding the grab, or "". Asks Tcl directly: tkinter's grab_current()
+    raises KeyError for Tk's own message boxes (".__tk__messagebox" on X11)."""
+    return str(root.tk.call("grab", "current", root._w))
+
+
+def when_dialog_up(root, action, timeout=5000):
+    """Calls action(dialog) from the event loop once a dialog holds the grab. dialog is the Toplevel, or
+    the Tcl name of one of Tk's own message boxes."""
     def check():
-        dialog = root.grab_current()
-        if dialog is None:
+        name = grab_holder(root)
+        if not name:
             root.after(20, check)
-        else:
-            root.after(3000, unblock)
-            action(dialog)
+            return
+        try:
+            dialog = root.nametowidget(name)
+        except KeyError:  # not created by tkinter
+            dialog = name
+        action(dialog)
 
     def unblock():  # a failing test must not hang in a dialog nobody answers
         try:
-            for widget in root.winfo_children():
-                if isinstance(widget, tk.Toplevel):
-                    widget.destroy()
+            for name in root.tk.splitlist(root.tk.call("winfo", "children", root._w)):
+                if str(root.tk.call("winfo", "toplevel", name)) == str(name):
+                    root.tk.call("destroy", name)  # also message boxes, which winfo_children() skips
         except tk.TclError:  # the root is gone
             pass
 
+    root.after(timeout, unblock)  # armed now, so a dialog that never takes the grab cannot hang either
     root.after(20, check)
 
 
@@ -169,6 +180,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.addCleanup(destroy)
         app = App(root)
+        app.alert = lambda text: None  # an unexpected alert fails the test instead of waiting for a click
         app.logbox = tk.Text(root)
         app.keep_pins([("11111111", "12345678", "123456")])
         return app
