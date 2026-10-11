@@ -154,6 +154,20 @@ class FakeHardwareTests:
                 self.assertEqual(proc.wait(timeout=15), 130)
                 self.assertEqual(tool_homes() - before, set())
 
+    def test_termination_signal_after_a_written_card_shows_pins(self):
+        before = tool_homes()
+        env = fake_hardware(self, [S1, S2])
+        out = short_tempdir(self, "out")
+        proc = spawn_impl(self, self.IMPL, ["--backup", str(FIXTURES / "ed25519" / "export"), "--out", str(out),
+                                            "--cards", "2"], env)
+        proc.stdin.write(f"{PASSPHRASE}\ny\n\nRESET {S1}\n".encode())
+        proc.stdin.flush()
+        read_until(proc.stderr, "Insert card 2 of 2 and press Enter", timeout=120)
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(proc.wait(timeout=15), 130)
+        self.assertIn(f"Card {S1}: Admin PIN", proc.stderr.read().decode())
+        self.assertEqual(tool_homes() - before, set())
+
     def test_reset_not_confirmed(self):
         result, _, calls, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nreset please\n")
         self.assertEqual(result.returncode, 3)
