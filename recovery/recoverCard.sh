@@ -193,7 +193,7 @@ clone_home() { # clone_home SRC LABEL VAR
 
 cleanup() {
   local dir
-  if declare -F reveal_pins >/dev/null; then reveal_pins; fi  # defined with the live run
+  reveal_pins
   for dir in "${HOMES_CREATED[@]}"; do
     if [[ -d $dir ]]; then destroy_home "$dir"; fi
   done
@@ -535,6 +535,277 @@ main() {
     exit "$EXIT_OK"
   fi
   run_live
+}
+
+# --- live run
+
+run_step() { # executes one canonical step; on failure CURRENT_STEP and $WORK/step.err describe it
+  local phase=$1 home=$2 check=$3 dir arg line rc=0
+  shift 3
+  local -a args=()
+  for arg in "$@"; do args+=("$(subst "$arg")"); done
+  dir=$(subst "$home")
+  CURRENT_STEP=$(subst_public "$*")
+  if [[ $phase == card* || $phase == verify* ]]; then info "[$phase] $CURRENT_STEP"; fi
+  if (( ${#STEP_STDIN[@]} )); then
+    GNUPGHOME=$dir "${args[@]}" >"$WORK/step.out" 2>"$WORK/step.err" < <(
+      for line in "${STEP_STDIN[@]}"; do printf '%s\n' "$(subst "$line")"; done
+    ) || rc=$?
+  else
+    GNUPGHOME=$dir "${args[@]}" </dev/null >"$WORK/step.out" 2>"$WORK/step.err" || rc=$?
+  fi
+  (( rc == 0 )) || return 1
+  if [[ $phase == card* ]]; then
+    for arg in "${args[@]}"; do
+      if [[ $arg == --change-pin ]]; then PINS_SET[${phase#card}]=1; fi
+    done
+  fi
+  run_check "$check"
+}
+
+run_check() {
+  local got want
+  case $1 in
+    cardstatus)
+      want="${TARGET[s]^^}:${TARGET[e]^^}:${TARGET[a]^^}"
+      got=$(awk -F: '$1 == "fpr" {print toupper($2) ":" toupper($3) ":" toupper($4); exit}' "$WORK/step.out")
+      if [[ $got != "$want" ]]; then
+        CURRENT_STEP="card fingerprints"
+        printf 'card has %s, expected %s\n' "${got:-nothing}" "$want" >"$WORK/step.err"
+        return 1
+      fi ;;
+    roundtrip)
+      if ! cmp -s "$VERIFYHOME/test.out" "$VERIFYHOME/test.txt"; then
+        CURRENT_STEP="decrypt round-trip"
+        printf 'decrypted text differs from the original\n' >"$WORK/step.err"
+        return 1
+      fi ;;
+  esac
+}
+
+describe_key() {
+  local i mark expires targets=" ${TARGET[s]} ${TARGET[e]} ${TARGET[a]} "
+  info "Key $KEY_FP"
+  for i in "${!UIDS[@]}"; do info "  uid ${UIDS[i]}"; done
+  for i in "${!SUB_FPR[@]}"; do
+    mark=""
+    if [[ $targets == *" ${SUB_FPR[i]} "* ]]; then mark=" <- card"; fi
+    expires=never
+    if (( SUB_EXPIRES[i] > 0 )); then expires=$(date -d "@${SUB_EXPIRES[i]}" +%F); fi
+    info "  [${SUB_USAGE[i]^^}] ${SUB_ALGO[i]} ${SUB_FPR[i]} expires $expires$mark"
+  done
+}
+
+check_passphrase() { # check_passphrase PASS → status
+  local what=--export-secret-keys rc=0
+  (( HAS_SECRET )) || what=--export-secret-subkeys
+  GNUPGHOME=$STAGING gpg --batch --pinentry-mode loopback --passphrase-fd 0 --armor --yes --output /dev/null \
+    "$what" "$KEY_FP" >/dev/null 2>&1 < <(printf '%s\n' "$1") || rc=$?
+  kill_agents "$STAGING"
+  return "$rc"
+}
+
+unlock() {
+  local try
+  for try in 1 2 3; do
+    ask_secret "Certify key passphrase:" CERTIFY_PASS
+    if check_passphrase "$CERTIFY_PASS"; then return 0; fi
+    warn "wrong passphrase"
+  done
+  die "$EXIT_BACKUP" "wrong passphrase three times"
+}
+
+generate_pins() { # sets PAIR_ADMIN and PAIR_USER (the guide's method)
+  local digits
+  digits=$(LC_ALL=C tr -dc '0-9' </dev/urandom | head -c 14 || true)
+  PAIR_ADMIN=${digits:0:8}
+  PAIR_USER=${digits:8:6}
+}
+
+random_login() { printf 'yk.%s' "$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 16 || true)"; }
+
+ask_pin() { # ask_pin LABEL MIN VAR
+  local first second
+  while true; do
+    ask_secret "$1:" first
+    if (( ${#first} < $2 || ${#first} > 127 )); then warn "must be $2 to 127 characters"; continue; fi
+    ask_secret "Repeat $1:" second
+    if [[ $first != "$second" ]]; then warn "entries differ"; continue; fi
+    printf -v "$3" '%s' "$first"
+    return 0
+  done
+}
+
+declare -A ADMIN_PINS=() USER_PINS=() LOGINS=() SERIALS=() STATUS=() DETAIL=() PINS_SET=()
+PINS_SHOWN=0
+PAIR_ADMIN="" PAIR_USER="" SERIAL="" SURNAME="" GIVEN=""
+
+assign_pins() {
+  local i label have=0
+  for ((i = 1; i <= CARDS; i++)); do
+    if ! (( SAME_PINS && have )); then
+      if [[ $PINS == generate ]]; then
+        generate_pins
+      else
+        label="card $i"
+        if (( SAME_PINS )); then label="all cards"; fi
+        ask_pin "Admin PIN ($label)" 8 PAIR_ADMIN
+        ask_pin "User PIN ($label)" 6 PAIR_USER
+      fi
+      have=1
+    fi
+    ADMIN_PINS[$i]=$PAIR_ADMIN
+    USER_PINS[$i]=$PAIR_USER
+    LOGINS[$i]=${LOGIN:-$(random_login)}
+  done
+}
+
+split_name() { # sets SURNAME and GIVEN
+  local -a parts
+  read -r -a parts <<<"$1"
+  SURNAME="" GIVEN=""
+  if (( ${#parts[@]} )); then
+    SURNAME=${parts[-1]}
+    GIVEN="${parts[*]:0:${#parts[@]}-1}"
+  fi
+}
+
+wait_for_card() { # wait_for_card INDEX DONE_LIST → SERIAL
+  local answer serials=()
+  while true; do
+    read_line "Insert card $1 of $CARDS and press Enter" answer
+    mapfile -t serials < <(ykman list --serials 2>/dev/null | grep -E '^[0-9]+$' || true)
+    if (( ${#serials[@]} != 1 )); then
+      warn "expected exactly one YubiKey, found ${#serials[@]}"
+    elif [[ $2 == *" ${serials[0]} "* ]]; then
+      warn "card ${serials[0]} was already written in this session"
+    else
+      SERIAL=${serials[0]}
+      return 0
+    fi
+  done
+}
+
+confirm_reset() {
+  local answer
+  read_line "Type RESET $1 to erase card $1:" answer
+  [[ $answer == "RESET $1" ]]
+}
+
+read_choice() { # read_choice VAR → retry | skip | abort
+  local answer
+  while true; do
+    read_line "[r]etry, [s]kip or [a]bort?" answer
+    case ${answer,,} in
+      r*) printf -v "$1" retry; return 0 ;;
+      s*) printf -v "$1" skip; return 0 ;;
+      a*) printf -v "$1" abort; return 0 ;;
+    esac
+  done
+}
+
+write_card() { # write_card INDEX → status; runs with errexit suspended, so every step checks itself
+  local i=$1 rc=0
+  clone_home "$STAGING" card CARDHOME || return 1
+  new_home verify VERIFYHOME || return 1
+  printf '%s\n' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >"$VERIFYHOME/test.txt"
+  split_name "$NAME"
+  TOKENS["<SERIAL$i>"]=${SERIALS[$i]}
+  TOKENS['<ADMIN_PIN>']=${ADMIN_PINS[$i]}
+  TOKENS['<USER_PIN>']=${USER_PINS[$i]}
+  TOKENS['<LOGIN>']=${LOGINS[$i]}
+  TOKENS['<SURNAME>']=$SURNAME
+  TOKENS['<GIVEN>']=$GIVEN
+  TOKENS['<URL>']=$URL
+  TOKENS['<CARDHOME>']=$CARDHOME
+  TOKENS['<VERIFYHOME>']=$VERIFYHOME
+  { card_steps "$i" && verify_steps "$i"; } || rc=1
+  destroy_home "$CARDHOME"
+  destroy_home "$VERIFYHOME"
+  return "$rc"
+}
+
+write_cards() {
+  local i choice done_list=" "
+  gpgconf --kill scdaemon >/dev/null 2>&1 || true # release the card from the user's own scdaemon
+  for ((i = 1; i <= CARDS; i++)); do
+    wait_for_card "$i" "$done_list"
+    SERIALS[$i]=$SERIAL
+    done_list+="$SERIAL "
+    if ! confirm_reset "$SERIAL"; then
+      STATUS[$i]=SKIPPED
+      DETAIL[$i]="reset not confirmed"
+      continue
+    fi
+    while true; do
+      if write_card "$i"; then
+        STATUS[$i]=OK
+        DETAIL[$i]=""
+        info "[card $i] $SERIAL: OK"
+        break
+      fi
+      warn "card $SERIAL failed at: $CURRENT_STEP"
+      tail -c 2000 "$WORK/step.err" >&2 || true
+      read_choice choice
+      if [[ $choice == retry ]]; then continue; fi
+      STATUS[$i]=FAILED
+      DETAIL[$i]=$CURRENT_STEP
+      if [[ -n ${PINS_SET[$i]:-} ]]; then DETAIL[$i]+=" (PINs were changed; see PINs shown)"; fi
+      if [[ $choice == abort ]]; then die "$EXIT_INTERRUPT" "aborted"; fi
+      break
+    done
+  done
+}
+
+reveal_pins() { # prints once, on every exit path (called from cleanup)
+  local i
+  (( ${#PINS_SET[@]} )) || return 0
+  if (( PINS_SHOWN )); then return 0; fi
+  PINS_SHOWN=1
+  for ((i = 1; i <= CARDS; i++)); do
+    if [[ -n ${PINS_SET[$i]:-} ]]; then
+      printf 'Card %s: Admin PIN %s  User PIN %s\n' "${SERIALS[$i]}" "${ADMIN_PINS[$i]}" "${USER_PINS[$i]}" >&2
+    fi
+  done
+}
+
+finish() {
+  local i all_ok=1 public
+  finish_steps || warn "export failed: $CURRENT_STEP"
+  info "Summary:"
+  for ((i = 1; i <= CARDS; i++)); do
+    info "card $i ${SERIALS[$i]:--} ${STATUS[$i]:-pending} ${DETAIL[$i]:-}"
+    if [[ ${STATUS[$i]:-} != OK ]]; then all_ok=0; fi
+  done
+  public="$OUT/public-$KEY_ID-$(date +%F).asc"
+  info "On your daily machine run: recoverCard.sh update-stubs --import $public --cards $CARDS"
+  if (( all_ok )); then return "$EXIT_OK"; fi
+  return "$EXIT_CARD"
+}
+
+run_live() {
+  local rc=0
+  describe_key
+  unlock
+  if ! (( YES )) && ! confirm "Write subkeys of $KEY_FP to $CARDS card(s)?"; then exit "$EXIT_INTERRUPT"; fi
+  mkdir -p -m 700 -- "$OUT"
+  TOKENS=(['<CERTIFY_PASS>']=$CERTIFY_PASS ['<OUT>']=$OUT ['<DATE>']=$(date +%F)
+    ['<DEFAULT_ADMIN_PIN>']=$DEFAULT_ADMIN_PIN ['<DEFAULT_USER_PIN>']=$DEFAULT_USER_PIN ['<STAGING>']=$STAGING)
+  if ! { mode_steps && backup_steps; }; then
+    die "$EXIT_BACKUP" "$MODE failed: $CURRENT_STEP: $(tail -c 2000 "$WORK/step.err")"
+  fi
+  if [[ $MODE != clone ]]; then
+    load_bundle "$STAGING"
+    select_targets
+    kill_agents "$STAGING"
+    until confirm "New backup written to $OUT. Saved it to offline storage?"; do
+      warn "copy the new backup before writing cards"
+    done
+  fi
+  assign_pins
+  write_cards
+  finish || rc=$?
+  exit "$rc"
 }
 
 main "$@"

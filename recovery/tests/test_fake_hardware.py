@@ -129,5 +129,9 @@ class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "python"
 
 
+class BashFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
+    IMPL = "bash"
+
+
 if __name__ == "__main__":
     unittest.main()
