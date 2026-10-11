@@ -247,9 +247,8 @@
                 echo "\$GNUPGHOME is \"$GNUPGHOME\""
               '';
 
-              # Copy the contents of contrib to the home directory, add a
-              # shortcut to the guide on the desktop, and link to the whole
-              # repo in the documents folder.
+              # Add a shortcut to the guide on the desktop, and link to the
+              # whole repo in the documents folder.
               system.activationScripts.yubikeyGuide = let
                 homeDir = "/home/nixos/";
                 desktopDir = homeDir + "Desktop/";
@@ -258,7 +257,6 @@
                 mkdir -p ${desktopDir} ${documentsDir}
                 chown nixos ${homeDir} ${desktopDir} ${documentsDir}
 
-                cp -R ${self}/contrib/* ${homeDir}
                 ln -sf ${yubikeyGuide}/share/applications/yubikey-guide.desktop ${desktopDir}
                 ln -sf ${dicewareWebApp}/share/applications/${dicewareWebApp.name} ${desktopDir}
                 ln -sfT ${self} ${documentsDir}/YubiKey-Guide

@@ -45,7 +45,8 @@ get_key_type_auth() { # Returns authentication subkey type.
 }
 
 get_key_expiration() { # Returns key expiration date (2 years).
-  date "-v+2y" "+%F"
+  date -d "+2 years" "+%F" 2>/dev/null || # GNU
+    date "-v+2y" "+%F" # BSD/macOS
 }
 
 preflight() { # Fail if GnuPG is not available.
