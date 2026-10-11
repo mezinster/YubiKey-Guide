@@ -203,3 +203,19 @@ CI (`.github/workflows/lint.yml`, extended): `pytest`, `bats`, `shellcheck --sev
 
 - `recovery/README.md`: purpose, safety warnings, LiveCD and regular-Linux usage, CLI reference, manual hardware checklist.
 - Main `README.md`: one short pointer in the "Using multiple YubiKeys" or "Reset YubiKey" area linking to `recovery/README.md`, with the ToC kept in sync.
+
+## Decisions made during planning
+
+Verified against gpg 2.4.4 with throwaway keys, no card attached:
+
+- **No TTY:** `gpg --edit-key/--edit-card/--change-pin` open `/dev/tty` unless `--batch` is given. Every scripted gpg session uses `--batch --command-fd 0 --pinentry-mode loopback` (the GUI has no TTY).
+- **Deterministic prompts:** gpg-agent caches passphrases (this repo's `gpg-agent.conf`: 60 s) and scdaemon keeps the card verified, so a cached prompt would shift every following stdin line. Every scripted session and every `ykman` call is preceded by `gpgconf --kill all` in the home it uses. This also releases the card for `ykman`.
+- **Subkey selection** uses `key <fingerprint>` (verified), not list indexes.
+- **Revocation script:** `key <fpr>`, `revkey`, `y`, `0`, empty line, `y`, passphrase, `save` (verified prompt order).
+- **Short home paths:** gpg-agent sockets fail on long paths, so homes live under `$XDG_RUNTIME_DIR` only if that path is ≤ 60 characters, else `/tmp`.
+- **Key attributes:** set implicitly by `keytocard`, as the guide's own transfer does, and proven by the card fingerprint check. No explicit `key-attr` session, whose prompts vary by gpg version.
+- **ykman Admin PIN:** passed with `-a`, the spec's documented fallback. ykman's hidden prompt reads `/dev/tty`, so stdin cannot carry it.
+- **SSH check:** the auth slot fingerprint must match the auth subkey; the SSH public key is exported in the finish phase.
+- **Tests:** stdlib `unittest` instead of pytest/bats, so tests run on the air-gapped LiveCD with no installs. Both implementations are driven as subprocesses by the same test classes.
+- **Output folder** must not already contain `secret-*.key` files, so an earlier new backup is never overwritten.
+- Staging homes do not receive `config/gpg.conf`, which keeps output formats stable.
