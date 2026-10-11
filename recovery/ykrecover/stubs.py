@@ -74,12 +74,16 @@ def update_stubs(ui, import_file=None, remove_serials=(), cards=1) -> int:
             ui.wait_for_card(index, cards)
             learn = subprocess.run(["gpg-connect-agent", "scd serialno", "learn --force", "/bye"],
                                    capture_output=True, text=True, check=False)
-            if learn.returncode != 0:
-                ui.warn(f"learn failed for card {index}: {learn.stderr.strip()}")
+            # gpg-connect-agent exits 0 even when a command answers ERR, so read its output too.
+            errors = [line for line in learn.stdout.splitlines() if line.startswith("ERR")]
+            if learn.returncode != 0 or errors:
+                detail = errors[0] if errors else learn.stderr.strip()
+                ui.warn(f"learn failed for card {index}: {detail}")
                 exit_code = EXIT_CARD
             status = subprocess.run(["gpg", "--batch", "--card-status"], capture_output=True, text=True, check=False)
             if status.returncode != 0:
-                ui.warn(status.stderr.strip())
+                ui.warn(f"card status failed for card {index}: {status.stderr.strip()}")
+                exit_code = EXIT_CARD
             else:
                 ui.info(status.stdout.strip())
         return exit_code

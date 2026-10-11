@@ -821,6 +821,7 @@ run_live() {
 
 update_stubs() {
   local import="" cards=1 home=${GNUPGHOME:-$HOME/.gnupg} serial padded f dest i answer t rc=$EXIT_OK
+  local learned err learn_rc=0
   local -a serials=() stubs=() moved=() left=()
   while (( $# )); do
     case $1 in
@@ -869,11 +870,18 @@ update_stubs() {
   done
   for ((i = 1; i <= cards; i++)); do
     read_line "Insert card $i of $cards and press Enter" answer
-    if ! gpg-connect-agent "scd serialno" "learn --force" /bye >/dev/null; then
-      warn "learn failed for card $i"
+    # gpg-connect-agent exits 0 even when a command answers ERR, so read its output too.
+    learned=$(gpg-connect-agent "scd serialno" "learn --force" /bye) || learn_rc=$?
+    err=$(grep -m 1 '^ERR' <<<"$learned" || true)
+    if (( learn_rc )) || [[ -n $err ]]; then
+      warn "learn failed for card $i: ${err:-exit status $learn_rc}"
       rc=$EXIT_CARD
     fi
-    gpg --batch --card-status >&2 || warn "card status failed for card $i"
+    learn_rc=0
+    if ! gpg --batch --card-status >&2; then
+      warn "card status failed for card $i"
+      rc=$EXIT_CARD
+    fi
   done
   exit "$rc"
 }

@@ -57,7 +57,15 @@ class StubsTests:
 
     def test_learn_failure_exits_3(self):
         self.env = {**fake_hardware(self, ["44444444"], fail_at="learn"), "GNUPGHOME": str(self.home)}
-        self.assertEqual(self.run_stubs([], "\n").returncode, 3)
+        result = self.run_stubs([], "\n")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ERR 67108983 No SmartCard daemon", result.stderr)
+
+    def test_card_status_failure_exits_3(self):
+        self.env = {**fake_hardware(self, ["44444444"], fail_at="card-status"), "GNUPGHOME": str(self.home)}
+        result = self.run_stubs([], "\n")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("card status failed for card 1", result.stderr)
 
     def test_import_public_key(self):
         info = fixture_info("ed25519")

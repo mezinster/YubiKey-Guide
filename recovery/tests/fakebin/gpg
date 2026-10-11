@@ -37,6 +37,7 @@ def current_card():
 def main():
     if "--card-status" in ARGS:
         log("card-status")
+        maybe_fail("card-status")
         serial, _, data = current_card()
         print(f"serial:{serial}:")
         print("fpr:" + ":".join(data["fpr"]) + ":")
