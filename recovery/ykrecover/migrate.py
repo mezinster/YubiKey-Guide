@@ -12,7 +12,7 @@ from pathlib import Path
 from . import EXIT_BACKUP, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
 from . import backup, card, modes
 from .gpg import Home, base_is_tmpfs, gpg_version, runtime_base
-from .plan import format_plan
+from .plan import STAGING, format_plan, public_tokens, substitute
 
 
 @dataclass
@@ -161,6 +161,37 @@ class Session:
     def card_plan(self, index: int, targets: dict) -> list:
         fp = self.bundle.key_fp
         return card.card_steps(index, fp, targets, self._settings()) + card.verify_steps(index, fp, targets)
+
+    def _tokens(self) -> dict:
+        return {
+            "<CERTIFY_PASS>": self.passphrase,
+            "<OUT>": str(self.opts.out),
+            "<DATE>": datetime.date.today().isoformat(),
+            "<DEFAULT_ADMIN_PIN>": card.DEFAULT_ADMIN_PIN,
+            "<DEFAULT_USER_PIN>": card.DEFAULT_USER_PIN,
+        }
+
+    def _exec(self, step, homes: dict, tokens: dict) -> str:
+        shown = substitute(" ".join(step.argv), public_tokens(tokens))
+        argv = [substitute(arg, tokens) for arg in step.argv]
+        stdin = [substitute(line, tokens) for line in step.stdin]
+        result = homes[step.home].run(argv, stdin)
+        if result.returncode != 0:
+            raise StepError(shown, result.stderr)
+        return result.stdout
+
+    def apply_mode(self) -> None:
+        tokens, homes = self._tokens(), {STAGING: self.staging}
+        for step in self.staging_steps():
+            try:
+                self._exec(step, homes, tokens)
+            except StepError as err:
+                raise RecoveryError(f"{self.opts.mode} failed: {err}", EXIT_BACKUP) from err
+        if self.opts.mode == "clone":
+            return
+        self.bundle = backup.choose_key(backup.list_bundles(self.staging), self.bundle.key_fp)
+        self.targets = modes.select_targets(self.bundle)
+        self.staging.kill_agents()
 
     def dry_run_text(self) -> str:
         targets = modes.ROTATED if self.opts.mode == "rotate" else self.targets
