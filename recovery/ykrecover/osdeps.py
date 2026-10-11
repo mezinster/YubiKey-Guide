@@ -33,9 +33,16 @@ def _gpg4win_dirs() -> list:
             for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")) if base]
 
 
-def _which(name: str):
-    """Windows PATH lookup that never considers the current directory (binary planting)."""
-    extensions = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+def _scripts_allowed() -> bool:
+    """Test-only: the Windows test suite runs its fake tools through .cmd shims put first on PATH."""
+    return os.environ.get("YKRECOVER_TEST_ALLOW_SCRIPTS") == "1"
+
+
+def _which(name: str, extensions=(".exe",)):
+    """Windows PATH lookup that never considers the current directory (binary planting).
+
+    Only .exe files by default: a .bat/.cmd runs through cmd.exe, which mangles quoting (PINs) and lets a
+    planted script on PATH stand in for a tool that is handed secrets."""
     candidates = []
     for ext in extensions:
         candidates.append(name + ext)
@@ -53,25 +60,37 @@ def _which(name: str):
 
 
 def tool(name: str) -> list:
-    """The command line that runs the tool a plan calls `name`."""
+    """The command line that runs the tool a plan calls `name`.
+
+    Windows: the packaged app always runs its bundled ykman; GnuPG comes from the Gpg4win folders under
+    Program Files first, then from a gpg*.exe on PATH."""
     if not is_windows():
         return [name]
-    found = _which(name)
-    if found:
-        return [found]
+    frozen = getattr(sys, "frozen", False)
+    if name == "ykman" and frozen:
+        bundled = Path(sys.executable).with_name("ykrecover.exe")
+        if not bundled.is_file():
+            raise RecoveryError("ykrecover.exe must be next to ykrecover-gui.exe: extract the whole zip",
+                                EXIT_USAGE)
+        return [str(bundled), "--ykman"]
+    if _scripts_allowed():
+        pathext = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+        found = _which(name, pathext)
+        if found:
+            return [found]
     if name in GNUPG_TOOLS:
         for folder in _gpg4win_dirs():
             exe = folder / f"{name}.exe"
             if exe.is_file():
                 return [str(exe)]
+        found = _which(name)
+        if found:
+            return [found]
         raise RecoveryError(f"{name} not found: install Gpg4win (https://gpg4win.org)", EXIT_USAGE)
+    found = _which(name)
+    if found:
+        return [found]
     if name == "ykman":
-        if getattr(sys, "frozen", False):
-            bundled = Path(sys.executable).with_name("ykrecover.exe")
-            if not bundled.is_file():
-                raise RecoveryError("ykrecover.exe must be next to ykrecover-gui.exe: extract the whole zip",
-                                    EXIT_USAGE)
-            return [str(bundled), "--ykman"]
         return [sys.executable, "-c", YKMAN_SHIM]
     raise RecoveryError(f"{name} not found", EXIT_USAGE)
 

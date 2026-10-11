@@ -64,6 +64,7 @@ Notes:
 
 - Windows has no memory-backed temporary folder, so key copies touch the disk while the tool runs, and the tool warns about it. To avoid that, choose a RAM disk or an encrypted volume as the work folder (`--workdir DIR`, or "Work folder" in the wizard).
 - If a run ends abnormally (console window closed, process ended in Task Manager, a crash), its temporary folders (`ykr-*` in the work folder) can stay behind, not overwritten. The next run warns about any older than 10 minutes; delete them securely.
+- The packaged tool always runs its bundled ykman, and takes GnuPG from the Gpg4win folder under Program Files (`GnuPG\bin`) before a `gpg.exe` on PATH. Only `.exe` files are run: a `ykman.cmd` or `gpg.bat` on PATH is ignored, so a planted script cannot receive the PINs.
 - Run the [hardware checklist](#hardware-checklist) on Windows too: card access works differently there.
 
 ## Modes

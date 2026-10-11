@@ -33,10 +33,22 @@ class ToolTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env), mock.patch.object(osdeps, "_which", return_value=None):
             self.assertEqual(osdeps.tool("gpgconf"), [str(exe)])
 
-    def test_windows_prefers_path(self):
+    def test_windows_prefers_gpg4win_over_path(self):
         win(self)
-        with mock.patch.object(osdeps, "_which", return_value=r"C:\bin\gpg.exe"):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        (root / "GnuPG" / "bin").mkdir(parents=True)
+        (root / "GnuPG" / "bin" / "gpg.exe").write_text("")
+        with mock.patch.dict(os.environ, {"ProgramFiles(x86)": "", "ProgramFiles": str(root)}), \
+                mock.patch.object(osdeps, "_which", return_value=r"C:\bin\gpg.exe"):
+            self.assertEqual(osdeps.tool("gpg"), [str(root / "GnuPG" / "bin" / "gpg.exe")])
+
+    def test_windows_falls_back_to_gpg_exe_on_path(self):
+        win(self)
+        with mock.patch.dict(os.environ, {"ProgramFiles(x86)": "", "ProgramFiles": ""}), \
+                mock.patch.object(osdeps, "_which", return_value=r"C:\bin\gpg.exe") as which:
             self.assertEqual(osdeps.tool("gpg"), [r"C:\bin\gpg.exe"])
+        which.assert_called_once_with("gpg")
 
     def test_missing_gpg4win_raises_clear_error(self):
         win(self)
@@ -87,16 +99,52 @@ class ToolTests(unittest.TestCase):
                 with self.assertRaises(RecoveryError):
                     osdeps.tool("gpg")
 
-    def test_cmd_in_absolute_path_dir_is_found(self):
-        win(self)
+    def path_dir_with(self, *files) -> Path:
         d = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
-        (d / "gpg.cmd").write_text("")
+        for name in files:
+            (d / name).write_text("")
+        return d
+
+    def test_scripts_on_path_are_rejected_by_default(self):
+        win(self)
+        d = self.path_dir_with("gpg.cmd", "gpgconf.bat", "ykman.cmd", "gpg-connect-agent.cmd")
+        env = {"PATH": str(d), "PATHEXT": ".COM;.EXE;.BAT;.CMD", "ProgramFiles(x86)": "", "ProgramFiles": "",
+               "YKRECOVER_TEST_ALLOW_SCRIPTS": ""}
+        with mock.patch.dict(os.environ, env):
+            for name in osdeps.GNUPG_TOOLS:
+                with self.subTest(name=name), self.assertRaises(RecoveryError):
+                    osdeps.tool(name)
+            self.assertEqual(osdeps.tool("ykman"), [sys.executable, "-c", osdeps.YKMAN_SHIM])
+
+    def test_exe_on_path_is_found(self):
+        win(self)
+        d = self.path_dir_with("ykman.cmd", "ykman.exe")
         with mock.patch.dict(os.environ, {"PATH": "relative" + os.pathsep + str(d),
-                                          "PATHEXT": ".COM;.EXE;.BAT;.CMD"}):
+                                          "PATHEXT": ".COM;.EXE;.BAT;.CMD", "YKRECOVER_TEST_ALLOW_SCRIPTS": ""}):
+            found = osdeps.tool("ykman")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(os.path.normcase(found[0]), os.path.normcase(str(d / "ykman.exe")))
+
+    def test_cmd_in_absolute_path_dir_is_found_with_the_test_override(self):
+        win(self)
+        d = self.path_dir_with("gpg.cmd")
+        with mock.patch.dict(os.environ, {"PATH": "relative" + os.pathsep + str(d),
+                                          "PATHEXT": ".COM;.EXE;.BAT;.CMD", "YKRECOVER_TEST_ALLOW_SCRIPTS": "1"}):
             found = osdeps.tool("gpg")
         self.assertEqual(len(found), 1)
         self.assertEqual(os.path.normcase(found[0]), os.path.normcase(str(d / "gpg.cmd")))
+
+    def test_frozen_app_always_runs_the_bundled_ykman(self):
+        win(self)
+        app = self.path_dir_with("ykrecover.exe")
+        d = self.path_dir_with("ykman.exe", "ykman.cmd")
+        for allow in ("", "1"):
+            with self.subTest(allow=allow), \
+                    mock.patch.dict(os.environ, {"PATH": str(d), "YKRECOVER_TEST_ALLOW_SCRIPTS": allow}), \
+                    mock.patch.object(osdeps.sys, "frozen", True, create=True), \
+                    mock.patch.object(osdeps.sys, "executable", str(app / "ykrecover-gui.exe")):
+                self.assertEqual(osdeps.tool("ykman"), [str(app / "ykrecover.exe"), "--ykman"])
 
     def test_windows_unknown_tool_raises(self):
         win(self)
