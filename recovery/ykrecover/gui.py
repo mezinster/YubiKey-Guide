@@ -149,7 +149,10 @@ class Modal(tk.Toplevel):
         y = max(0, min(y, self.winfo_screenheight() - height))
         self.geometry(f"+{x}+{y}")
         self.deiconify()
-        self.wait_visibility()
+        try:
+            self.wait_visibility()
+        except tk.TclError:  # destroyed before it was shown: the main window closed for a signal
+            return self.value
         self.grab_set()
         self.focus_widget.focus_set()
         self.wait_window()
@@ -327,6 +330,7 @@ class App:
         self.failures = 0
         self.pins = []  # kept PINs not yet shown
         self.pins_shown = False
+        self.showing_pins = False  # the PIN dialog is up: a termination signal waits for it
         self.terminate_requested = False
         self.worker = None
         self.table = None
@@ -371,6 +375,8 @@ class App:
         reschedule = True
         try:
             if self.terminate_requested:
+                if self.showing_pins:  # quit once they are confirmed, not under the dialog
+                    return
                 self.terminate()
                 reschedule = False  # the window is destroyed: a new "after" would outlive it
                 return
@@ -599,13 +605,15 @@ class App:
         new.validate_workdir()  # adopted: temporary homes now go to its work folder
         if workdir is not None:
             self.warn_leftovers()
+            if not self.alive():  # closed for a signal under the dialog
+                return False
         while True:
             try:
                 self.session.load()
                 break
             except backup_mod.AmbiguousKey as err:
                 chosen = self.choose_key(err.bundles)
-                if chosen is None:
+                if chosen is None or not self.alive():
                     return False
                 self.session.opts.key = err.bundles[chosen].key_fp
             except RecoveryError as err:
@@ -799,11 +807,22 @@ class App:
         if not self.pins:
             return
         pins, self.pins = self.pins, []  # cleared first: a nested call cannot open a second dialog
-        self.pins_dialog(pins).run()
+        self.showing_pins = True
+        try:
+            self.pins_dialog(pins).run()
+        finally:
+            self.showing_pins = False
         self.pins_shown = True
         btn = getattr(self, "pin_btn", None)
         if btn is not None and btn.winfo_exists():
             btn.state(["disabled"])
+
+    def alive(self):
+        """Whether the main window still exists (terminate() may destroy it under a dialog)."""
+        try:
+            return bool(self.root.winfo_exists())
+        except tk.TclError:  # the Tcl interpreter is gone too
+            return False
 
     def dialog_up(self):
         """Whether a dialog holds the grab: one of ours, or one of Tk's own message boxes, which
