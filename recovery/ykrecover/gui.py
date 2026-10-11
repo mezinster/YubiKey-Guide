@@ -780,14 +780,17 @@ class App:
         """Shows the kept PINs once in a modal dialog; nothing happens when there are none."""
         if not self.pins:
             return
-        self.pins_dialog(self.pins).run()
-        self.pins = []
+        pins, self.pins = self.pins, []  # cleared first: a nested call cannot open a second dialog
+        self.pins_dialog(pins).run()
         self.pins_shown = True
         btn = getattr(self, "pin_btn", None)
         if btn is not None and btn.winfo_exists():
             btn.state(["disabled"])
 
     def close(self):
+        if self.root.grab_current() is not None:  # a dialog is up (the WM close button bypasses its grab)
+            self.root.bell()
+            return
         busy = self.worker is not None and self.worker.is_alive()
         if busy:
             messagebox.showinfo(TITLE, "Card writing is in progress. Finish it, or choose Cancel at the next "

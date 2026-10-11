@@ -31,6 +31,27 @@ class GuiAvailable(unittest.TestCase):
         self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
 
 
+def when_dialog_up(root, action):
+    """Calls action(dialog) from the event loop once a modal dialog holds the grab."""
+    def check():
+        dialog = root.grab_current()
+        if dialog is None:
+            root.after(20, check)
+        else:
+            root.after(3000, unblock)
+            action(dialog)
+
+    def unblock():  # a failing test must not hang in a dialog nobody answers
+        try:
+            for widget in root.winfo_children():
+                if isinstance(widget, tk.Toplevel):
+                    widget.destroy()
+        except tk.TclError:  # the root is gone
+            pass
+
+    root.after(20, check)
+
+
 @SKIP_GUI
 class GuiSmokeTests(unittest.TestCase):
     def test_work_folder_is_applied_before_loading(self):
@@ -188,6 +209,55 @@ class GuiSmokeTests(unittest.TestCase):
             app.close()
         self.assertEqual(shown.call_count, 1)
         self.assertIn("User PIN 123456", shown.call_args.args[0].text_content)
+
+    def test_close_is_refused_while_a_dialog_is_up(self):
+        """The window manager's close button is not blocked by a grab: leave_backup() must not go on
+        loading the key after the window was closed under the leftover warning."""
+        from ykrecover.migrate import Session
+        from tests.helpers import FIXTURES, short_tempdir
+        from ykrecover import osdeps
+        app = self.app_with_pins()
+        app.pins = []
+        self.addCleanup(osdeps.set_workdir, None)
+        workdir = short_tempdir(self, "wd")
+        leftover = workdir / "ykr-staging-old"
+        leftover.mkdir()
+        os.utime(leftover, (1, 1))
+        app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
+        app.v["workdir"].set(str(workdir))
+        app.show(1)
+        app.root.update()
+        seen = []
+
+        def close_then_answer(dialog):
+            app.root.tk.call(app.root.protocol("WM_DELETE_WINDOW"))
+            seen.append((dialog.title(), app.root.winfo_exists(), dialog.winfo_exists()))
+            dialog.done(None)
+
+        when_dialog_up(app.root, close_then_answer)
+        with mock.patch.object(Session, "load") as load, mock.patch.object(Session, "unlock", return_value=True):
+            self.assertTrue(app.leave_backup())
+        self.assertEqual(seen, [("Work folder", 1, 1)])
+        load.assert_called_once()
+        self.assertTrue(app.root.winfo_exists())
+
+    def test_close_under_the_pin_dialog_does_not_nest_a_second_one(self):
+        from ykrecover.gui import TextDialog
+        app = self.app_with_pins()
+        seen = []
+
+        def close_then_confirm(dialog):
+            app.close()  # refused: the dialog holds the grab
+            app.reveal_pins()  # re-entrant call: nothing left to show
+            seen.append(sum(isinstance(w, TextDialog) for w in app.root.winfo_children()))
+            dialog.done(True)
+
+        when_dialog_up(app.root, close_then_confirm)
+        app.reveal_pins()
+        self.assertEqual(seen, [1])
+        self.assertEqual(app.pins, [])
+        self.assertTrue(app.pins_shown)
+        self.assertTrue(app.root.winfo_exists())
 
     def test_termination_signal_reveals_pins_and_closes(self):
         app = self.app_with_pins()
