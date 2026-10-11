@@ -3183,11 +3183,13 @@ parse_args() {
 
 validate_options() {
   local out src r
-  [[ $CARDS =~ ^[0-9]+$ ]] && (( CARDS >= 1 )) || die "$EXIT_USAGE" "--cards must be 1 or more"
-  [[ $RETRIES =~ ^[0-9]{1,2},[0-9]{1,2},[0-9]{1,2}$ ]] || die "$EXIT_USAGE" "--retries expects U,R,A such as 5,5,5"
+  [[ $CARDS =~ ^[0-9]{1,4}$ ]] || die "$EXIT_USAGE" "--cards must be 1 or more"
+  CARDS=$((10#$CARDS))
+  (( CARDS >= 1 )) || die "$EXIT_USAGE" "--cards must be 1 or more"
+  [[ $RETRIES =~ ^[0-9]+,[0-9]+,[0-9]+$ ]] || die "$EXIT_USAGE" "--retries expects U,R,A such as 5,5,5"
   IFS=, read -r -a RETRY <<<"$RETRIES"
   for r in "${RETRY[@]}"; do
-    (( 10#$r >= 1 )) || die "$EXIT_USAGE" "retries must be three numbers from 1 to 99"
+    (( ${#r} <= 4 )) && (( 10#$r >= 1 && 10#$r <= 99 )) || die "$EXIT_USAGE" "retries must be three numbers from 1 to 99"
   done
   if [[ -n $ALGO || $REVOKE_OLD == 1 ]] && [[ $MODE != rotate ]]; then
     die "$EXIT_USAGE" "--algo and --revoke-old need --mode rotate"

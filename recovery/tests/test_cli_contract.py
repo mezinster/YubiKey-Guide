@@ -22,6 +22,14 @@ class ContractTests:
         self.assertEqual(self.cli("--backup", ED_EXPORT, "--retries", "0,5,5", "--dry-run").returncode, 1)
         self.assertEqual(self.cli("--backup", ED_EXPORT, "--cards", "0", "--dry-run").returncode, 1)
 
+    def test_leading_zero_numbers_are_decimal(self):
+        r = self.cli("--backup", ED_EXPORT, "--cards", "010", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(" card10 ", r.stdout)
+        self.assertNotIn(" card11 ", r.stdout)
+        self.assertEqual(self.cli("--backup", ED_EXPORT, "--cards", "08", "--dry-run").returncode, 0)
+        self.assertEqual(self.cli("--backup", ED_EXPORT, "--retries", "005,5,5", "--dry-run").returncode, 0)
+
     def test_algo_requires_rotate(self):
         self.assertEqual(self.cli("--backup", ED_EXPORT, "--algo", "ed25519", "--dry-run").returncode, 1)
 
