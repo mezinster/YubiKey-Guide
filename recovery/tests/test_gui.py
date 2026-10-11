@@ -253,6 +253,31 @@ class GuiSmokeTests(unittest.TestCase):
         load.assert_called_once()
         self.assertTrue(app.root.winfo_exists())
 
+    def test_close_is_refused_under_a_message_box(self):
+        """Tk's own message boxes (the card prompt, alerts) hold the grab under a name tkinter cannot map."""
+        from tkinter import messagebox
+        app = self.app_with_pins()
+        app.root.update()
+        if app.root.tk.call("tk", "windowingsystem") != "x11":
+            self.skipTest("native message boxes disable the window instead of taking a Tk grab")
+        errors = []
+        app.root.report_callback_exception = lambda *args: errors.append(args[1])
+        app.worker = SimpleNamespace(is_alive=lambda: True)  # card writing in progress
+        app.session = SimpleNamespace(cleanup=mock.Mock())
+        seen = []
+
+        def close_then_dismiss(name):
+            with mock.patch("ykrecover.gui.messagebox.showinfo") as notice:
+                app.root.tk.call(app.root.protocol("WM_DELETE_WINDOW"))
+            seen.append((name, notice.call_count, app.root.winfo_exists()))
+            app.root.tk.call("destroy", name)
+
+        when_dialog_up(app.root, close_then_dismiss)
+        messagebox.askokcancel("Insert card", "Insert card 1 of 2.", parent=app.root)  # as wait_for_card does
+        self.assertEqual(errors, [])
+        self.assertEqual(seen, [(".__tk__messagebox", 0, 1)])
+        app.session.cleanup.assert_not_called()
+
     def test_close_under_the_pin_dialog_does_not_nest_a_second_one(self):
         from ykrecover.gui import TextDialog
         app = self.app_with_pins()

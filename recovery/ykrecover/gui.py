@@ -805,8 +805,13 @@ class App:
         if btn is not None and btn.winfo_exists():
             btn.state(["disabled"])
 
+    def dialog_up(self):
+        """Whether a dialog holds the grab: one of ours, or one of Tk's own message boxes, which
+        tkinter's grab_current() cannot map to a widget (it raises KeyError for them)."""
+        return bool(str(self.root.tk.call("grab", "current", self.root._w)))
+
     def close(self):
-        if self.root.grab_current() is not None:  # a dialog is up (the WM close button bypasses its grab)
+        if self.dialog_up():  # the window manager's close button bypasses the grab
             self.root.bell()
             return
         busy = self.worker is not None and self.worker.is_alive()
