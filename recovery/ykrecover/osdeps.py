@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 from . import EXIT_USAGE, RecoveryError
@@ -156,6 +157,13 @@ def network_up() -> list:
 
 
 def user_gnupg_home() -> Path:
+    """The daily keyring: gpgconf knows it (GNUPGHOME, or Gpg4win's registry setting); else the default."""
+    try:
+        listed = run(["gpgconf", "--list-dirs", "homedir"])
+        if listed.returncode == 0 and listed.stdout.strip():
+            return Path(urllib.parse.unquote(listed.stdout.strip()))  # gpgconf percent-escapes, e.g. C%3a
+    except (OSError, RecoveryError):
+        pass
     if os.environ.get("GNUPGHOME"):
         return Path(os.environ["GNUPGHOME"])
     if is_windows():

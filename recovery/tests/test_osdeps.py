@@ -137,7 +137,27 @@ class WorkBaseTests(unittest.TestCase):
 
 
 class HomeAndRunTests(unittest.TestCase):
-    def test_user_gnupg_home(self):
+    def test_user_gnupg_home_asks_gpgconf(self):
+        listed = osdeps.subprocess.CompletedProcess([], 0, "C%3a\\Users\\me\\gnupg\n", "")
+        with mock.patch.object(osdeps, "run", return_value=listed) as run:
+            self.assertEqual(osdeps.user_gnupg_home(), Path("C:\\Users\\me\\gnupg"))
+        run.assert_called_once_with(["gpgconf", "--list-dirs", "homedir"])
+
+    def test_user_gnupg_home_honours_gnupghome_through_gpgconf(self):
+        if osdeps.is_windows() or not __import__("shutil").which("gpgconf"):
+            self.skipTest("needs gpgconf on Linux")
+        with mock.patch.dict(os.environ, {"GNUPGHOME": "/x/gnupg"}):
+            self.assertEqual(osdeps.user_gnupg_home(), Path("/x/gnupg"))
+
+    def test_user_gnupg_home_without_gpgconf(self):
+        failed = osdeps.subprocess.CompletedProcess([], 2, "", "")
+        for outcome in ({"return_value": failed}, {"side_effect": FileNotFoundError("gpgconf")},
+                        {"side_effect": RecoveryError("gpgconf not found", EXIT_USAGE)}):
+            with self.subTest(**{k: repr(v) for k, v in outcome.items()}), \
+                    mock.patch.object(osdeps, "run", **outcome):
+                self.check_fallback_home()
+
+    def check_fallback_home(self):
         with mock.patch.dict(os.environ, {"GNUPGHOME": "/x/gnupg"}):
             self.assertEqual(osdeps.user_gnupg_home(), Path("/x/gnupg"))
         env = {k: v for k, v in os.environ.items() if k != "GNUPGHOME"}
