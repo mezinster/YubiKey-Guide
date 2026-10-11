@@ -817,4 +817,65 @@ run_live() {
   exit "$rc"
 }
 
+# --- update-stubs: the only part that touches the user's own GNUPGHOME
+
+update_stubs() {
+  local import="" cards=1 home=${GNUPGHOME:-$HOME/.gnupg} serial padded f dest i answer t rc=$EXIT_OK
+  local -a serials=() stubs=() moved=() left=()
+  while (( $# )); do
+    case $1 in
+      --import) (( $# >= 2 )) || bad_usage; import=$2; shift ;;
+      --remove-serial) (( $# >= 2 )) || bad_usage; serials+=("$2"); shift ;;
+      --cards) (( $# >= 2 )) || bad_usage; cards=$2; shift ;;
+      -h | --help) usage; exit "$EXIT_OK" ;;
+      *) bad_usage ;;
+    esac
+    shift
+  done
+  [[ $cards =~ ^[0-9]{1,4}$ ]] || die "$EXIT_USAGE" "--cards must be 1 or more"
+  cards=$((10#$cards))
+  (( cards >= 1 )) || die "$EXIT_USAGE" "--cards must be 1 or more"
+  for serial in "${serials[@]}"; do
+    [[ $serial =~ ^[0-9]+$ ]] || die "$EXIT_USAGE" "--remove-serial must be all digits: $serial"
+  done
+  for t in gpg gpg-connect-agent; do command -v "$t" >/dev/null || die "$EXIT_USAGE" "missing tools: $t"; done
+  if [[ -n $import ]]; then
+    gpg --batch --import "$import" 2>/dev/null || die "$EXIT_USAGE" "import failed: $import"
+  fi
+  for serial in "${serials[@]}"; do
+    padded=$(printf '%8s' "$serial" | tr ' ' 0)
+    stubs=()
+    shopt -s nullglob
+    for f in "$home"/private-keys-v1.d/*.key; do
+      if awk -v s="$padded" '$1 == "Token:" && length($2) >= 28 && toupper(substr($2, 21, 8)) == s {found = 1} END {exit !found}' "$f"; then
+        stubs+=("$f")
+      fi
+    done
+    shopt -u nullglob
+    if (( ${#stubs[@]} == 0 )); then info "no stubs reference card $serial"; continue; fi
+    confirm "Move ${#stubs[@]} stub(s) for card $serial out of the keyring?$(printf '\n  %s' "${stubs[@]##*/}")
+" || continue
+    moved=()
+    dest=$(mktemp -d "$home/stub-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX") || die "$EXIT_USAGE" "cannot create a backup directory in $home"
+    for f in "${stubs[@]}"; do
+      if ! mv -- "$f" "$dest/"; then
+        left=()
+        for t in "${stubs[@]}"; do [[ -e $t ]] && left+=("${t##*/}"); done
+        die "$EXIT_USAGE" "moving stubs failed; moved: ${moved[*]:-none}; not moved: ${left[*]}"
+      fi
+      moved+=("${f##*/}")
+    done
+    info "moved to $dest"
+  done
+  for ((i = 1; i <= cards; i++)); do
+    read_line "Insert card $i of $cards and press Enter" answer
+    if ! gpg-connect-agent "scd serialno" "learn --force" /bye >/dev/null; then
+      warn "learn failed for card $i"
+      rc=$EXIT_CARD
+    fi
+    gpg --batch --card-status >&2 || warn "card status failed for card $i"
+  done
+  exit "$rc"
+}
+
 main "$@"

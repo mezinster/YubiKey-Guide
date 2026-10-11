@@ -73,5 +73,9 @@ class PythonStubsTests(StubsTests, unittest.TestCase):
     IMPL = "python"
 
 
+class BashStubsTests(StubsTests, unittest.TestCase):
+    IMPL = "bash"
+
+
 if __name__ == "__main__":
     unittest.main()
