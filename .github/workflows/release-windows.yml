@@ -32,20 +32,27 @@ jobs:
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
           if ($hash -ne $env:GNUPG_SHA256) { throw "GnuPG installer hash mismatch: $hash" }
           Write-Host "Installing GnuPG silently"
-          # Wait for the installer process only: Start-Process -Wait in PowerShell 7 also waits for the
-          # gpg-agent the installer leaves running, which never exits.
           $process = Start-Process -FilePath $installer -ArgumentList "/S" -PassThru
-          if (-not $process.WaitForExit(300000)) { throw "GnuPG installer did not finish within 5 minutes" }
-          if ($process.ExitCode -ne 0) { throw "GnuPG installer failed with exit code $($process.ExitCode)" }
-          $found = $false
-          foreach ($dir in "${env:ProgramFiles(x86)}\GnuPG\bin", "$env:ProgramFiles\GnuPG\bin") {
-            if (Test-Path "$dir\gpg.exe") {
-              $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-              & "$dir\gpg.exe" --version
-              $found = $true
+          # The installer may not exit on a headless runner, so wait for a working gpg instead of for the
+          # process, and log what is still running so a hang is diagnosable.
+          $dirs = "${env:ProgramFiles(x86)}\GnuPG\bin", "$env:ProgramFiles\GnuPG\bin"
+          $bin = $null
+          for ($i = 0; $i -lt 30 -and -not $bin; $i++) {
+            Start-Sleep -Seconds 10
+            foreach ($dir in $dirs) {
+              if ((Test-Path "$dir\gpg.exe") -and (Test-Path "$dir\gpgconf.exe") -and (Test-Path "$dir\gpg-connect-agent.exe")) {
+                & "$dir\gpg.exe" --version | Select-Object -First 1
+                if ($LASTEXITCODE -eq 0) { $bin = $dir; break }
+              }
             }
+            $running = Get-Process | Where-Object { $_.Path -and ($_.Path -like "*GnuPG*" -or $_.Path -eq $installer) } |
+              ForEach-Object { "$($_.Name) ($($_.Id))" }
+            Write-Host "after $(($i + 1) * 10)s: installer exited=$($process.HasExited); running: $($running -join ', ')"
           }
-          if (-not $found) { throw "gpg.exe not found after installing GnuPG" }
+          if (-not $bin) { throw "gpg did not become available within 5 minutes" }
+          if ($process.HasExited -and $process.ExitCode -ne 0) { throw "GnuPG installer failed with exit code $($process.ExitCode)" }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "Using GnuPG from $bin"
 
       - name: install build requirements
         run: python -m pip install -r recovery/packaging/requirements-windows.txt
