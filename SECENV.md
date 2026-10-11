@@ -3,11 +3,13 @@
 Copyright (c) 2025 Matt Borja
 
 ## Abstract
+
 This document describes a process for creating a secure environment for GPG key management using Alpine Linux: a lightweight and secure Linux distribution capable of supporting newer versions of GPG with smart card support on very modest hardware such as the ARM-based Raspberry Pi 1 Model B (32-bit). This document also considers the highly portable nature of Alpine Package Keeper (APK) for ease of dependency installation in air-gapped environments and a tightly coupled process to further assert package integrity as an installation prerequisite within the air-gapped environment.
 
 **Tags.** Tails OS, Alpine Linux, GnuPG, Raspberry Pi.
 
 ## Disclaimer
+
 The procedures outlined in this document are provided as best effort measures for creating a safer working environment for managing GPG keys; and are not intended to eliminate every possible threat scenario including, but not limited to those arising from the presence of: advanced persistent threats, viruses, infected firmware, or other similarly compromised peripherals or protocols used by these procedures. Caution must still be exercised when considering the use, proximity, and direct connection of any “active” or unshielded electronic device.
 
 Furthermore:
@@ -17,19 +19,23 @@ THIS DOCUMENTATION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 ## 1. Prepare a Secure Imaging Host
 
 Preparing a secure environment for GPG normally involves the initial use of an external host system (e.g., Windows, Mac OS, etc.) to create its bootable disk. While this might be satisfactory to many, it is worth considering the risk of host contamination through daily use. Therefore we will consider an *intermediary environment* from which we will then create the bootable disk. One might think of this seemingly superfluous step as merely grabbing a clean plate before putting food on it to eat!
- 
+
 ### 1.1. Use Tails OS as an Intermediary (Recommended)
+
 [Tails OS](https://tails.net/install/expert/index.en.html) provides for a convenient, isolated ephemeral environment, placing special emphasis on proper verification of its USB images before use. Consider booting into a system like this before starting in on these procedures.
 
 As mentioned before, this environment alone may arguably be considered satisfactory for GPG purposes, but it is out of an abundance of caution we are limiting our use of it for verification and imaging purposes only.
 
 ### 1.2. Use the target OS to download packages and gpg.conf
+
 The goal of this section is to have all the necessary assets in hand to avert the need for an Internet connection post-installation towards the end of this guide.
 
 #### 1.2.1. Acquire the target image
+
 If you haven't already, follow the [Tails installation guide](https://tails.net/install/expert/index.en.html) *carefully* to ensure you have [verified](https://tails.net/install/expert/index.en.html#verify-key) and booted into a valid Tails environment before continuing.
 
 Next, import a copy of [Alpine Linux](https://alpinelinux.org/downloads/) by either:
+
 - Connecting Tails to the Internet and using the Tor Browser to download the image
 - Leaving Tails disconnected from the Internet and instead using another device (e.g., smartphone) to bring over the downloaded image using a removable storage device
 
@@ -90,6 +96,7 @@ Additional setup tasks may include:
 - Setting the keyboard language and layout
 
 ### 2.1 Install Offline Packages for GnuPG
+
 After booting into the secure environment, the user proceeds to verify the SHA256 checksums of the previously GPG-verified APK packages download to removable storage:
 
 ```shell
@@ -100,6 +107,7 @@ root@host:~/work$ umount /mnt
 ```
 
 The following command provides strict coupling (`&&`) between the cryptographic verification of the bundle created earlier, and its subsequent extraction. If the checksum is invalid, the tarball will not be extracted and the `apk` command that follows is expected to fail.
+
 ```shell
 # Require sha256sum to pass before extracting and installing with `apk`
 root@host:~/work$ sha256sum -c airgap-bundle.tar.gz.sha256 \
@@ -112,6 +120,7 @@ root@host:~/work$ sha256sum -c airgap-bundle.tar.gz.sha256 \
 **CI/CD Considerations.** For DevOps teams, this concludes the essential requirements for provisioning an Alpine Linux image with an offline copy of packages for GPG key management. In the interest of transparency, be sure to include any relevant steps and artifacts in your software provenance and image signing before releasing.
 
 ### 2.2 Verify the Environment
+
 Assuming package installation is successfully, begin verifying the environment for GPG use:
 
 **Note.** If you have a YubiKey, go ahead and insert it now.
@@ -139,4 +148,5 @@ root@host:~$ gpg --card-status
 **All done!** You can now begin [working with GPG](https://github.com/drduh/YubiKey-Guide?tab=readme-ov-file#identity) and smart cards in your new air-gapped environment!
 
 ## Stage 3. Takedown
+
 When finished performing key management tasks, the secure environment should either be a) promptly destroyed or b) properly secured away; to close the window on unknown threats to a dormant system (e.g., physical, technological, theoretical, unknown).
