@@ -2,3 +2,6 @@
 !.github/
 !.markdownlint-cli2.jsonc
 __pycache__/
+!.gitattributes
+recovery/packaging/build/
+recovery/packaging/dist/

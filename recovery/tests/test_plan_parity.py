@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 
 from tests.helpers import GOLDEN, run_impl
@@ -15,6 +16,9 @@ CASES = {
     "rotate-rsa-to-ed25519-revoke": [
         "--backup", "tests/fixtures/rsa4096/export", "--mode", "rotate", "--algo", "ed25519", "--revoke-old"],
 }
+
+
+LINUX = sys.platform.startswith("linux")
 
 
 class PlanParityTests:
@@ -38,6 +42,7 @@ class PythonPlanParityTests(PlanParityTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashPlanParityTests(PlanParityTests, unittest.TestCase):
     IMPL = "bash"
 

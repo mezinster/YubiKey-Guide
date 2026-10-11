@@ -9,6 +9,9 @@ from tests.helpers import FIXTURES, run_impl, short_tempdir
 ED_EXPORT = str(FIXTURES / "ed25519" / "export")
 
 
+LINUX = sys.platform.startswith("linux")
+
+
 class ContractTests:
     """Option validation and dry-run behaviour shared by both implementations."""
 
@@ -109,6 +112,7 @@ class ContractTests:
         result = self.cli("--backup", str(copy), "--mode", "rotate", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(LINUX, "POSIX directory modes and XDG_RUNTIME_DIR")
     def test_unwritable_runtime_dir_is_a_staging_error(self):
         base = short_tempdir(self, "rt")
         base.chmod(0o500)
@@ -145,6 +149,7 @@ class PythonContractTests(ContractTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashContractTests(ContractTests, unittest.TestCase):
     IMPL = "bash"
 

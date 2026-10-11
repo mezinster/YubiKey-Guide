@@ -1,3 +1,4 @@
+import sys
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,9 @@ OLD, OTHER = "22222222", "33333333"
 
 def stub(serial, slot):
     return f"Key: (shadowed-private-key (ecc (curve Ed25519)))\nToken: D2760001240103040006{serial}0000 OPENPGP.{slot} - - -\n"
+
+
+LINUX = sys.platform.startswith("linux")
 
 
 class StubsTests:
@@ -81,6 +85,7 @@ class PythonStubsTests(StubsTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashStubsTests(StubsTests, unittest.TestCase):
     IMPL = "bash"
 

@@ -23,10 +23,8 @@ def fixture_info(profile: str) -> dict:
 
 
 def _runtime_base() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR", "")
-    if base and os.path.isdir(base) and len(base) <= 60:
-        return Path(base)
-    return Path("/tmp")
+    from ykrecover import osdeps
+    return osdeps.default_work_base()
 
 
 def short_tempdir(test, label: str) -> Path:
@@ -38,8 +36,7 @@ def short_tempdir(test, label: str) -> Path:
             subprocess.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(home)},
                            capture_output=True, check=False)
         for p in [path, *path.rglob("*")]:
-            if p.is_dir():
-                p.chmod(0o700)
+            p.chmod(0o700 if p.is_dir() else 0o600)
         shutil.rmtree(path, ignore_errors=True)
 
     test.addCleanup(cleanup)
@@ -92,6 +89,16 @@ def read_until(stream, text: str, timeout: float) -> str:
     return seen.decode(errors="replace")
 
 
+def _fake_bin(test) -> Path:
+    """The fakes are Python scripts; Windows can only run them through .cmd shims."""
+    if os.name != "nt":
+        return FAKEBIN
+    shims = short_tempdir(test, "bin")
+    for name in ("gpg", "ykman", "gpg-connect-agent"):
+        (shims / f"{name}.cmd").write_text(f'@"{sys.executable}" "{FAKEBIN / name}" %*\r\n')
+    return shims
+
+
 def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> dict:
     """Env overrides that put fake ykman/gpg card operations first on PATH (see fakebin/ykman)."""
     state = short_tempdir(test, "hw")
@@ -101,7 +108,7 @@ def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> d
     if list_script is not None:
         (state / "list_script").write_text("".join(f"{s}\n" for s in list_script))
     return {
-        "PATH": f"{FAKEBIN}:{os.environ['PATH']}",
+        "PATH": f"{_fake_bin(test)}{os.pathsep}{os.environ['PATH']}",
         "FAKE_HW_DIR": str(state),
         "REAL_GPG": REAL_GPG,
         "FAKE_CERTIFY_PASS": PASSPHRASE,

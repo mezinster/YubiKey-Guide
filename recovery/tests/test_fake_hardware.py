@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import stat
+import sys
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,9 @@ S1, S2 = "11111111", "22222222"
 
 def tool_homes():
     return set(_runtime_base().glob("ykr-*"))
+
+
+LINUX = sys.platform.startswith("linux")
 
 
 class FakeHardwareTests:
@@ -138,6 +142,7 @@ class FakeHardwareTests:
         self.assertEqual(tool_homes() - before, set())
         self.assertIn("Card 11111111: Admin PIN", result.stderr)
 
+    @unittest.skipUnless(LINUX, "POSIX signals and select() on pipes")
     def test_termination_signal_at_a_prompt_cleans_up(self):
         for sig in (signal.SIGTERM, signal.SIGHUP):
             with self.subTest(signal=sig.name):
@@ -154,6 +159,7 @@ class FakeHardwareTests:
                 self.assertEqual(proc.wait(timeout=15), 130)
                 self.assertEqual(tool_homes() - before, set())
 
+    @unittest.skipUnless(LINUX, "POSIX signals and select() on pipes")
     def test_termination_signal_after_a_written_card_shows_pins(self):
         before = tool_homes()
         env = fake_hardware(self, [S1, S2])
@@ -202,6 +208,7 @@ class FakeHardwareTests:
         self.assertTrue((out / f"secret-{info['KEY_ID']}-Certify.key").is_file())
         self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
 
+    @unittest.skipUnless(LINUX, "POSIX file modes")
     def test_outputs_are_owner_only(self):
         info = fixture_info("ed25519")
         previous = os.umask(0o022)  # gpg writes these files with the process umask
@@ -237,6 +244,7 @@ class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "bash"
 

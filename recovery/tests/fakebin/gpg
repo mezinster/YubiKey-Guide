@@ -77,7 +77,7 @@ def main():
         env = {**os.environ, "GNUPGHOME": str(STATE / f"keys-{serial}")}
         return subprocess.run([REAL, *ARGS], input=os.environ["FAKE_CERTIFY_PASS"] + "\n", text=True,
                               env=env, check=False).returncode
-    os.execv(REAL, [REAL, *ARGS])
+    return subprocess.run([REAL, *ARGS], check=False).returncode
 
 
 if __name__ == "__main__":

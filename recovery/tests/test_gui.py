@@ -1,5 +1,6 @@
 import os
 import signal
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ except ImportError:  # python3-tk not installed
     tk = None
 
 
-@unittest.skipIf(tk is None or not os.environ.get("DISPLAY"), "needs tkinter and a display")
+@unittest.skipIf(tk is None or (sys.platform.startswith("linux") and not os.environ.get("DISPLAY")), "needs tkinter and a display")
 class GuiSmokeTests(unittest.TestCase):
     def test_work_folder_is_applied_before_loading(self):
         from pathlib import Path
