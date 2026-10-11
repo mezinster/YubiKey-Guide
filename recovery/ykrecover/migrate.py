@@ -83,6 +83,10 @@ class Session:
 
     def validate_options(self) -> None:
         o = self.opts
+        for flag, value, limit in (("--name", o.name, 39), ("--login", o.login, 254), ("--url", o.url, 254)):
+            if len(value) > limit or not all(" " <= c <= "~" and c != "<" for c in value):
+                raise RecoveryError(f"{flag} must be at most {limit} printable ASCII characters without '<'",
+                                    EXIT_USAGE)
         if o.mode not in ("clone", "renew", "rotate"):
             raise RecoveryError(f"unknown mode {o.mode}", EXIT_USAGE)
         if o.cards < 1:

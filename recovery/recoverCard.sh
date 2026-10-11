@@ -122,8 +122,18 @@ parse_args() {
   [[ -n $BACKUP ]] || bad_usage
 }
 
+check_field() { # check_field FLAG VALUE LIMIT: printable ASCII without '<'
+  local printable='^[ -;=-~]*$'
+  if (( ${#2} > $3 )) || ! [[ $2 =~ $printable ]]; then
+    die "$EXIT_USAGE" "$1 must be at most $3 printable ASCII characters without '<'"
+  fi
+}
+
 validate_options() {
   local out src r
+  check_field --name "$NAME" 39
+  check_field --login "$LOGIN" 254
+  check_field --url "$URL" 254
   [[ $CARDS =~ ^[0-9]{1,4}$ ]] || die "$EXIT_USAGE" "--cards must be 1 or more"
   CARDS=$((10#$CARDS))
   (( CARDS >= 1 )) || die "$EXIT_USAGE" "--cards must be 1 or more"

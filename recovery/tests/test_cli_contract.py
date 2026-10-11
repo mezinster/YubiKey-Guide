@@ -22,6 +22,16 @@ class ContractTests:
         self.assertEqual(self.cli("--backup", ED_EXPORT, "--retries", "0,5,5", "--dry-run").returncode, 1)
         self.assertEqual(self.cli("--backup", ED_EXPORT, "--cards", "0", "--dry-run").returncode, 1)
 
+    def test_cardholder_fields_validated(self):
+        for flag, value in (("--name", "J" * 40), ("--name", "Jöhn"), ("--name", "a<b"), ("--login", "x" * 255),
+                            ("--url", "https://example.org/\tkey"), ("--url", "u" * 255)):
+            with self.subTest(flag=flag, value=value):
+                result = self.cli("--backup", ED_EXPORT, flag, value, "--dry-run")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+        result = self.cli("--backup", ED_EXPORT, "--name", "J" * 39, "--login", "x" * 254, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_leading_zero_numbers_are_decimal(self):
         r = self.cli("--backup", ED_EXPORT, "--cards", "010", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stderr)
