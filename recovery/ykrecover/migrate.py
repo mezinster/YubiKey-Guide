@@ -68,6 +68,10 @@ class Session:
         self.results = []
         self.logins = {}
 
+    def _destroy(self, home) -> None:
+        if not home.destroy():
+            self.ui.warn(f"could not remove the temporary folder {home.path}; delete it manually")
+
     def validate_workdir(self) -> None:
         workdir = self.opts.workdir
         if workdir is not None:
@@ -80,12 +84,12 @@ class Session:
         osdeps.set_workdir(workdir)
 
     def validate_options(self) -> None:
-        self.validate_workdir()
         o = self.opts
         for flag, value, limit in (("--name", o.name, 39), ("--login", o.login, 254), ("--url", o.url, 254)):
             if len(value) > limit or not all(" " <= c <= "~" and c != "<" for c in value):
                 raise RecoveryError(f"{flag} must be at most {limit} printable ASCII characters without '<'",
                                     EXIT_USAGE)
+        self.validate_workdir()
         if o.mode not in ("clone", "renew", "rotate"):
             raise RecoveryError(f"unknown mode {o.mode}", EXIT_USAGE)
         if o.cards < 1:
@@ -130,7 +134,7 @@ class Session:
     def load(self) -> backup.KeyBundle:
         candidate = backup.choose(backup.detect(self.opts.backup), self.opts.source or None)
         if self.staging:
-            self.staging.destroy()
+            self._destroy(self.staging)
         self.staging = Home.create("staging")
         self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or None)
         self.targets = modes.select_targets(self.bundle)
@@ -345,7 +349,7 @@ class Session:
         finally:
             for home in (cardhome, verifyhome):
                 if home:
-                    home.destroy()
+                    self._destroy(home)
 
     def _needs_touch(self, step) -> bool:
         """The verify signature and decryption use the card's sig and dec keys."""
@@ -387,9 +391,7 @@ class Session:
 
     def cleanup(self) -> None:
         if self.staging:
-            path = self.staging.path
-            if not self.staging.destroy():
-                self.ui.warn(f"could not remove the temporary folder {path}; delete it manually")
+            self._destroy(self.staging)
             self.staging = None
         self.passphrase = ""
 

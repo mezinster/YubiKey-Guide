@@ -118,6 +118,40 @@ class CleanupWarningTests(unittest.TestCase):
         self.assertIn(path, gpg._LIVE_HOMES)
         self.assertIsNone(session.staging)
 
+    def test_write_card_warns_when_card_homes_survive(self):
+        from unittest import mock
+        from ykrecover import gpg, osdeps
+        from ykrecover.migrate import CardResult, Options, Session
+
+        warnings = []
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        session = Session(Options(backup=Path("."), dry_run=True), UI())
+        made = []
+        real_create = Home.create
+
+        def create(label):
+            made.append(real_create(label))
+            return made[-1]
+
+        def cleanup():
+            for h in made:
+                gpg._LIVE_HOMES.discard(h.path)
+                Home(h.path).destroy()
+        self.addCleanup(cleanup)
+        with mock.patch.object(Home, "create", staticmethod(create)), \
+                mock.patch.object(Session, "card_plan", lambda *a: []), \
+                mock.patch.object(Session, "_tokens", lambda *a: {}), \
+                mock.patch.object(osdeps, "secure_delete", lambda p: False):
+            session.staging = Home(Path(self.enterContext(__import__("tempfile").TemporaryDirectory())))
+            session.logins = {1: "x"}
+            session._write_card(CardResult(index=1, serial="1"))
+        self.assertTrue(made)
+        for h in made:
+            self.assertIn(f"could not remove the temporary folder {h.path}; delete it manually", warnings)
+
 
 class LoadTests(unittest.TestCase):
     def setUp(self):
