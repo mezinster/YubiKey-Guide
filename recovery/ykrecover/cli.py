@@ -6,7 +6,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import EXIT_INTERRUPT, EXIT_USAGE, TERMINATION_SIGNALS, Aborted
+from . import EXIT_INTERRUPT, EXIT_USAGE, TERMINATION_SIGNALS, Aborted, osdeps
 from .card import TOUCH_POLICIES
 from .migrate import Options, run
 
@@ -128,8 +128,17 @@ def _interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
+def _safe_output() -> None:
+    """Never crash on a character the output encoding lacks (a redirected Windows console uses cp1252)."""
+    options = {"errors": "replace", **({"encoding": "utf-8"} if osdeps.is_windows() else {})}
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(**options)
+
+
 def main(argv: list) -> int:
     """SIGTERM, SIGHUP and SIGBREAK end the run like Ctrl-C: cleanup runs and the PINs are shown."""
+    _safe_output()
     previous = {sig: signal.signal(sig, _interrupt) for sig in TERMINATION_SIGNALS}
     try:
         return _main(argv)
