@@ -81,10 +81,21 @@ function Invoke-Native {
     return $LASTEXITCODE
 }
 
+function Get-FirstLine {
+    # Runs a program to completion and returns its exit code and first output line. Piping a native
+    # program into Select-Object -First stops it early in Windows PowerShell 5.1 and spoils $LASTEXITCODE.
+    param([string]$Exe, [string[]]$Arguments)
+    $ErrorActionPreference = "Continue"   # stderr from a native program must not become a terminating error
+    $output = @(& $Exe @Arguments 2>$null)
+    $code = $LASTEXITCODE
+    $first = if ($output.Count) { "$($output[0])".Trim() } else { "" }
+    return @{ Code = $code; Line = $first }
+}
+
 function Install-Chocolatey {
     $choco = Get-ChocoExe
     if ($choco) {
-        $version = (& $choco --version | Select-Object -First 1)
+        $version = (Get-FirstLine $choco @("--version")).Line
         Write-Log "Chocolatey $version is installed ($choco)"
         if ([version]($version -replace '[^0-9.].*$', '') -lt [version]"2.0.0") {
             if ($WhatIf) { Write-Log "Would upgrade Chocolatey to 2.x" }
@@ -108,7 +119,7 @@ function Install-Chocolatey {
     Update-SessionEnvironment
     $choco = Get-ChocoExe
     if (-not $choco) { throw "Chocolatey installation failed (see $LogPath)" }
-    Write-Log "Chocolatey $(& $choco --version | Select-Object -First 1) installed ($choco)" "SUCCESS"
+    Write-Log "Chocolatey $((Get-FirstLine $choco @("--version")).Line) installed ($choco)" "SUCCESS"
     return $choco
 }
 
@@ -155,8 +166,9 @@ function Get-InstalledGnuPG {
         $complete = (Test-Path "$dir\gpg.exe") -and (Test-Path "$dir\gpgconf.exe") -and
                     (Test-Path "$dir\gpg-connect-agent.exe")
         if (-not $complete) { continue }
-        $first = & "$dir\gpg.exe" --version | Select-Object -First 1
-        if ($LASTEXITCODE -eq 0 -and "$first" -match '(\d+)\.(\d+)') {
+        $result = Get-FirstLine "$dir\gpg.exe" @("--version")
+        Write-Log "Found $dir\gpg.exe: $($result.Line) (exit code $($result.Code))"
+        if ($result.Code -eq 0 -and $result.Line -match '(\d+)\.(\d+)') {
             if ([int]$Matches[1] -gt 2 -or ([int]$Matches[1] -eq 2 -and [int]$Matches[2] -ge 2)) { return $dir }
         }
     }
@@ -231,7 +243,7 @@ function Invoke-Installation {
 
     if (-not $WhatIf) {
         Write-Log "Python: $(& $python --version 2>&1)"
-        Write-Log "GnuPG:  $(& "$gnupg\gpg.exe" --version | Select-Object -First 1)"
+        Write-Log "GnuPG:  $((Get-FirstLine "$gnupg\gpg.exe" @("--version")).Line)"
     }
 }
 
