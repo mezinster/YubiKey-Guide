@@ -32,6 +32,11 @@ class ContractTests:
         result = self.cli("--backup", ED_EXPORT, "--name", "J" * 39, "--login", "x" * 254, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_abbreviated_options_rejected(self):
+        self.assertEqual(self.cli("--back", ED_EXPORT, "--dry-run").returncode, 1)
+        self.assertEqual(self.cli("--backup", ED_EXPORT, "--dry").returncode, 1)
+        self.assertEqual(self.cli("update-stubs", "--remove", "1234").returncode, 1)
+
     def test_leading_zero_numbers_are_decimal(self):
         r = self.cli("--backup", ED_EXPORT, "--cards", "010", "--dry-run")
         self.assertEqual(r.returncode, 0, r.stderr)

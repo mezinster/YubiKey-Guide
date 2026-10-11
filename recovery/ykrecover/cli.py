@@ -80,7 +80,8 @@ def _positive(text: str) -> int:
 
 
 def migrate_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ykrecover --cli", description="Migrate GnuPG key backups to new YubiKeys.")
+    p = argparse.ArgumentParser(prog="ykrecover --cli", description="Migrate GnuPG key backups to new YubiKeys.",
+                                allow_abbrev=False)
     p.add_argument("--backup", type=Path, required=True)
     p.add_argument("--mode", choices=("clone", "renew", "rotate"), default="clone")
     p.add_argument("--cards", type=_positive, default=1)
@@ -107,7 +108,7 @@ def migrate_parser() -> argparse.ArgumentParser:
 
 def stubs_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ykrecover --cli update-stubs",
-                                description="Point the daily keyring at the new cards.")
+                                description="Point the daily keyring at the new cards.", allow_abbrev=False)
     p.add_argument("--import", dest="import_file", type=Path)
     p.add_argument("--remove-serial", action="append", default=[])
     p.add_argument("--cards", type=_positive, default=1)
