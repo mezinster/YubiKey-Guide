@@ -38,5 +38,9 @@ class PythonPlanParityTests(PlanParityTests, unittest.TestCase):
     IMPL = "python"
 
 
+class BashPlanParityTests(PlanParityTests, unittest.TestCase):
+    IMPL = "bash"
+
+
 if __name__ == "__main__":
     unittest.main()

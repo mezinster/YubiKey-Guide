@@ -72,5 +72,9 @@ class PythonContractTests(ContractTests, unittest.TestCase):
     IMPL = "python"
 
 
+class BashContractTests(ContractTests, unittest.TestCase):
+    IMPL = "bash"
+
+
 if __name__ == "__main__":
     unittest.main()
