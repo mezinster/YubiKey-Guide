@@ -890,11 +890,21 @@ run_live() {
 # --- update-stubs: the only part that touches the user's own GNUPGHOME
 
 user_gnupg_home() { # user_gnupg_home VAR: the daily keyring as gpgconf reports it (percent-escaped), like Python
-  local listed=""
+  local listed="" decoded="" byte
   listed=$(gpgconf --list-dirs homedir 2>/dev/null) || listed=""
   if [[ -n $listed ]]; then
-    listed=${listed//\\/\\\\}
-    printf -v "$1" '%b' "${listed//%/\\x}"
+    while [[ $listed == *%* ]]; do # only %XX is an escape, as in urllib.parse.unquote; a lone % stays
+      decoded+=${listed%%\%*}
+      listed=${listed#*\%}
+      if [[ $listed =~ ^[[:xdigit:]]{2} ]]; then
+        printf -v byte '%b' "\\x${listed:0:2}"
+        decoded+=$byte
+        listed=${listed:2}
+      else
+        decoded+=%
+      fi
+    done
+    printf -v "$1" '%s' "$decoded$listed"
   else
     printf -v "$1" '%s' "${GNUPGHOME:-$HOME/.gnupg}"
   fi

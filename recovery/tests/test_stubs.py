@@ -1,3 +1,4 @@
+import shutil
 import unittest
 from pathlib import Path
 
@@ -92,6 +93,37 @@ class PythonStubsTests(StubsTests, unittest.TestCase):
 @unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashStubsTests(StubsTests, unittest.TestCase):
     IMPL = "bash"
+
+
+
+@unittest.skipUnless(LINUX, "the fake gpgconf is a shell script")
+class GnupgHomeDecodingTests(unittest.TestCase):
+    """Both implementations decode gpgconf's homedir the same way: only %XX is an escape."""
+
+    def test_percent_in_the_reported_home(self):
+        base = short_tempdir(self, "pct")
+        fakebin = base / "bin"
+        fakebin.mkdir()
+        gpgconf = fakebin / "gpgconf"
+        gpgconf.write_text('#!/bin/sh\nif [ "$#" = 2 ] && [ "$1" = --list-dirs ] && [ "$2" = homedir ]; then\n'
+                           '  printf \'%s\\n\' "$FAKE_HOMEDIR"; exit 0\nfi\n'
+                           f'exec {shutil.which("gpgconf")} "$@"\n')
+        gpgconf.chmod(0o755)
+        for listed, actual in (("100%done", "100%done"), ("a%3ab", "a:b")):
+            for impl in ("python", "bash"):
+                with self.subTest(listed=listed, impl=impl):
+                    home = base / f"{impl}-{actual}"
+                    keys = home / "private-keys-v1.d"
+                    keys.mkdir(parents=True, mode=0o700)
+                    home.chmod(0o700)
+                    (keys / "AAAA.key").write_text(stub(OLD, 1))
+                    env = fake_hardware(self, ["44444444"])
+                    env.update(PATH=f"{fakebin}:{env['PATH']}", GNUPGHOME=str(base / "unused"),
+                               FAKE_HOMEDIR=str(base / f"{impl}-{listed}"))
+                    result = run_impl(impl, ["update-stubs", "--remove-serial", OLD], "y\n\n", env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(list(keys.iterdir()), [])
+                    self.assertEqual(len(list(home.glob("stub-backup-*/AAAA.key"))), 1)
 
 
 if __name__ == "__main__":
