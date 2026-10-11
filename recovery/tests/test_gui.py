@@ -141,7 +141,9 @@ class GuiSmokeTests(unittest.TestCase):
         app.show(7)
         self.assertFalse(hasattr(app, "pin_btn"))
         summary = next(w for w in app.body.winfo_children() if isinstance(w, tk.Text)).get("1.0", "end")
-        self.assertIn("update-stubs --import <public key file> --remove-serial <old serial> --cards 2", summary)
+        from ykrecover.migrate import update_stubs_command
+        self.assertIn(f"{update_stubs_command()} --import <public key file> --remove-serial <old serial> --cards 2",
+                      summary)
 
     def test_close_shows_pins_never_shown(self):
         app = self.app_with_pins()

@@ -97,6 +97,17 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("gpg", str(ctx.exception))
 
 
+class UpdateStubsHintTests(unittest.TestCase):
+    def test_hint_names_the_platform_command(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        from ykrecover.migrate import update_stubs_command
+        for platform, expected in (("linux", "yubikey-recovery --cli update-stubs"),
+                                   ("win32", "ykrecover.exe --cli update-stubs")):
+            with mock.patch.object(osdeps.sys, "platform", platform):
+                self.assertEqual(update_stubs_command(), expected)
+
+
 class PreflightWarningTests(unittest.TestCase):
     """Non-dry-run preflight warnings, with the tools and the environment faked."""
 

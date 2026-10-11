@@ -16,6 +16,11 @@ from .gpg import Home, gpg_version
 from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, substitute
 
 TOUCH_PROMPT = "Touch the YubiKey when it blinks"
+def update_stubs_command() -> str:
+    """How the user starts update-stubs on this platform."""
+    return "ykrecover.exe --cli update-stubs" if osdeps.is_windows() else "yubikey-recovery --cli update-stubs"
+
+
 LEFTOVER_AGE = 600  # seconds: a ykr-* folder older than this is not from a run starting now
 
 
@@ -415,7 +420,7 @@ class Session:
         summary = [f"card {r.index} {r.serial or '-'} {r.status} {r.detail}".rstrip() for r in self.results]
         self.ui.info("Summary:\n" + "\n".join(summary))
         public = o.out / f"public-{b.key_id}-{datetime.date.today().isoformat()}.asc"
-        self.ui.info(f"On your daily machine run: yubikey-recovery --cli update-stubs --import {public} "
+        self.ui.info(f"On your daily machine run: {update_stubs_command()} --import {public} "
                      f"--cards {o.cards}")
         return EXIT_OK if all(r.status == "OK" for r in self.results) else EXIT_CARD
 

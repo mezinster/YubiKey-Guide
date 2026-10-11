@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError, osdeps
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
-from .migrate import Options, Session
+from .migrate import Options, Session, update_stubs_command
 
 TITLE = "YubiKey recovery"
 METADATA_WARNING = ("OpenPGP card metadata (name, login, URL) can be read by anyone holding the card. "
@@ -470,7 +470,7 @@ class App:
         o = self.session.opts
         lines = [f"card {r.index}  {r.serial or '-'}  {r.status}  {r.detail}" for r in self.session.results]
         lines += ["", f"Files are in {o.out}.", "On your daily machine run:",
-                  "  yubikey-recovery --cli update-stubs --import <public key file> --remove-serial <old serial> "
+                  f"  {update_stubs_command()} --import <public key file> --remove-serial <old serial> "
                   f"--cards {o.cards}"]
         self.readonly_text("\n".join(lines), 12)
         if self.pins:
