@@ -7,6 +7,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from . import EXIT_USAGE, RecoveryError
@@ -31,11 +32,28 @@ def _gpg4win_dirs() -> list:
             for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")) if base]
 
 
+def _which(name: str):
+    """Windows PATH lookup that never considers the current directory (binary planting)."""
+    extensions = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    candidates = []
+    for ext in extensions:
+        candidates += [name + ext, name + ext.lower()]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or entry == "." or not os.path.isabs(entry):
+            continue
+        for candidate in candidates:
+            full = Path(entry) / candidate
+            if full.is_file():
+                return str(full)
+    return None
+
+
 def tool(name: str) -> list:
     """The command line that runs the tool a plan calls `name`."""
     if not is_windows():
         return [name]
-    found = shutil.which(name)
+    found = _which(name)
     if found:
         return [found]
     if name in GNUPG_TOOLS:
@@ -48,7 +66,7 @@ def tool(name: str) -> list:
         if getattr(sys, "frozen", False):
             return [str(Path(sys.executable).with_name("ykrecover.exe")), "--ykman"]
         return [sys.executable, "-c", YKMAN_SHIM]
-    return [name]
+    raise RecoveryError(f"{name} not found", EXIT_USAGE)
 
 
 def available(name: str) -> bool:
@@ -76,7 +94,7 @@ def work_base() -> Path:
         return _workdir
     if is_windows():
         root = os.environ.get("LOCALAPPDATA")
-        base = Path(root) / "Temp" / "ykrecover" if root else Path(os.environ.get("TEMP", ".")) / "ykrecover"
+        base = Path(root) / "Temp" / "ykrecover" if root else Path(tempfile.gettempdir()) / "ykrecover"
         base.mkdir(parents=True, exist_ok=True)
         return base
     runtime = os.environ.get("XDG_RUNTIME_DIR", "")
@@ -97,7 +115,8 @@ def memory_backed(path) -> bool:
         with open("/proc/mounts", encoding="utf-8") as mounts:
             for line in mounts:
                 parts = line.split()
-                if str(path).startswith(parts[1]) and len(parts[1]) > len(best):
+                here, mount = str(path), parts[1]
+                if (here == mount or here.startswith(mount.rstrip("/") + "/")) and len(mount) > len(best):
                     best, fstype = parts[1], parts[2]
     except OSError:
         return False
@@ -143,7 +162,7 @@ def _make_writable_and_retry(func, path, _info) -> None:
         pass
 
 
-def secure_delete(path) -> None:
+def secure_delete(path) -> bool:
     """Remove a temporary home. On Windows (disk-backed), overwrite files with zeros first."""
     path = Path(path)
     if is_windows():
@@ -164,11 +183,20 @@ def secure_delete(path) -> None:
         shutil.rmtree(path, **handler)
     except OSError:
         pass  # best effort, like the ignore_errors=True it replaces
+    return not path.exists()
 
 
 def run(argv, input=None, env=None) -> subprocess.CompletedProcess:
-    """subprocess.run with the tool resolved, UTF-8 text, captured output and no console window."""
+    """Run a tool: resolved, UTF-8 bytes in (no CRLF translation), str out, captured, no console window."""
     argv = list(argv)
     flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if is_windows() else {}
-    return subprocess.run(tool(argv[0]) + argv[1:], input=input, env=env, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", check=False, **flags)
+    if input is None:
+        flags["stdin"] = subprocess.DEVNULL
+    data = input.encode("utf-8") if input is not None else None
+    done = subprocess.run(tool(argv[0]) + argv[1:], input=data, env=env, capture_output=True,
+                          check=False, **flags)
+
+    def text(raw):
+        return (raw or b"").decode("utf-8", "replace").replace("\r\n", "\n")
+
+    return subprocess.CompletedProcess(done.args, done.returncode, text(done.stdout), text(done.stderr))
