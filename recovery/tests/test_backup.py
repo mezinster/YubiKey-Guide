@@ -141,6 +141,38 @@ class PreflightWarningTests(unittest.TestCase):
         self.assertEqual(warnings, [f"left over from an earlier run: {old}; it may hold key material — "
                                     "delete it securely"])
 
+    def test_disk_warning_names_a_chosen_work_folder(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        from ykrecover.migrate import Options, Session
+        base, warnings, preflight = self.preflight()
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        with mock.patch.object(osdeps, "memory_backed", lambda path: False):
+            Session(Options(backup=Path("."), workdir=base), UI()).preflight()
+            preflight()  # no --workdir: the base is the default one
+        self.assertEqual(warnings, [f"work folder {base} is not a RAM disk; make sure it is an encrypted volume",
+                                    f"temporary key copies are on disk at {base}; "
+                                    "use --workdir with a RAM disk or encrypted volume to avoid that"])
+
+    def test_mixed_gnupg_installs_are_reported_on_windows(self):
+        one, two = str(Path("/gpg4win/bin")), str(Path("/other/bin"))
+        tools = {"gpg": str(Path(one) / "gpg.exe"), "gpgconf": str(Path(one) / "gpgconf.exe"),
+                 "gpg-connect-agent": str(Path(two) / "gpg-connect-agent.exe")}
+        _, warnings, preflight = self.preflight(tools=tools)
+        preflight()
+        self.assertEqual(warnings, [f"GnuPG tools come from different folders (gpg in {one}, gpgconf in {one}, "
+                                    f"gpg-connect-agent in {two}); use the ones from a single Gpg4win installation"])
+
+    def test_one_gnupg_install_is_not_reported(self):
+        folder = str(Path("/gpg4win/bin"))
+        tools = {name: str(Path(folder) / f"{name}.exe") for name in ("gpg", "gpgconf", "gpg-connect-agent")}
+        _, warnings, preflight = self.preflight(tools=tools)
+        preflight()
+        self.assertEqual(warnings, [])
+
     def test_fresh_folders_are_not_reported(self):
         base, warnings, preflight = self.preflight()
         (base / "ykr-staging-x").mkdir()

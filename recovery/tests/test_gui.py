@@ -36,6 +36,23 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(Path(app.session.staging.path).parent, workdir)
         self.assertIn(str(workdir), app.workdir_note.cget("text"))
 
+    def test_note_for_a_chosen_disk_work_folder(self):
+        import tempfile
+        from ykrecover import osdeps
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        app.show(1)
+        folder = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, folder)
+        with mock.patch.object(osdeps, "memory_backed", lambda path: False):
+            app.v["workdir"].set(folder)
+            self.assertEqual(app.workdir_note.cget("text"),
+                             f"Work folder {Path(folder)} is not a RAM disk; make sure it is an encrypted volume.")
+            app.v["workdir"].set("")
+            self.assertIn("which is on disk", app.workdir_note.cget("text"))
+
     def test_note_ignores_a_stale_override_when_the_field_is_empty(self):
         from pathlib import Path
         from ykrecover import osdeps

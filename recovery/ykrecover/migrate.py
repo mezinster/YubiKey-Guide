@@ -125,15 +125,34 @@ class Session:
             raise RecoveryError("gpg 2.2 or newer is required", EXIT_USAGE)
         if self.opts.dry_run:
             return
+        self._warn_mixed_gnupg()
         for iface in osdeps.network_up():
             self.ui.warn(f"network interface {iface} is up; an air-gapped system is recommended")
         base = osdeps.work_base()
         if not osdeps.memory_backed(base):
-            self.ui.warn(f"temporary key copies are on disk at {base}; "
-                         "use --workdir with a RAM disk or encrypted volume to avoid that")
+            if self.opts.workdir is not None:
+                self.ui.warn(f"work folder {base} is not a RAM disk; make sure it is an encrypted volume")
+            else:
+                self.ui.warn(f"temporary key copies are on disk at {base}; "
+                             "use --workdir with a RAM disk or encrypted volume to avoid that")
         for leftover in self._leftovers(base):
             self.ui.warn(f"left over from an earlier run: {leftover}; it may hold key material — "
                          "delete it securely")
+
+    def _warn_mixed_gnupg(self) -> None:
+        """Two GnuPG installs (Gpg4win and another on PATH) can disagree about the agent and its sockets."""
+        if not osdeps.is_windows():
+            return
+        folders = {}
+        for name in osdeps.GNUPG_TOOLS:
+            try:
+                folders[name] = str(Path(osdeps.tool(name)[0]).parent)
+            except RecoveryError:
+                return  # reported as a missing tool
+        if len(set(folders.values())) > 1:
+            where = ", ".join(f"{name} in {folder}" for name, folder in folders.items())
+            self.ui.warn(f"GnuPG tools come from different folders ({where}); "
+                         "use the ones from a single Gpg4win installation")
 
     @staticmethod
     def _leftovers(base: Path) -> list:

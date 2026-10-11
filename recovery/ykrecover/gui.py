@@ -269,9 +269,13 @@ class App:
             note = "This folder does not exist."
         else:
             base = Path(text) if text else osdeps.default_work_base()
-            note = (f"Temporary key copies go to {base} (memory-backed)." if osdeps.memory_backed(base) else
-                    f"Temporary key copies go to {base}, which is on disk. Choose a RAM disk or an "
-                    "encrypted volume to avoid that.")
+            if osdeps.memory_backed(base):
+                note = f"Temporary key copies go to {base} (memory-backed)."
+            elif text:
+                note = f"Work folder {base} is not a RAM disk; make sure it is an encrypted volume."
+            else:
+                note = (f"Temporary key copies go to {base}, which is on disk. Choose a RAM disk or an "
+                        "encrypted volume to avoid that.")
         try:
             if self.workdir_note.winfo_exists():
                 self.workdir_note.config(text=note)
