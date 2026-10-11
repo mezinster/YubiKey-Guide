@@ -80,6 +80,27 @@ class HomeRegistryTests(unittest.TestCase):
         self.assertNotIn(kept.path, gpg._LIVE_HOMES)
 
 
+class HomeCreateTests(unittest.TestCase):
+    def test_unusable_work_base_is_a_backup_error(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        with mock.patch.object(osdeps, "work_base", side_effect=PermissionError("denied")):
+            with self.assertRaises(RecoveryError) as ctx:
+                Home.create("staging")
+        self.assertEqual(ctx.exception.code, EXIT_BACKUP)
+        self.assertIn("denied", str(ctx.exception))
+
+    def test_error_names_the_base_once_computed(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        missing = Path("/nonexistent-ykr-base")
+        with mock.patch.object(osdeps, "work_base", side_effect=[missing, Path("/elsewhere")]) as base:
+            with self.assertRaises(RecoveryError) as ctx:
+                Home.create("staging")
+        self.assertEqual(base.call_count, 1)
+        self.assertIn(f"in {missing}:", str(ctx.exception))
+
+
 class PreflightTests(unittest.TestCase):
     def test_preflight_reports_missing_gpg4win(self):
         from unittest import mock

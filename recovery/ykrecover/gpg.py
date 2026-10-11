@@ -29,17 +29,20 @@ class Home:
 
     @classmethod
     def create(cls, label: str) -> "Home":
+        try:
+            base = osdeps.work_base()  # creates the Windows default folder on demand
+        except OSError as err:
+            raise RecoveryError(f"cannot create the temporary folder: {err}", EXIT_BACKUP) from err
         path = None
         try:
-            path = Path(tempfile.mkdtemp(prefix=f"ykr-{label}-", dir=osdeps.work_base()))
+            path = Path(tempfile.mkdtemp(prefix=f"ykr-{label}-", dir=base))
             _LIVE_HOMES.add(path)
             path.chmod(0o700)
         except OSError as err:
             if path:
                 shutil.rmtree(path, ignore_errors=True)
                 _LIVE_HOMES.discard(path)
-            raise RecoveryError(f"cannot create a temporary GnuPG home in {osdeps.work_base()}: {err}",
-                                EXIT_BACKUP) from err
+            raise RecoveryError(f"cannot create a temporary GnuPG home in {base}: {err}", EXIT_BACKUP) from err
         return cls(path)
 
     def env(self) -> dict:
