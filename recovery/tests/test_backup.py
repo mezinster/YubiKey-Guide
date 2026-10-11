@@ -80,6 +80,45 @@ class HomeRegistryTests(unittest.TestCase):
         self.assertNotIn(kept.path, gpg._LIVE_HOMES)
 
 
+class PreflightTests(unittest.TestCase):
+    def test_preflight_reports_missing_gpg4win(self):
+        from unittest import mock
+        from ykrecover import EXIT_USAGE, osdeps
+        from ykrecover.migrate import Options, Session
+
+        class UI:
+            def warn(self, msg): pass
+
+        session = Session(Options(backup=Path("."), dry_run=True), UI())
+        with mock.patch.object(osdeps, "available", lambda name: name != "gpg"):
+            with self.assertRaises(RecoveryError) as ctx:
+                session.preflight()
+        self.assertEqual(ctx.exception.code, EXIT_USAGE)
+        self.assertIn("gpg", str(ctx.exception))
+
+
+class CleanupWarningTests(unittest.TestCase):
+    def test_cleanup_warns_when_the_staging_home_survives(self):
+        from unittest import mock
+        from ykrecover import gpg, osdeps
+        from ykrecover.migrate import Options, Session
+
+        warnings = []
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        session = Session(Options(backup=Path("."), dry_run=True), UI())
+        session.staging = Home.create("test")
+        path = session.staging.path
+        self.addCleanup(lambda: (gpg._LIVE_HOMES.discard(path), Home(path).destroy()))
+        with mock.patch.object(osdeps, "secure_delete", lambda p: False):
+            session.cleanup()
+        self.assertEqual(warnings, [f"could not remove the temporary folder {path}; delete it manually"])
+        self.assertIn(path, gpg._LIVE_HOMES)
+        self.assertIsNone(session.staging)
+
+
 class LoadTests(unittest.TestCase):
     def setUp(self):
         self.home = Home.create("test")

@@ -6,15 +6,13 @@ The CLI (run) and the GUI drive the same Session methods.
 import datetime
 import os
 import secrets
-import shutil
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import EXIT_BACKUP, EXIT_CARD, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
-from . import backup, card, modes
-from .gpg import Home, base_is_tmpfs, gpg_version, runtime_base
+from . import backup, card, modes, osdeps
+from .gpg import Home, gpg_version
 from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, substitute
 
 TOUCH_PROMPT = "Touch the YubiKey when it blinks"
@@ -38,6 +36,7 @@ class Options:
     url: str = ""
     source: str = ""
     key: str = ""
+    workdir: Path = None
     dry_run: bool = False
     yes: bool = False
 
@@ -59,18 +58,6 @@ class StepError(Exception):
         self.shown = shown
 
 
-def network_interfaces_up() -> list:
-    up = []
-    for iface in sorted(Path("/sys/class/net").glob("*")):
-        try:
-            state = (iface / "operstate").read_text().strip()
-        except OSError:
-            continue
-        if iface.name != "lo" and state == "up":
-            up.append(iface.name)
-    return up
-
-
 class Session:
     def __init__(self, opts: Options, ui):
         self.opts, self.ui = opts, ui
@@ -81,7 +68,19 @@ class Session:
         self.results = []
         self.logins = {}
 
+    def validate_workdir(self) -> None:
+        workdir = self.opts.workdir
+        if workdir is not None:
+            workdir = Path(workdir).resolve()
+            if not workdir.is_dir():
+                raise RecoveryError(f"--workdir must be an existing folder: {workdir}", EXIT_USAGE)
+            if not osdeps.is_windows() and len(str(workdir)) > osdeps.MAX_BASE_LEN:
+                raise RecoveryError(f"--workdir path is too long for gpg-agent sockets "
+                                    f"(at most {osdeps.MAX_BASE_LEN} characters): {workdir}", EXIT_USAGE)
+        osdeps.set_workdir(workdir)
+
     def validate_options(self) -> None:
+        self.validate_workdir()
         o = self.opts
         for flag, value, limit in (("--name", o.name, 39), ("--login", o.login, 254), ("--url", o.url, 254)):
             if len(value) > limit or not all(" " <= c <= "~" and c != "<" for c in value):
@@ -113,17 +112,20 @@ class Session:
 
     def preflight(self) -> None:
         tools = ["gpg", "gpgconf"] if self.opts.dry_run else ["gpg", "gpgconf", "gpg-connect-agent", "ykman"]
-        missing = [t for t in tools if shutil.which(t) is None]
+        missing = [t for t in tools if not osdeps.available(t)]
         if missing:
-            raise RecoveryError(f"missing tools: {' '.join(missing)}", EXIT_USAGE)
+            hint = " (install Gpg4win: https://gpg4win.org)" if osdeps.is_windows() and set(missing) - {"ykman"} else ""
+            raise RecoveryError(f"missing tools: {' '.join(missing)}{hint}", EXIT_USAGE)
         if gpg_version() < (2, 2):
             raise RecoveryError("gpg 2.2 or newer is required", EXIT_USAGE)
         if self.opts.dry_run:
             return
-        for iface in network_interfaces_up():
+        for iface in osdeps.network_up():
             self.ui.warn(f"network interface {iface} is up; an air-gapped system is recommended")
-        if not base_is_tmpfs(runtime_base()):
-            self.ui.warn(f"{runtime_base()} is not tmpfs; key material may touch disk")
+        base = osdeps.work_base()
+        if not osdeps.memory_backed(base):
+            self.ui.warn(f"temporary key copies are on disk at {base}; "
+                         "use --workdir with a RAM disk or encrypted volume to avoid that")
 
     def load(self) -> backup.KeyBundle:
         candidate = backup.choose(backup.detect(self.opts.backup), self.opts.source or None)
@@ -262,7 +264,7 @@ class Session:
 
     def write_cards(self) -> None:
         # Release the card from the user's own scdaemon so ykman can open it.
-        subprocess.run(["gpgconf", "--kill", "scdaemon"], capture_output=True, check=False)
+        osdeps.run(["gpgconf", "--kill", "scdaemon"])
         done = set()
         for r in self.results:
             r.serial = self._wait_for_card(r.index, done)
@@ -291,7 +293,7 @@ class Session:
     @staticmethod
     def _list_serials() -> tuple:
         """Connected serials, and ': <ykman error>' when the listing itself failed."""
-        listing = subprocess.run(["ykman", "list", "--serials"], capture_output=True, text=True, check=False)
+        listing = osdeps.run(["ykman", "list", "--serials"])
         problem = ""
         if listing.returncode != 0:
             problem = f": {listing.stderr.strip() or f'ykman exited with status {listing.returncode}'}"
@@ -385,7 +387,9 @@ class Session:
 
     def cleanup(self) -> None:
         if self.staging:
-            self.staging.destroy()
+            path = self.staging.path
+            if not self.staging.destroy():
+                self.ui.warn(f"could not remove the temporary folder {path}; delete it manually")
             self.staging = None
         self.passphrase = ""
 

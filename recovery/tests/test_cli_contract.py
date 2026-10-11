@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
 from tests.helpers import FIXTURES, run_impl, short_tempdir
@@ -123,6 +124,16 @@ class ContractTests:
             p.chmod(0o500 if p.is_dir() else 0o400)
         result = self.cli("--backup", str(copy), "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_workdir_must_exist_and_be_short(self):
+        self.assertEqual(self.cli("--backup", ED_EXPORT, "--workdir", "/nonexistent/dir", "--dry-run").returncode, 1)
+        ok = short_tempdir(self, "wd")
+        result = self.cli("--backup", ED_EXPORT, "--workdir", str(ok), "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        if sys.platform.startswith("linux"):
+            deep = ok / ("d" * 70)
+            deep.mkdir()
+            self.assertEqual(self.cli("--backup", ED_EXPORT, "--workdir", str(deep), "--dry-run").returncode, 1)
 
     def test_dry_run_prints_only_the_plan(self):
         result = self.cli("--backup", ED_EXPORT, "--dry-run")

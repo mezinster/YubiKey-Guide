@@ -222,6 +222,16 @@ class FakeHardwareTests:
         self.assertTrue(all(fprs))
         self.assertFalse(set(fprs) & {info["FPR_S"], info["FPR_E"], info["FPR_A"]})
 
+    def test_workdir_hosts_the_temporary_homes(self):
+        workdir = short_tempdir(self, "wd")
+        result, _, _, state = self.migrate("ed25519", ["--workdir", str(workdir)],
+                                           f"{PASSPHRASE}\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        homes = (state / "homes.log").read_text().split()
+        self.assertTrue(homes)
+        self.assertTrue(all(Path(h).resolve().parent == workdir.resolve() for h in homes), homes)
+        self.assertEqual(list(workdir.glob("ykr-*")), [])
+
 
 class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "python"

@@ -58,6 +58,8 @@ def main():
             return subprocess.run([REAL, *ARGS], input=script, text=True, check=False).returncode
         slot = int(lines[lines.index("keytocard") + 1])
         log(f"keytocard{slot}")
+        with open(STATE / "homes.log", "a", encoding="utf-8") as f:
+            f.write(os.environ["GNUPGHOME"] + "\n")
         maybe_fail(f"keytocard{slot}")
         serial, path, data = current_card()
         data["fpr"][slot - 1] = lines[0].split()[1].upper()

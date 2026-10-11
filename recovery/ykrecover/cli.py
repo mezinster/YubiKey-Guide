@@ -102,6 +102,7 @@ def migrate_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", default="")
     p.add_argument("--source", choices=("export", "subkeys-only", "gnupghome"), default="")
     p.add_argument("--key", default="")
+    p.add_argument("--workdir", type=Path)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--yes", action="store_true")
     return p
@@ -154,5 +155,5 @@ def _main(argv: list) -> int:
     opts = Options(backup=args.backup, mode=args.mode, cards=args.cards, out=args.out, expire=args.expire,
                    algo=args.algo, revoke_old=args.revoke_old, pins=args.pins, same_pins=args.same_pins,
                    retries=args.retries, touch=touch, name=args.name, login=args.login, url=args.url,
-                   source=args.source, key=args.key, dry_run=args.dry_run, yes=args.yes)
+                   source=args.source, key=args.key, workdir=args.workdir, dry_run=args.dry_run, yes=args.yes)
     return run(opts, CliUI())

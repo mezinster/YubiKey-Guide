@@ -1,5 +1,6 @@
 """Detect backups and load them into a staging home. Sources are only ever read."""
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,6 +167,6 @@ def choose_key(bundles, key_fp=None) -> KeyBundle:
 def check_passphrase(staging: Home, bundle: KeyBundle, passphrase: str) -> bool:
     what = "--export-secret-keys" if bundle.has_certify_secret else "--export-secret-subkeys"
     result = staging.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase-fd", "0",
-                          "--armor", "--yes", "--output", "/dev/null", what, bundle.key_fp], [passphrase])
+                          "--armor", "--yes", "--output", os.devnull, what, bundle.key_fp], [passphrase])
     staging.kill_agents()  # drop the cached passphrase so later scripted prompts are predictable
     return result.returncode == 0
