@@ -532,18 +532,22 @@ class GuiBehaviourTests(unittest.TestCase):
         dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second", "third"])
         seen = []
 
-        def keys(dialog):
+        def press(dialog, *keys):
+            # Tk delivers keys only to the focused widget, and a CI display without a window manager
+            # never focuses the dialog itself; so force it, after checking where the dialog put it.
             dialog.update()
-            seen.append(dialog.focus_get() is dialog.listbox)
-            dialog.listbox.event_generate("<Down>")
-            dialog.listbox.event_generate("<Return>")
+            seen.append(str(dialog.tk.call("focus", "-lastfor", dialog)) == str(dialog.listbox))
+            dialog.listbox.focus_force()
+            dialog.update()
+            for key in keys:
+                dialog.listbox.event_generate(key)
 
-        when_dialog_up(app.root, keys)
+        when_dialog_up(app.root, lambda d: press(d, "<Down>", "<Return>"))
         self.assertEqual(dialog.run(), 1)
-        self.assertEqual(seen, [True])
         dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second"])
-        when_dialog_up(app.root, lambda d: d.listbox.event_generate("<Return>"))
+        when_dialog_up(app.root, lambda d: press(d, "<Return>"))
         self.assertEqual(dialog.run(), 0)  # the first row is chosen without touching the list
+        self.assertEqual(seen, [True, True])
 
     def test_settings_are_validated_on_their_page(self):
         app = self.app()
