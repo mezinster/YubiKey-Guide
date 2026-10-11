@@ -67,6 +67,15 @@ class FakeHardwareTests:
         self.assertEqual((state / "change-pin.txt").read_text(),
                          "3\n12345678\n11223344\n11223344\nq\n1\n123456\n654321\n654321\nq\n")
 
+    def test_token_text_in_a_pin_is_not_substituted(self):
+        # Each PIN holds the other's token, so any multi-pass order rewrites one of them.
+        admin, user = "<USER_PIN>1", "<ADMIN_PIN>2"
+        stdin = f"{PASSPHRASE}\ny\n{admin}\n{admin}\n{user}\n{user}\n\nRESET {S1}\n"
+        result, _, _, state = self.migrate("ed25519", ["--pins", "enter"], stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((state / "change-pin.txt").read_text(),
+                         f"3\n12345678\n{admin}\n{admin}\nq\n1\n123456\n{user}\n{user}\nq\n")
+
     def test_retry_after_failure(self):
         stdin = f"{PASSPHRASE}\ny\n\nRESET {S1}\nr\n"
         result, _, calls, _ = self.migrate("ed25519", [], stdin, fail_at="keytocard2")

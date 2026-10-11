@@ -30,6 +30,11 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(substitute("-a <ADMIN_PIN> <OUT>/x", tokens), "-a 87654321 /out/x")
         self.assertEqual(substitute("-a <ADMIN_PIN>", public_tokens(tokens)), "-a <ADMIN_PIN>")
 
+    def test_substitute_is_single_pass(self):
+        tokens = {"<ADMIN_PIN>": "x<OUT>y", "<OUT>": "/out", "<USER_PIN>": "<ADMIN_PIN>"}
+        self.assertEqual(substitute("<USER_PIN> <ADMIN_PIN> <OUT> <UNKNOWN>", tokens),
+                         "<ADMIN_PIN> x<OUT>y /out <UNKNOWN>")
+
 
 class ModeTests(unittest.TestCase):
     def test_select_targets_newest_unrevoked(self):

@@ -359,20 +359,23 @@ check_bundle() {
 
 # --- canonical steps (byte-identical to the Python plan)
 
-subst() { # replaces every token in $1
-  local s=$1 k
-  for k in "${!TOKENS[@]}"; do s=${s//"$k"/"${TOKENS[$k]}"}; done
-  printf '%s' "$s"
+substitute() { # substitute TEXT PUBLIC: replaces every <TOKEN> in one pass; values are never rescanned
+  local rest=$1 out="" tok re='<[A-Z0-9_]+>'
+  while [[ $rest =~ $re ]]; do
+    tok=${BASH_REMATCH[0]}
+    out+=${rest%%"$tok"*}
+    rest=${rest#*"$tok"}
+    if [[ $2 == 1 ]]; then
+      case $tok in '<CERTIFY_PASS>' | '<ADMIN_PIN>' | '<USER_PIN>') out+=$tok; continue ;; esac
+    fi
+    if [[ -n ${TOKENS[$tok]+set} ]]; then out+=${TOKENS[$tok]}; else out+=$tok; fi
+  done
+  printf '%s' "$out$rest"
 }
 
-subst_public() { # like subst, but secrets stay as placeholders
-  local s=$1 k
-  for k in "${!TOKENS[@]}"; do
-    case $k in '<CERTIFY_PASS>' | '<ADMIN_PIN>' | '<USER_PIN>') continue ;; esac
-    s=${s//"$k"/"${TOKENS[$k]}"}
-  done
-  printf '%s' "$s"
-}
+subst() { substitute "$1" 0; }
+
+subst_public() { substitute "$1" 1; } # like subst, but secrets stay as placeholders
 
 step() { # step PHASE HOME CHECK ARGV...; stdin lines come from STEP_STDIN
   local phase=$1 home=$2 check=$3 line rc=0

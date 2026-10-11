@@ -3,12 +3,14 @@
 recoverCard.sh must print byte-identical plans; see tests/test_plan_parity.py.
 """
 
+import re
 from dataclasses import dataclass
 
 STAGING = "<STAGING>"
 CARDHOME = "<CARDHOME>"
 VERIFYHOME = "<VERIFYHOME>"
 SECRET_TOKENS = ("<CERTIFY_PASS>", "<ADMIN_PIN>", "<USER_PIN>")
+TOKEN = re.compile(r"<[A-Z0-9_]+>")
 
 
 @dataclass(frozen=True)
@@ -31,9 +33,8 @@ def format_plan(steps) -> str:
 
 
 def substitute(text: str, tokens: dict) -> str:
-    for token, value in tokens.items():
-        text = text.replace(token, value)
-    return text
+    """Replace every <TOKEN> in one pass: values are never rescanned, unknown tokens stay."""
+    return TOKEN.sub(lambda m: tokens.get(m.group(0), m.group(0)), text)
 
 
 def public_tokens(tokens: dict) -> dict:
