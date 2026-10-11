@@ -16,6 +16,7 @@ from .gpg import Home, gpg_version
 from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, substitute
 
 TOUCH_PROMPT = "Touch the YubiKey when it blinks"
+LEFTOVER_AGE = 600  # seconds: a ykr-* folder older than this is not from a run starting now
 
 
 @dataclass
@@ -130,6 +131,24 @@ class Session:
         if not osdeps.memory_backed(base):
             self.ui.warn(f"temporary key copies are on disk at {base}; "
                          "use --workdir with a RAM disk or encrypted volume to avoid that")
+        for leftover in self._leftovers(base):
+            self.ui.warn(f"left over from an earlier run: {leftover}; it may hold key material — "
+                         "delete it securely")
+
+    @staticmethod
+    def _leftovers(base: Path) -> list:
+        """ykr-* folders a forced end (closed console, killed process, crash) left in the work base."""
+        cutoff = time.time() - LEFTOVER_AGE
+        found = []
+        try:
+            for path in sorted(base.glob("ykr-*")):
+                info = path.lstat()
+                mine = not hasattr(os, "getuid") or info.st_uid == os.getuid()  # /tmp is shared on Linux
+                if path.is_dir() and not path.is_symlink() and mine and info.st_mtime < cutoff:
+                    found.append(path)
+        except OSError:
+            pass
+        return found
 
     def load(self) -> backup.KeyBundle:
         candidate = backup.choose(backup.detect(self.opts.backup), self.opts.source or None)

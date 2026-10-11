@@ -500,7 +500,7 @@ class App:
         self.root.destroy()
 
     def request_terminate(self, signum, frame):
-        """SIGTERM/SIGHUP handler: only sets a flag, which poll() acts on inside the Tk loop."""
+        """SIGTERM/SIGHUP/SIGBREAK handler: only sets a flag, which poll() acts on inside the Tk loop."""
         self.terminate_requested = True
 
     def terminate(self):

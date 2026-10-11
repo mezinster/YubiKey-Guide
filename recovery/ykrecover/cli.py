@@ -129,7 +129,7 @@ def _interrupt(signum, frame):
 
 
 def main(argv: list) -> int:
-    """SIGTERM and SIGHUP end the run like Ctrl-C: cleanup runs and the PINs are shown."""
+    """SIGTERM, SIGHUP and SIGBREAK end the run like Ctrl-C: cleanup runs and the PINs are shown."""
     previous = {sig: signal.signal(sig, _interrupt) for sig in TERMINATION_SIGNALS}
     try:
         return _main(argv)

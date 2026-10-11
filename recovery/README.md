@@ -11,7 +11,7 @@ On the LiveCD built from `nix/` both are installed, and "YubiKey Recovery" is on
 
 The Python tool runs on Linux and Windows; the bash script is Linux-only. On other systems both exit with an error.
 
-**Windows:** install [Gpg4win](https://gpg4win.org), then download `ykrecover-windows-x64.zip` from the repository's Releases page (or the `windows` CI job's artifacts) and run `ykrecover-gui.exe`, or `ykrecover.exe --cli …` in a terminal. ykman is bundled. Windows has no memory-backed temporary folder, so the tool warns that key copies touch the disk while it runs; to avoid that, choose a RAM disk or an encrypted volume as the work folder (`--workdir DIR`, or "Work folder" in the wizard). Run the hardware checklist on Windows too: card access works differently there. To build locally, run `recovery/packaging/build-windows.ps1` on Windows.
+**Windows:** install [Gpg4win](https://gpg4win.org), then download `ykrecover-windows-x64.zip` from the repository's Releases page (or the `windows` CI job's artifacts) and run `ykrecover-gui.exe`, or `ykrecover.exe --cli …` in a terminal. ykman is bundled. Windows has no memory-backed temporary folder, so the tool warns that key copies touch the disk while it runs; to avoid that, choose a RAM disk or an encrypted volume as the work folder (`--workdir DIR`, or "Work folder" in the wizard). If a run ends abnormally (the console window closed, the process ended in Task Manager, a crash), its temporary folders (`ykr-*` in the work folder) can stay behind, not overwritten: the next run warns about any older than 10 minutes, and you should delete them securely. Run the hardware checklist on Windows too: card access works differently there. To build locally, run `recovery/packaging/build-windows.ps1` on Windows.
 
 Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecover`. Running `ykrecover/gui.py` directly fails with "attempted relative import".
 
@@ -90,7 +90,7 @@ If you renewed or rotated, also publish the new public key wherever you publishe
 
    With touch on (the default), the tool prints "Touch the YubiKey when it blinks" before the test signature and before the decryption: touch the card each time, or the step times out and the card fails.
 
-The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted and runs stopped by Ctrl-C, SIGTERM or SIGHUP, so a partially written card is never left with unknown PINs. The GUI shows them as soon as card writing finishes. Write them down then.
+The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted and runs stopped by Ctrl-C, SIGTERM, SIGHUP or (on Windows) Ctrl-Break, so a partially written card is never left with unknown PINs. The GUI shows them as soon as card writing finishes. Write them down then.
 
 Both tools run with umask 077, so everything written to `--out` is readable only by its owner.
 

@@ -10,8 +10,8 @@ EXIT_INTERRUPT = 130
 
 
 def termination_signals(module=signal) -> tuple:
-    """Signals that end a run like Ctrl-C. SIGHUP does not exist on Windows."""
-    return tuple(getattr(module, name) for name in ("SIGTERM", "SIGHUP") if hasattr(module, name))
+    """Signals that end a run like Ctrl-C. SIGHUP exists only on Linux, SIGBREAK only on Windows."""
+    return tuple(getattr(module, name) for name in ("SIGTERM", "SIGHUP", "SIGBREAK") if hasattr(module, name))
 
 
 TERMINATION_SIGNALS = termination_signals()

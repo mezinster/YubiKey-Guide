@@ -46,6 +46,10 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(termination_signals(windows_like), (15,))
         self.assertEqual(termination_signals(SimpleNamespace(SIGTERM=15, SIGHUP=1)), (15, 1))
 
+    def test_termination_signals_include_sigbreak_on_windows(self):
+        windows_like = SimpleNamespace(SIGTERM=15, SIGBREAK=21)  # Ctrl-Break, console closed
+        self.assertEqual(termination_signals(windows_like), (15, 21))
+
 
 if __name__ == "__main__":
     unittest.main()

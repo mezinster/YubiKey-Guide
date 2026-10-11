@@ -97,6 +97,57 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("gpg", str(ctx.exception))
 
 
+class PreflightWarningTests(unittest.TestCase):
+    """Non-dry-run preflight warnings, with the tools and the environment faked."""
+
+    def preflight(self, workdir=None, tools=None):
+        import tempfile
+        from unittest import mock
+        from ykrecover import migrate, osdeps
+        from ykrecover.migrate import Options, Session
+
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(base, ignore_errors=True))
+        self.addCleanup(osdeps.set_workdir, None)
+        osdeps.set_workdir(workdir or base)
+        warnings = []
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        patches = [mock.patch.object(osdeps, "available", lambda name: True),
+                   mock.patch.object(migrate, "gpg_version", lambda: (2, 4)),
+                   mock.patch.object(osdeps, "network_up", lambda: []),
+                   mock.patch.object(osdeps, "memory_backed", lambda path: True)]
+        if tools is not None:
+            patches += [mock.patch.object(osdeps.sys, "platform", "win32"),
+                        mock.patch.object(osdeps, "tool", lambda name: [tools[name]])]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return base, warnings, lambda: Session(Options(backup=Path(".")), UI()).preflight()
+
+    def test_old_leftover_folders_are_reported(self):
+        import os
+        import time
+        base, warnings, preflight = self.preflight()
+        old, fresh = base / "ykr-staging-x", base / "ykr-card-y"
+        old.mkdir()
+        fresh.mkdir()
+        (base / "ykt-other").mkdir()
+        hour_ago = time.time() - 3600
+        os.utime(old, (hour_ago, hour_ago))
+        preflight()
+        self.assertEqual(warnings, [f"left over from an earlier run: {old}; it may hold key material — "
+                                    "delete it securely"])
+
+    def test_fresh_folders_are_not_reported(self):
+        base, warnings, preflight = self.preflight()
+        (base / "ykr-staging-x").mkdir()
+        preflight()
+        self.assertEqual(warnings, [])
+
+
 class CleanupWarningTests(unittest.TestCase):
     def test_cleanup_warns_when_the_staging_home_survives(self):
         from unittest import mock
