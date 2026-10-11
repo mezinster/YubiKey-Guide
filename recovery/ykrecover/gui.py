@@ -80,6 +80,117 @@ def set_text(text, content):
     text.configure(state="disabled")
 
 
+class Modal(tk.Toplevel):
+    """A modal dialog: a wrapped header, a body (self.content) and a row of buttons.
+
+    Build it, then run() shows it, waits and returns the value of the button pressed. Tests build
+    without running it to measure the layout.
+    """
+
+    def __init__(self, parent, title, header, buttons, closable=True, close_value=None):
+        super().__init__(parent)
+        self.withdraw()
+        self.title(title)
+        self.transient(parent)
+        self.parent = parent
+        self.value = close_value
+        self.em = tkfont.nametofont("TkDefaultFont", root=self).measure("0")
+        self.max_width = int(self.winfo_screenwidth() * 0.8)  # for the header and the body
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+        self.bar = ttk.Frame(outer)
+        self.bar.pack(side="bottom", fill="x", pady=(12, 0))  # first, so a short window never hides it
+        for label, value in reversed(buttons):
+            ttk.Button(self.bar, text=label, command=lambda v=value: self.done(v)).pack(side="right", padx=(4, 0))
+        ttk.Label(outer, text=header, wraplength=min(self.em * 60, self.max_width), justify="left").pack(
+            anchor="w", pady=(0, 8))
+        self.content = ttk.Frame(outer)
+        self.content.pack(fill="both", expand=True)
+        self.protocol("WM_DELETE_WINDOW", (lambda: self.done(close_value)) if closable else self.bell)
+        self.bind("<Escape>", lambda event: self.done(close_value) if closable else None)
+
+    def lines_that_fit(self, wanted, font, share=0.45):
+        """Text lines to request: at most wanted, and no more than share of the screen height."""
+        line = tkfont.Font(root=self, font=font).metrics("linespace")
+        return max(3, min(wanted, int(self.winfo_screenheight() * share / line)))
+
+    def done(self, value):
+        self.value = value
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def run(self):
+        self.update_idletasks()
+        width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() - width) // 2
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() - height) // 3
+        x = max(0, min(x, self.winfo_screenwidth() - width))
+        y = max(0, min(y, self.winfo_screenheight() - height))
+        self.geometry(f"+{x}+{y}")
+        self.deiconify()
+        self.wait_visibility()
+        self.grab_set()
+        self.focus_set()
+        self.wait_window()
+        return self.value
+
+
+class TextDialog(Modal):
+    """Read-only, scrollable text (error output, PINs) with a Copy button."""
+
+    def __init__(self, parent, title, header, content, buttons, wrap="word", lines=12, closable=True,
+                 close_value=None):
+        super().__init__(parent, title, header, buttons, closable, close_value)
+        self.text_content = content
+        frame, self.text = scrolled_text(self.content, 1, wrap)
+        font = self.text.cget("font")
+        longest = max((len(line) for line in content.splitlines()), default=0)
+        chars = max(40, min(longest + 2, 72)) if wrap == "none" else 64
+        fixed = tkfont.Font(root=self, font=font).measure("0")
+        chars = min(chars, self.max_width // fixed)
+        self.text.configure(width=chars, height=self.lines_that_fit(lines, font))
+        set_text(self.text, content)
+        frame.pack(fill="both", expand=True)
+        ttk.Button(self.bar, text="Copy", command=self.copy).pack(side="left")
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.text_content)
+
+
+class ChoiceDialog(Modal):
+    """Pick one line from a list; run() returns its index, or None when cancelled."""
+
+    def __init__(self, parent, title, header, items):
+        super().__init__(parent, title, header, (("OK", "ok"), ("Cancel", None)))
+        frame = ttk.Frame(self.content)
+        frame.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(frame, width=min(60, self.max_width // self.em),
+                                  height=min(max(len(items), 3), 8), exportselection=False)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.listbox.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.listbox.xview)
+        self.listbox.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        for item in items:
+            self.listbox.insert("end", item)
+        self.listbox.selection_set(0)
+        self.listbox.bind("<Double-Button-1>", lambda event: self.done("ok"))
+
+    def done(self, value):
+        chosen = self.listbox.curselection() if value == "ok" else ()
+        if value == "ok" and not chosen:
+            self.bell()
+            return
+        super().done(chosen[0] if chosen else None)
+
+
 class _Collector:
     def __init__(self, sink):
         self.sink = sink
@@ -141,10 +252,7 @@ class TkUI:
             raise Aborted()
 
     def card_failed(self, index, serial, step, error):
-        answer = self._ask(lambda: messagebox.askyesnocancel(
-            "Card failed", f"Card {serial} failed at:\n{step}\n\n{error}\n\nYes: retry   No: skip   Cancel: abort",
-            parent=self.app.root))
-        return {True: "retry", False: "skip", None: "abort"}[answer]
+        return self._ask(lambda: self.app.failure_dialog(serial, step, error).run())
 
     def progress(self, index, status):
         def task():
@@ -312,6 +420,19 @@ class App:
     def keep_pins(self, pins):
         self.pins = list(pins)
 
+    def failure_dialog(self, serial, step, error):
+        """Retry, skip or abort a failed card; shows only the error output under a one-line header."""
+        output = error[len(step):] if error.startswith(step) else error  # StepError text starts with the step
+        return TextDialog(self.root, "Card failed", f"Card {serial} failed at: {step}\n"
+                          "Retry after fixing the problem, skip this card, or abort the run.",
+                          output.strip() or "(no error output)",
+                          (("Retry", "retry"), ("Skip", "skip"), ("Abort", "abort")), closable=False)
+
+    def pins_dialog(self, pins):
+        text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in pins)
+        return TextDialog(self.root, "PINs", "Write these PINs down now. They are not shown again.", text,
+                          (("I wrote them down", True),), wrap="none", lines=len(pins), closable=False)
+
     # pages
     def build_preflight(self):
         self.heading("1. Preflight", "Checks tools and the environment. An air-gapped system is recommended.")
@@ -428,11 +549,10 @@ class App:
                 self.session.load()
                 break
             except backup_mod.AmbiguousKey as err:
-                key = simpledialog.askstring(TITLE, "Several keys found:\n" + "\n".join(b.key_fp for b in err.bundles)
-                                             + "\n\nEnter the fingerprint to use:", parent=self.root)
-                if not key:
+                chosen = self.choose_key(err.bundles)
+                if chosen is None:
                     return False
-                self.session.opts.key = key
+                self.session.opts.key = err.bundles[chosen].key_fp
             except RecoveryError as err:
                 self.alert(str(err))
                 return False
@@ -446,6 +566,10 @@ class App:
             return False
         self.v["passphrase"].set("")
         return True
+
+    def choose_key(self, bundles):
+        return ChoiceDialog(self.root, TITLE, "This backup holds several keys. Choose the one to write to the cards.",
+                            [f"{b.key_fp}  {', '.join(b.uids)}" for b in bundles]).run()
 
     def build_key(self):
         self.heading("3. Confirm key", "The subkeys marked <- card will be written to every new card.")
@@ -594,8 +718,7 @@ class App:
         """Shows the kept PINs once in a modal dialog; nothing happens when there are none."""
         if not self.pins:
             return
-        text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in self.pins)
-        messagebox.showinfo("PINs", text + "\n\nWrite them down now. They are not shown again.", parent=self.root)
+        self.pins_dialog(self.pins).run()
         self.pins = []
         self.pins_shown = True
         btn = getattr(self, "pin_btn", None)

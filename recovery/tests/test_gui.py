@@ -13,6 +13,12 @@ except ImportError:  # python3-tk not installed
     tk = None
 
 
+def shown_pins():
+    """Patches the PIN dialog's run(); call_args.args[0] is the dialog, its text_content what it shows."""
+    from ykrecover.gui import TextDialog
+    return mock.patch.object(TextDialog, "run", autospec=True, return_value=True)
+
+
 @unittest.skipIf(tk is None or (LINUX and not os.environ.get("DISPLAY")), "needs tkinter and a display")
 class GuiSmokeTests(unittest.TestCase):
     def test_work_folder_is_applied_before_loading(self):
@@ -89,7 +95,7 @@ class GuiSmokeTests(unittest.TestCase):
     def test_poll_stops_after_terminate_and_survives_a_failing_one(self):
         app = self.app_with_pins()
         app.request_terminate(signal.SIGTERM, None)
-        with mock.patch("ykrecover.gui.messagebox.showinfo"):
+        with shown_pins():
             app.poll()
         self.assertIsNone(app.poll_id)
         app = self.app_with_pins()
@@ -131,11 +137,11 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_pins_shown_when_work_finishes(self):
         app = self.app_with_pins()
-        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+        with shown_pins() as shown:
             app.finished(0)
             app.reveal_pins()  # once only
         self.assertEqual(shown.call_count, 1)
-        self.assertIn("Admin PIN 12345678", shown.call_args.args[1])
+        self.assertIn("Admin PIN 12345678", shown.call_args.args[0].text_content)
         self.assertEqual(app.pins, [])
         app.session = SimpleNamespace(opts=SimpleNamespace(out="/out", cards=2), results=[])
         app.show(7)
@@ -161,18 +167,18 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_close_shows_pins_never_shown(self):
         app = self.app_with_pins()
-        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+        with shown_pins() as shown:
             app.close()
         self.assertEqual(shown.call_count, 1)
-        self.assertIn("User PIN 123456", shown.call_args.args[1])
+        self.assertIn("User PIN 123456", shown.call_args.args[0].text_content)
 
     def test_termination_signal_reveals_pins_and_closes(self):
         app = self.app_with_pins()
         app.request_terminate(signal.SIGTERM, None)
-        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+        with shown_pins() as shown:
             app.poll()
         self.assertEqual(shown.call_count, 1)
-        self.assertIn("Admin PIN 12345678", shown.call_args.args[1])
+        self.assertIn("Admin PIN 12345678", shown.call_args.args[0].text_content)
         with self.assertRaises(tk.TclError):
             app.root.winfo_exists()  # destroyed
 
@@ -183,10 +189,10 @@ class GuiSmokeTests(unittest.TestCase):
         untouched = SimpleNamespace(serial="", admin_pin="11112222", user_pin="333444", pins_set=False)
         app.session = SimpleNamespace(results=[changed, untouched], cleanup=mock.Mock())
         app.worker = SimpleNamespace(is_alive=lambda: True)
-        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+        with shown_pins() as shown:
             app.terminate()
-        self.assertIn("Card 22222222: Admin PIN 87654321", shown.call_args.args[1])
-        self.assertNotIn("11112222", shown.call_args.args[1])
+        self.assertIn("Card 22222222: Admin PIN 87654321", shown.call_args.args[0].text_content)
+        self.assertNotIn("11112222", shown.call_args.args[0].text_content)
         app.session.cleanup.assert_called_once()
 
     def test_back_to_backup_page_keeps_the_unlocked_session(self):
