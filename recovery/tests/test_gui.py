@@ -1,6 +1,7 @@
 import os
 import signal
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -53,6 +54,8 @@ class GuiSmokeTests(unittest.TestCase):
         app.session = SimpleNamespace(opts=SimpleNamespace(out="/out", cards=2), results=[])
         app.show(7)
         self.assertFalse(hasattr(app, "pin_btn"))
+        summary = next(w for w in app.body.winfo_children() if isinstance(w, tk.Text)).get("1.0", "end")
+        self.assertIn("update-stubs --import <public key file> --remove-serial <old serial> --cards 2", summary)
 
     def test_close_shows_pins_never_shown(self):
         app = self.app_with_pins()
@@ -83,6 +86,28 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("Card 22222222: Admin PIN 87654321", shown.call_args.args[1])
         self.assertNotIn("11112222", shown.call_args.args[1])
         app.session.cleanup.assert_called_once()
+
+    def test_back_to_backup_page_keeps_the_unlocked_session(self):
+        from ykrecover.backup import Candidate
+        from ykrecover.gui import App
+        from ykrecover.migrate import Options
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        app.alert = lambda text: self.fail(text)
+        folder = Path("/backup")
+        app.show(1)
+        app.candidates = [Candidate("export", folder, ())]
+        app.cand_list.insert("end", "export: /backup")
+        app.cand_list.selection_set(0)
+
+        def no_reload():
+            raise AssertionError("reloaded")
+
+        app.session = SimpleNamespace(opts=Options(backup=folder, source="export"), passphrase="secret",
+                                      bundle=object(), load=no_reload, unlock=no_reload, cleanup=no_reload)
+        self.assertTrue(app.leave_backup())  # empty passphrase field, but nothing reloaded or unlocked
+        self.assertEqual(app.failures, 0)
 
     def test_tkui_marshals_calls(self):
         from ykrecover.gui import App

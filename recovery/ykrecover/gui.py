@@ -273,6 +273,10 @@ class App:
             self.alert("Select a detected backup.")
             return False
         candidate = self.candidates[chosen[0]]
+        s = self.session
+        if s and s.passphrase and s.bundle and (s.opts.backup, s.opts.source) == (candidate.path, candidate.kind):
+            self.v["passphrase"].set("")
+            return True  # already loaded and unlocked (the user went Back): keep it
         if self.session:
             self.session.cleanup()
         self.session = Session(Options(backup=candidate.path, source=candidate.kind), self.ui)
@@ -420,7 +424,8 @@ class App:
         o = self.session.opts
         lines = [f"card {r.index}  {r.serial or '-'}  {r.status}  {r.detail}" for r in self.session.results]
         lines += ["", f"Files are in {o.out}.", "On your daily machine run:",
-                  "  yubikey-recovery --cli update-stubs --import <public key file> --remove-serial <old serial>"]
+                  "  yubikey-recovery --cli update-stubs --import <public key file> --remove-serial <old serial> "
+                  f"--cards {o.cards}"]
         self.readonly_text("\n".join(lines), 12)
         if self.pins:
             self.pin_btn = ttk.Button(self.body, text="Show PINs (once)", command=self.reveal_pins)
