@@ -53,7 +53,7 @@
                 export PYTHONPATH="${self}/../recovery''${PYTHONPATH:+:$PYTHONPATH}"
                 exec ${recoveryPython}/bin/python3 -m ykrecover "$@"
               '';
-              recoveryScript = pkgs.writeShellScriptBin "recoverCard" ''
+              recoveryScript = pkgs.writeShellScriptBin "recoverCard.sh" ''
                 exec ${pkgs.bash}/bin/bash "${self}/../recovery/recoverCard.sh" "$@"
               '';
               recoveryShortcut = pkgs.makeDesktopItem {
@@ -235,7 +235,7 @@
                 yubikeyGuide
 
                 # Migrate key backups to new YubiKeys (`yubikey-recovery`, or
-                # `recoverCard` in a terminal). See recovery/README.md.
+                # `recoverCard.sh` in a terminal). See recovery/README.md.
                 yubikeyRecovery
 
                 # PDF and Markdown viewer
