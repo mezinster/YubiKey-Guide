@@ -17,6 +17,8 @@ from . import backup, card, modes
 from .gpg import Home, base_is_tmpfs, gpg_version, runtime_base
 from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, substitute
 
+TOUCH_PROMPT = "Touch the YubiKey when it blinks"
+
 
 @dataclass
 class Options:
@@ -298,6 +300,8 @@ class Session:
             homes = {STAGING: self.staging, CARDHOME: cardhome, VERIFYHOME: verifyhome}
             for step in self.card_plan(r.index, self.targets):
                 self.ui.progress(r.index, f"{r.serial}: {substitute(' '.join(step.argv), public_tokens(tokens))}")
+                if self._needs_touch(step):
+                    self.ui.info(TOUCH_PROMPT)
                 self._check(step, self._exec(step, homes, tokens), verifyhome)
                 if "--change-pin" in step.argv:
                     r.pins_set = True
@@ -305,6 +309,12 @@ class Session:
             for home in (cardhome, verifyhome):
                 if home:
                     home.destroy()
+
+    def _needs_touch(self, step) -> bool:
+        """The verify signature and decryption use the card's sig and dec keys."""
+        touch = self.opts.touch
+        return (("--detach-sign" in step.argv and touch["sig"] != "off")
+                or (step.check == "roundtrip" and touch["dec"] != "off"))
 
     def _check(self, step, output: str, verifyhome: Home) -> None:
         if step.check == "cardstatus":

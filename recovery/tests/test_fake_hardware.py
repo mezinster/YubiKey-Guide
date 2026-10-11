@@ -41,6 +41,15 @@ class FakeHardwareTests:
         self.assertTrue((out / f"ssh-{info['KEY_ID']}.pub").is_file())
         self.assertNotIn(PASSPHRASE, result.stderr)
         self.assertIn("login\nyk.", (state / "edit-card.txt").read_text())
+        self.assertEqual(result.stderr.count("Touch the YubiKey when it blinks"), 2)
+
+    def test_no_touch_prompt_when_touch_off(self):
+        result, _, _, _ = self.migrate("ed25519", ["--touch-sig", "off"], f"{PASSPHRASE}\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count("Touch the YubiKey when it blinks"), 1)  # decrypt only
+        result, _, _, _ = self.migrate("ed25519", ["--touch", "off"], f"{PASSPHRASE}\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Touch the YubiKey", result.stderr)
 
     def test_two_cards_same_pins(self):
         stdin = f"{PASSPHRASE}\ny\n\nRESET {S1}\n\nRESET {S2}\n"

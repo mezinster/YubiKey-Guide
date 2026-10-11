@@ -552,6 +552,7 @@ run_step() { # executes one canonical step; on failure CURRENT_STEP and $WORK/st
   dir=$(subst "$home")
   CURRENT_STEP=$(subst_public "$*")
   if [[ $phase == card* || $phase == verify* ]]; then info "[$phase] $CURRENT_STEP"; fi
+  if needs_touch "$check" "$@"; then info "Touch the YubiKey when it blinks"; fi
   if (( ${#STEP_STDIN[@]} )); then
     GNUPGHOME=$dir "${args[@]}" >"$WORK/step.out" 2>"$WORK/step.err" < <(
       for line in "${STEP_STDIN[@]}"; do printf '%s\n' "$(subst "$line")"; done
@@ -566,6 +567,16 @@ run_step() { # executes one canonical step; on failure CURRENT_STEP and $WORK/st
     done
   fi
   run_check "$check"
+}
+
+needs_touch() { # needs_touch CHECK ARGV...: the verify signature and decryption use the sig and dec keys
+  local check=$1 arg
+  shift
+  if [[ $check == roundtrip ]]; then [[ $(touch_for dec) != off ]]; return; fi
+  for arg in "$@"; do
+    if [[ $arg == --detach-sign ]]; then [[ $(touch_for sig) != off ]]; return; fi
+  done
+  return 1
 }
 
 run_check() {

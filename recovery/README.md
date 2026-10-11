@@ -76,6 +76,8 @@ If you renewed or rotated, also publish the new public key wherever you publishe
    - a test signature verifies;
    - a test message decrypts.
 
+   With touch on (the default), the tool prints "Touch the YubiKey when it blinks" before the test signature and before the decryption: touch the card each time, or the step times out and the card fails.
+
 The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted, so a partially written card is never left with unknown PINs. Write them down then.
 
 Both tools run with umask 077, so everything written to `--out` is readable only by its owner.
@@ -100,7 +102,7 @@ python3 -m unittest discover -s tests -t . -v
 
 Run this on a spare YubiKey before using real backups, and again after upgrading GnuPG, ykman or YubiKey firmware. Use the test keys in `tests/fixtures/` (passphrase `test-certify-pass`).
 
-- [ ] `clone` from `tests/fixtures/ed25519/export` to one card, with the GUI: the card shows OK. `gpg --card-status` lists the three fixture fingerprints and `Login data` starts with `yk.`.
+- [ ] `clone` from `tests/fixtures/ed25519/export` to one card, with the GUI: "Touch the YubiKey when it blinks" appears twice during verification, the card blinks each time, and after touching it the card shows OK. `gpg --card-status` lists the three fixture fingerprints and `Login data` starts with `yk.`.
 - [ ] `clone` from `tests/fixtures/rsa4096/export` with `recoverCard.sh --touch off`: OK, and the key attributes show `rsa4096` for all three slots.
 - [ ] `renew` from `tests/fixtures/expired/export`: a new backup appears in `--out`, and the card is OK.
 - [ ] `rotate --algo ed25519 --revoke-old` from `tests/fixtures/rsa4096/export`: the card's fingerprints differ from the fixture's, and the exported public key shows the old subkeys as revoked.
