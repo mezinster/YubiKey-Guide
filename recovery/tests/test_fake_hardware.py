@@ -69,6 +69,8 @@ class FakeHardwareTests:
         self.assertEqual((state / "change-pin.txt").read_text(),
                          "3\n12345678\n11223344\n11223344\nq\n1\n123456\n654321\n654321\nq\n")
 
+    @unittest.skipUnless(LINUX, "the Admin PIN reaches ykman on its command line, and the Windows test fakes run "
+                         "through cmd.exe, which treats < and > as redirection (the real ykman is an .exe)")
     def test_token_text_in_a_pin_is_not_substituted(self):
         # Each PIN holds the other's token, so any multi-pass order rewrites one of them.
         admin, user = "<USER_PIN>1", "<ADMIN_PIN>2"
