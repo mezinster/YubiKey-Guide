@@ -1103,7 +1103,7 @@ git commit -m "recovery: canonical step builders for modes, cards and verificati
 **Interfaces:**
 
 - Consumes: everything from Tasks 1–3.
-- Produces (`migrate.py`): `Options` dataclass (fields below), `CardResult(index, serial, status, detail, admin_pin, user_pin)`, `StepError(shown, stderr)` with `.shown`, `network_interfaces_up() -> list[str]`, `class Session(opts, ui)` with `validate_options()`, `preflight()`, `load() -> KeyBundle`, `validate_bundle()`, `describe() -> str`, `unlock(passphrase) -> bool`, `staging_steps() -> list[Step]`, `card_plan(index, targets) -> list[Step]`, `dry_run_text() -> str`, `cleanup()`. Also `run(opts, ui) -> int`. `Session.execute()` comes in Task 6, and `run()` calls it only for non-dry runs, which no Task 4 test performs.
+- Produces (`migrate.py`): `Options` dataclass (fields below), `CardResult(index, serial, status, detail, admin_pin, user_pin, pins_set)`, `StepError(shown, stderr)` with `.shown`, `network_interfaces_up() -> list[str]`, `class Session(opts, ui)` with `validate_options()`, `preflight()`, `load() -> KeyBundle`, `validate_bundle()`, `describe() -> str`, `unlock(passphrase) -> bool`, `staging_steps() -> list[Step]`, `card_plan(index, targets) -> list[Step]`, `dry_run_text() -> str`, `cleanup()`. Also `run(opts, ui) -> int`. `Session.execute()` comes in Task 6, and `run()` calls it only for non-dry runs, which no Task 4 test performs.
 - UI protocol (implemented by `cli.CliUI` here and `gui.TkUI` in Task 8): `output(text)`, `info(msg)`, `warn(msg)`, `error(msg)`, `ask_secret(prompt) -> str`, `confirm(prompt) -> bool`, `confirm_reset(serial) -> bool`, `wait_for_card(index, total)`, `card_failed(index, serial, step, error) -> "retry"|"skip"|"abort"`, `progress(index, status)`, `show_pins(list[(serial, admin, user)])`. `ask_secret`/`confirm*`/`wait_for_card`/`card_failed` raise `Aborted` on EOF or cancel.
 - CLI prompt texts (contract with bash, used by tests): `Certify key passphrase:`, `Write subkeys of <FP> to <N> card(s)? [y/N]`, `New backup written to <OUT>. Saved it to offline storage? [y/N]`, `Admin PIN (<label>):`, `Repeat Admin PIN (<label>):`, `User PIN (<label>):`, `Repeat User PIN (<label>):` (label `card <i>` or `all cards`), `Insert card <i> of <N> and press Enter`, `Type RESET <serial> to erase card <serial>:`, `[r]etry, [s]kip or [a]bort?`. Answers are compared exactly; `y`/`yes` (any case) for yes.
 
@@ -1294,6 +1294,7 @@ class CardResult:
     detail: str = ""
     admin_pin: str = ""
     user_pin: str = ""
+    pins_set: bool = False  # True once the card's PINs were changed; they are then always shown
 
 
 class StepError(Exception):
@@ -2045,6 +2046,21 @@ class FakeHardwareTests:
     def test_skip_after_failure(self):
         result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\ns\n", fail_at="sign")
         self.assertEqual(result.returncode, 3)
+        self.assertIn("Card 11111111: Admin PIN", result.stderr)
+        self.assertIn("FAILED", result.stderr)
+
+    def test_abort_after_written_card_still_shows_pins(self):
+        stdin = f"{PASSPHRASE}\ny\n\nRESET {S1}\n\n"
+        result, _, _, _ = self.migrate("ed25519", ["--cards", "2"], stdin, serials=(S1, S2))
+        self.assertEqual(result.returncode, 130)
+        self.assertIn("Card 11111111: Admin PIN", result.stderr)
+
+    def test_abort_mid_card_cleans_up_homes(self):
+        before = tool_homes()
+        result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\na\n", fail_at="keytocard1")
+        self.assertEqual(result.returncode, 130)
+        self.assertEqual(tool_homes() - before, set())
+        self.assertIn("Card 11111111: Admin PIN", result.stderr)
 
     def test_reset_not_confirmed(self):
         result, _, calls, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nreset please\n")
@@ -2127,7 +2143,11 @@ Add these methods to `Session` (after `apply_mode`):
             while not self.ui.confirm(f"New backup written to {o.out}. Saved it to offline storage?"):
                 self.ui.warn("copy the new backup before writing cards")
         self.assign_pins()
-        self.write_cards()
+        try:
+            self.write_cards()
+        finally:
+            # Always reveal the PINs of every card whose PINs were changed, even on abort.
+            self.ui.show_pins([(r.serial, r.admin_pin, r.user_pin) for r in self.results if r.pins_set])
         return self.finish()
 
     def assign_pins(self) -> None:
@@ -2173,6 +2193,8 @@ Add these methods to `Session` (after `apply_mode`):
                     if choice == "retry":
                         continue
                     r.status, r.detail = "FAILED", err.shown
+                    if r.pins_set:
+                        r.detail += " (PINs were changed; see PINs shown)"
                     if choice == "abort":
                         raise Aborted() from err
                     break
@@ -2193,9 +2215,10 @@ Add these methods to `Session` (after `apply_mode`):
                 return serials[0]
 
     def _write_card(self, r: CardResult) -> None:
-        cardhome = self.staging.clone("card")
-        verifyhome = Home.create("verify")
+        cardhome = verifyhome = None
         try:
+            cardhome = self.staging.clone("card")
+            verifyhome = Home.create("verify")
             (verifyhome.path / "test.txt").write_text(secrets.token_hex(32) + "\n")
             surname, given = card.split_name(self.opts.name)
             tokens = {**self._tokens(), f"<SERIAL{r.index}>": r.serial, "<ADMIN_PIN>": r.admin_pin,
@@ -2206,9 +2229,12 @@ Add these methods to `Session` (after `apply_mode`):
             for step in self.card_plan(r.index, self.targets):
                 self.ui.progress(r.index, f"{r.serial}: {substitute(' '.join(step.argv), public_tokens(tokens))}")
                 self._check(step, self._exec(step, homes, tokens), verifyhome)
+                if "--change-pin" in step.argv:
+                    r.pins_set = True
         finally:
-            cardhome.destroy()
-            verifyhome.destroy()
+            for home in (cardhome, verifyhome):
+                if home:
+                    home.destroy()
 
     def _check(self, step, output: str, verifyhome: Home) -> None:
         if step.check == "cardstatus":
@@ -2227,7 +2253,6 @@ Add these methods to `Session` (after `apply_mode`):
                 self._exec(step, {STAGING: self.staging}, self._tokens())
             except StepError as err:
                 self.ui.warn(f"export failed: {err}")
-        self.ui.show_pins([(r.serial, r.admin_pin, r.user_pin) for r in self.results if r.status == "OK"])
         summary = [f"card {r.index} {r.serial or '-'} {r.status} {r.detail}".rstrip() for r in self.results]
         self.ui.info("Summary:\n" + "\n".join(summary))
         public = o.out / f"public-{b.key_id}-{datetime.date.today().isoformat()}.asc"
@@ -2241,7 +2266,7 @@ Remove now-unused names from the import line if any linter complains (`EXIT_USAG
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd recovery && python3 -m unittest tests.test_fake_hardware -v`
-Expected: `OK` (12 tests).
+Expected: `OK` (14 tests).
 
 - [ ] **Step 6: Run the whole suite**
 
@@ -3179,6 +3204,7 @@ clone_home() { # clone_home SRC LABEL VAR
 
 cleanup() {
   local dir
+  reveal_pins
   for dir in "${HOMES_CREATED[@]}"; do
     if [[ -d $dir ]]; then destroy_home "$dir"; fi
   done
@@ -3554,7 +3580,7 @@ git commit -m "recovery: bash implementation of options, backup loading and dry-
 **Interfaces:**
 
 - Consumes: Task 9 functions (`step`, builders, `load_bundle`, `select_targets`, homes), the fake hardware contract from Task 6.
-- Produces: `run_step`, `run_check`, `describe_key`, `check_passphrase`, `unlock`, `generate_pins`, `random_login`, `ask_pin`, `assign_pins`, `split_name`, `wait_for_card`, `confirm_reset`, `read_choice`, `write_card`, `write_cards`, `finish`, `run_live`.
+- Produces: `run_step`, `run_check`, `describe_key`, `check_passphrase`, `unlock`, `generate_pins`, `random_login`, `ask_pin`, `assign_pins`, `split_name`, `wait_for_card`, `confirm_reset`, `read_choice`, `write_card`, `write_cards`, `reveal_pins`, `finish`, `run_live`.
 
 - [ ] **Step 1: Add the bash test class (failing)**
 
@@ -3591,6 +3617,11 @@ run_step() { # executes one canonical step; on failure CURRENT_STEP and $WORK/st
     GNUPGHOME=$dir "${args[@]}" </dev/null >"$WORK/step.out" 2>"$WORK/step.err" || rc=$?
   fi
   (( rc == 0 )) || return 1
+  if [[ $phase == card* ]]; then
+    for arg in "${args[@]}"; do
+      if [[ $arg == --change-pin ]]; then PINS_SET[${phase#card}]=1; fi
+    done
+  fi
   run_check "$check"
 }
 
@@ -3667,7 +3698,8 @@ ask_pin() { # ask_pin LABEL MIN VAR
   done
 }
 
-declare -A ADMIN_PINS=() USER_PINS=() LOGINS=() SERIALS=() STATUS=() DETAIL=()
+declare -A ADMIN_PINS=() USER_PINS=() LOGINS=() SERIALS=() STATUS=() DETAIL=() PINS_SET=()
+PINS_SHOWN=0
 PAIR_ADMIN="" PAIR_USER="" SERIAL="" SURNAME="" GIVEN=""
 
 assign_pins() {
@@ -3780,20 +3812,27 @@ write_cards() {
       if [[ $choice == retry ]]; then continue; fi
       STATUS[$i]=FAILED
       DETAIL[$i]=$CURRENT_STEP
+      if [[ -n ${PINS_SET[$i]:-} ]]; then DETAIL[$i]+=" (PINs were changed; see PINs shown)"; fi
       if [[ $choice == abort ]]; then die "$EXIT_INTERRUPT" "aborted"; fi
       break
     done
   done
 }
 
-finish() {
-  local i all_ok=1 public
-  finish_steps || warn "export failed: $CURRENT_STEP"
+reveal_pins() { # prints once, on every exit path (called from cleanup)
+  local i
+  if (( PINS_SHOWN )); then return 0; fi
+  PINS_SHOWN=1
   for ((i = 1; i <= CARDS; i++)); do
-    if [[ ${STATUS[$i]:-} == OK ]]; then
+    if [[ -n ${PINS_SET[$i]:-} ]]; then
       printf 'Card %s: Admin PIN %s  User PIN %s\n' "${SERIALS[$i]}" "${ADMIN_PINS[$i]}" "${USER_PINS[$i]}" >&2
     fi
   done
+}
+
+finish() {
+  local i all_ok=1 public
+  finish_steps || warn "export failed: $CURRENT_STEP"
   info "Summary:"
   for ((i = 1; i <= CARDS; i++)); do
     info "card $i ${SERIALS[$i]:--} ${STATUS[$i]:-pending} ${DETAIL[$i]:-}"
@@ -3834,7 +3873,7 @@ run_live() {
 - [ ] **Step 4: Run the bash fake-hardware tests**
 
 Run: `cd recovery && python3 -m unittest tests.test_fake_hardware.BashFakeHardwareTests -v`
-Expected: `OK` (12 tests).
+Expected: `OK` (14 tests).
 
 - [ ] **Step 5: Run the whole suite and shellcheck**
 

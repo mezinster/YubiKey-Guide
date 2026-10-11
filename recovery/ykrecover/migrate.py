@@ -47,6 +47,7 @@ class CardResult:
     detail: str = ""
     admin_pin: str = ""
     user_pin: str = ""
+    pins_set: bool = False
 
 
 class StepError(Exception):
@@ -204,7 +205,11 @@ class Session:
             while not self.ui.confirm(f"New backup written to {o.out}. Saved it to offline storage?"):
                 self.ui.warn("copy the new backup before writing cards")
         self.assign_pins()
-        self.write_cards()
+        try:
+            self.write_cards()
+        finally:
+            # Always reveal the PINs of every card whose PINs were changed, even on abort.
+            self.ui.show_pins([(r.serial, r.admin_pin, r.user_pin) for r in self.results if r.pins_set])
         return self.finish()
 
     def assign_pins(self) -> None:
@@ -250,6 +255,8 @@ class Session:
                     if choice == "retry":
                         continue
                     r.status, r.detail = "FAILED", err.shown
+                    if r.pins_set:
+                        r.detail += " (PINs were changed; see PINs shown)"
                     if choice == "abort":
                         raise Aborted() from err
                     break
@@ -270,9 +277,10 @@ class Session:
                 return serials[0]
 
     def _write_card(self, r: CardResult) -> None:
-        cardhome = self.staging.clone("card")
-        verifyhome = Home.create("verify")
+        cardhome = verifyhome = None
         try:
+            cardhome = self.staging.clone("card")
+            verifyhome = Home.create("verify")
             (verifyhome.path / "test.txt").write_text(secrets.token_hex(32) + "\n")
             surname, given = card.split_name(self.opts.name)
             tokens = {**self._tokens(), f"<SERIAL{r.index}>": r.serial, "<ADMIN_PIN>": r.admin_pin,
@@ -283,9 +291,12 @@ class Session:
             for step in self.card_plan(r.index, self.targets):
                 self.ui.progress(r.index, f"{r.serial}: {substitute(' '.join(step.argv), public_tokens(tokens))}")
                 self._check(step, self._exec(step, homes, tokens), verifyhome)
+                if "--change-pin" in step.argv:
+                    r.pins_set = True
         finally:
-            cardhome.destroy()
-            verifyhome.destroy()
+            for home in (cardhome, verifyhome):
+                if home:
+                    home.destroy()
 
     def _check(self, step, output: str, verifyhome: Home) -> None:
         if step.check == "cardstatus":
@@ -304,7 +315,6 @@ class Session:
                 self._exec(step, {STAGING: self.staging}, self._tokens())
             except StepError as err:
                 self.ui.warn(f"export failed: {err}")
-        self.ui.show_pins([(r.serial, r.admin_pin, r.user_pin) for r in self.results if r.status == "OK"])
         summary = [f"card {r.index} {r.serial or '-'} {r.status} {r.detail}".rstrip() for r in self.results]
         self.ui.info("Summary:\n" + "\n".join(summary))
         public = o.out / f"public-{b.key_id}-{datetime.date.today().isoformat()}.asc"

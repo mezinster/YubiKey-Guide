@@ -65,6 +65,21 @@ class FakeHardwareTests:
     def test_skip_after_failure(self):
         result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\ns\n", fail_at="sign")
         self.assertEqual(result.returncode, 3)
+        self.assertIn("Card 11111111: Admin PIN", result.stderr)
+        self.assertIn("FAILED", result.stderr)
+
+    def test_abort_after_written_card_still_shows_pins(self):
+        stdin = f"{PASSPHRASE}\ny\n\nRESET {S1}\n\n"
+        result, _, _, _ = self.migrate("ed25519", ["--cards", "2"], stdin, serials=(S1, S2))
+        self.assertEqual(result.returncode, 130)
+        self.assertIn("Card 11111111: Admin PIN", result.stderr)
+
+    def test_abort_mid_card_cleans_up_homes(self):
+        before = tool_homes()
+        result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\na\n", fail_at="keytocard1")
+        self.assertEqual(result.returncode, 130)
+        self.assertEqual(tool_homes() - before, set())
+        self.assertIn("Card 11111111: Admin PIN", result.stderr)
 
     def test_reset_not_confirmed(self):
         result, _, calls, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nreset please\n")
