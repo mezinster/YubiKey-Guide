@@ -26,7 +26,8 @@ Set-StrictMode -Version Latest
 # Pinned Chocolatey packages (newest releases at least 14 days old on 2026-10-11).
 $PythonPackage = "python313"
 $PythonVersion = "3.13.15"
-$PythonDir = "C:\Python313"
+# Under Program Files, so only administrators can change what later runs from the machine PATH.
+$PythonDir = Join-Path $env:ProgramFiles "Python313"
 $GnupgPackage = "gnupg"
 $GnupgVersion = "2.5.21"
 $ChocoTimeoutSeconds = 900   # a hanging installer fails after 15 minutes instead of blocking forever
@@ -162,32 +163,59 @@ function Find-GnuPG {
     return $null
 }
 
-function Add-MachinePath {
-    param([string[]]$Dirs)
-    $entries = @(([Environment]::GetEnvironmentVariable("Path", "Machine") -split ';') | Where-Object { $_ })
+function Test-ProtectedLocation {
+    # True when only administrators can write here (Program Files). Anything else must never go on the
+    # machine PATH: another local user could plant an exe or DLL there that an administrator later runs.
+    param([string]$Path)
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\') + '\'
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
+        if ($root -and $full.StartsWith($root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Add-PathEntries {
+    param([string[]]$Dirs, [ValidateSet("Machine", "User")][string]$Scope)
+    $entries = @(([Environment]::GetEnvironmentVariable("Path", $Scope) -split ';') | Where-Object { $_ })
     $missing = @($Dirs | Where-Object {
         $wanted = $_.TrimEnd('\')
         -not ($entries | Where-Object { $_.TrimEnd('\') -ieq $wanted })
     })
-    if ($missing.Count -eq 0) { Write-Log "Machine PATH already contains: $($Dirs -join ', ')"; return }
-    if ($WhatIf) { Write-Log "Would append to the machine PATH: $($missing -join ', ')"; return }
+    if ($missing.Count -eq 0) { Write-Log "$Scope PATH already contains: $($Dirs -join ', ')"; return }
+    if ($WhatIf) { Write-Log "Would append to the $Scope PATH: $($missing -join ', ')"; return }
     # Appended, not prepended: an existing default python (for example 3.14) stays the default.
-    [Environment]::SetEnvironmentVariable("Path", (($entries + $missing) -join ';'), "Machine")
-    Write-Log "Appended to the machine PATH: $($missing -join ', ')" "SUCCESS"
+    # .NET broadcasts WM_SETTINGCHANGE, so newly opened terminals see the change.
+    [Environment]::SetEnvironmentVariable("Path", (($entries + $missing) -join ';'), $Scope)
+    Write-Log "Appended to the $Scope PATH: $($missing -join ', ')" "SUCCESS"
 }
 
-function Set-MachineVariable {
-    param([string]$Name, [string]$Value)
-    if ([Environment]::GetEnvironmentVariable($Name, "Machine") -eq $Value) {
-        Write-Log "$Name is already $Value"
+function Set-EnvVariable {
+    param([string]$Name, [string]$Value, [ValidateSet("Machine", "User")][string]$Scope)
+    if ([Environment]::GetEnvironmentVariable($Name, $Scope) -eq $Value) {
+        Write-Log "$Name is already $Value ($Scope)"
     } elseif ($WhatIf) {
-        Write-Log "Would set $Name=$Value (machine)"
+        Write-Log "Would set $Name=$Value ($Scope)"
     } else {
-        # .NET broadcasts WM_SETTINGCHANGE, so newly opened terminals see the change.
-        [Environment]::SetEnvironmentVariable($Name, $Value, "Machine")
-        Write-Log "Set $Name=$Value (machine)" "SUCCESS"
+        [Environment]::SetEnvironmentVariable($Name, $Value, $Scope)
+        Write-Log "Set $Name=$Value ($Scope)" "SUCCESS"
     }
     Set-Item -Path "Env:$Name" -Value $Value
+}
+
+function Add-ToolDirectories {
+    # Protected folders go on the machine PATH; anything a non-administrator could write to only on this
+    # user's PATH, with a warning.
+    param([string[]]$Dirs)
+    $machine = @($Dirs | Where-Object { Test-ProtectedLocation $_ })
+    $user = @($Dirs | Where-Object { -not (Test-ProtectedLocation $_) })
+    if ($machine.Count) { Add-PathEntries $machine "Machine" }
+    if ($user.Count) {
+        Write-Log ("Not under Program Files, so added to your user PATH only (other users could change files " +
+                   "there): $($user -join ', ')") "WARN"
+        Add-PathEntries $user "User"
+    }
 }
 
 try {
@@ -202,7 +230,7 @@ try {
     if ($python) {
         Write-Log "Python $(Get-PythonVersion $python) found at $python" "SUCCESS"
     } else {
-        Install-ChocoPackage $PythonPackage $PythonVersion @("--params", "/InstallDir:$PythonDir")
+        Install-ChocoPackage $PythonPackage $PythonVersion @("--params", "'/InstallDir:$PythonDir'")
         if (-not $WhatIf) {
             $python = Find-Python313
             if (-not $python) { throw "Python 3.13 was installed but python.exe was not found in $PythonDir" }
@@ -229,8 +257,9 @@ try {
 
     $pathDirs = @((Split-Path $python), (Join-Path (Split-Path $python) "Scripts"))
     if ($gnupg) { $pathDirs += $gnupg }
-    Add-MachinePath $pathDirs
-    Set-MachineVariable "YKRECOVER_PYTHON" $python
+    Add-ToolDirectories $pathDirs
+    $scope = if (Test-ProtectedLocation $python) { "Machine" } else { "User" }
+    Set-EnvVariable "YKRECOVER_PYTHON" $python $scope
     Update-SessionPath
 
     if (-not $WhatIf) {
