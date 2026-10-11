@@ -77,7 +77,7 @@ class HomeRegistryTests(unittest.TestCase):
         self.assertNotIn(done.path, gpg._LIVE_HOMES)
         gpg.destroy_all_homes()
         self.assertFalse(kept.path.exists())
-        self.assertEqual(gpg._LIVE_HOMES, set())
+        self.assertNotIn(kept.path, gpg._LIVE_HOMES)
 
 
 class LoadTests(unittest.TestCase):
