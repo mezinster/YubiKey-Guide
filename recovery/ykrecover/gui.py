@@ -5,6 +5,7 @@ which owns all widgets and dialogs.
 """
 
 import queue
+import signal
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -110,6 +111,7 @@ class App:
         self.failures = 0
         self.pins = []  # kept PINs not yet shown
         self.pins_shown = False
+        self.terminate_requested = False
         self.worker = None
         self.table = None
         self.logbox = None
@@ -148,6 +150,9 @@ class App:
         if self.poll_id:
             self.root.after_cancel(self.poll_id)  # a direct call must not start a second chain
         try:
+            if self.terminate_requested:
+                self.terminate()
+                return
             while True:
                 try:
                     task = self.tasks.get_nowait()
@@ -447,9 +452,24 @@ class App:
             self.session.cleanup()
         self.root.destroy()
 
+    def request_terminate(self, signum, frame):
+        """SIGTERM/SIGHUP handler: only sets a flag, which poll() acts on inside the Tk loop."""
+        self.terminate_requested = True
+
+    def terminate(self):
+        """Quit for a signal, even mid-run: reveal every PIN already changed, clean up, close."""
+        if self.worker is not None and self.worker.is_alive() and self.session:
+            self.pins = [(r.serial, r.admin_pin, r.user_pin) for r in self.session.results if r.pins_set]
+        self.reveal_pins()
+        if self.session:
+            self.session.cleanup()
+        self.root.destroy()
+
 
 def main() -> int:
     root = tk.Tk()
-    App(root)
+    app = App(root)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, app.request_terminate)
     root.mainloop()
     return 0

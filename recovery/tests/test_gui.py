@@ -1,4 +1,5 @@
 import os
+import signal
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -59,6 +60,29 @@ class GuiSmokeTests(unittest.TestCase):
             app.close()
         self.assertEqual(shown.call_count, 1)
         self.assertIn("User PIN 123456", shown.call_args.args[1])
+
+    def test_termination_signal_reveals_pins_and_closes(self):
+        app = self.app_with_pins()
+        app.request_terminate(signal.SIGTERM, None)
+        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+            app.poll()
+        self.assertEqual(shown.call_count, 1)
+        self.assertIn("Admin PIN 12345678", shown.call_args.args[1])
+        with self.assertRaises(tk.TclError):
+            app.root.winfo_exists()  # destroyed
+
+    def test_termination_mid_run_reveals_changed_pins(self):
+        app = self.app_with_pins()
+        app.pins = []
+        changed = SimpleNamespace(serial="22222222", admin_pin="87654321", user_pin="654321", pins_set=True)
+        untouched = SimpleNamespace(serial="", admin_pin="11112222", user_pin="333444", pins_set=False)
+        app.session = SimpleNamespace(results=[changed, untouched], cleanup=mock.Mock())
+        app.worker = SimpleNamespace(is_alive=lambda: True)
+        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+            app.terminate()
+        self.assertIn("Card 22222222: Admin PIN 87654321", shown.call_args.args[1])
+        self.assertNotIn("11112222", shown.call_args.args[1])
+        app.session.cleanup.assert_called_once()
 
     def test_tkui_marshals_calls(self):
         from ykrecover.gui import App
