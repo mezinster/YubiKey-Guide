@@ -4,7 +4,8 @@ YubiKey recovery for Windows
 Migrates GnuPG key backups onto new YubiKeys. Full documentation:
 https://github.com/mezinster/YubiKey-Guide/blob/master/recovery/README.md
 
-1. Install Gpg4win from https://gpg4win.org (it provides gpg, gpgconf and gpg-connect-agent).
+1. Install GnuPG: either Gpg4win from https://gpg4win.org, or run Prepare-Windows.bat from the
+   repository's recovery\packaging folder (installs Chocolatey, GnuPG and Python 3.13 and sets PATH).
 2. Unzip this archive anywhere.
 3. Double-click ykrecover-gui.exe for the step-by-step wizard, or run
    ykrecover.exe --cli --help

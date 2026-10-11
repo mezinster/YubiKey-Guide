@@ -10,6 +10,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -17,17 +18,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install Gpg4win
+      - name: install GnuPG
+        # Official GnuPG for Windows, pinned by version and SHA-256 (signature verified against the GnuPG
+        # release key 6DAA6E64A76D2840571B4902528897B826403ADA when the pin was set). The silent installer
+        # hangs on headless runners, so unpack its bin\ folder with the preinstalled 7-Zip instead; GnuPG on
+        # Windows finds its helper programs relative to gpg.exe.
+        timeout-minutes: 10
+        env:
+          GNUPG_URL: https://gnupg.org/ftp/gcrypt/binary/gnupg-w32-2.5.24_20260923.exe
+          GNUPG_SHA256: EA6F9DEE2CCCD83287432625B8B399173805ADD81D27067FCAF019C0C4DA1AD8
         run: |
-          choco install gpg4win -y --no-progress
-          foreach ($dir in "${env:ProgramFiles(x86)}\GnuPG\bin", "$env:ProgramFiles\GnuPG\bin") {
-            if (Test-Path $dir) { $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          $installer = Join-Path $env:RUNNER_TEMP "gnupg-w32.exe"
+          $dest = Join-Path $env:RUNNER_TEMP "gnupg"
+          Write-Host "Downloading $env:GNUPG_URL"
+          Invoke-WebRequest -Uri $env:GNUPG_URL -OutFile $installer
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
+          if ($hash -ne $env:GNUPG_SHA256) { throw "GnuPG installer hash mismatch: $hash" }
+          & "$env:ProgramFiles\7-Zip\7z.exe" x $installer "-o$dest" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip could not unpack the GnuPG installer ($LASTEXITCODE)" }
+          Remove-Item "$dest\bin\*.tmp" -ErrorAction SilentlyContinue
+          foreach ($tool in "gpg", "gpgconf", "gpg-connect-agent", "gpg-agent", "scdaemon") {
+            if (-not (Test-Path "$dest\bin\$tool.exe")) { throw "$tool.exe missing from the GnuPG installer" }
           }
-
+          & "$dest\bin\gpg.exe" --version | Select-Object -First 2
+          if ($LASTEXITCODE -ne 0) { throw "gpg --version failed" }
+          & "$dest\bin\gpgconf.exe" --list-dirs
+          "$dest\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: install build requirements
         run: python -m pip install -r recovery/packaging/requirements-windows.txt
 
       - name: recovery tests
+        timeout-minutes: 20
         working-directory: recovery
         run: python -m unittest discover -s tests -t . -v
 
@@ -44,6 +65,8 @@ jobs:
         run: |
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:TAG --title $env:TAG --notes "Windows build of the YubiKey recovery tool."
+            $flags = @()
+            if ($env:TAG.Contains("-")) { $flags += "--prerelease" }   # v0.1.0-beta and the like
+            gh release create $env:TAG --title $env:TAG --notes "Windows build of the YubiKey recovery tool." @flags
           }
           gh release upload $env:TAG recovery/packaging/dist/ykrecover-windows-x64.zip --clobber
