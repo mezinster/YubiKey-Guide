@@ -19,7 +19,7 @@ Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecov
 > Every card you write is **reset**: all OpenPGP keys and PINs on it are erased. The tool asks you to type `RESET <serial>` for each card.
 
 > [!IMPORTANT]
-> Run this on an air-gapped system. Your backup is copied into temporary GnuPG homes under `$XDG_RUNTIME_DIR` (or `/tmp` when that path is unset or too long), which are deleted when the tool exits. They are memory-backed only when that folder is on tmpfs, as on the LiveCD; otherwise the tool prints a warning, and key material may reach the disk.
+> Run this on an air-gapped system. Your backup is copied into temporary GnuPG homes under `$XDG_RUNTIME_DIR` (or `/tmp` when that path is unset or too long), which are deleted when the tool exits. They are memory-backed only when that folder is on tmpfs, as on the LiveCD; otherwise the tool prints a warning, and key material may reach the disk. On Windows the default is `%LOCALAPPDATA%\Temp\ykrecover`, which is on disk: the files are overwritten before deletion, but choose a RAM disk or encrypted volume with `--workdir` to keep key material off the disk.
 
 ## Modes
 
@@ -96,7 +96,7 @@ Both tools run with umask 077, so everything written to `--out` is readable only
 
 Before every card session (each scripted `gpg --change-pin`, `--edit-card` or `--edit-key` run) and every ykman command, `gpgconf --kill all` clears cached passphrases and card sessions, so prompts always arrive in the expected order.
 
-The Admin PIN is passed to `ykman` with `-a`, as in the main guide. On a multi-user machine other users could briefly see it in the process list; on the intended single-user air-gapped system that risk does not apply.
+The Admin PIN is passed to `ykman` with `-a`, as in the main guide. On a multi-user machine other users could briefly see it in the process list; on the intended single-user air-gapped system that risk does not apply. On Windows, which is usually an everyday and possibly managed machine, process-creation auditing or endpoint security software can record command lines, including the Admin PIN: on a managed or audited machine, change the Admin PIN afterwards (`ykman openpgp access change-admin-pin`).
 
 ## Development
 

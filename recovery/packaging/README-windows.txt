@@ -8,7 +8,8 @@ https://github.com/mezinster/YubiKey-Guide/blob/master/recovery/README.md
 2. Unzip this archive anywhere.
 3. Double-click ykrecover-gui.exe for the step-by-step wizard, or run
    ykrecover.exe --cli --help
-   in a terminal for the command-line version.
+   in a terminal for the command-line version. Use cmd, PowerShell or Windows Terminal: Git Bash
+   (mintty) shows the passphrase as you type it, because its input is not a real console.
 
 Windows SmartScreen may warn that the program is unrecognised: these executables are not code-signed.
 Choose "More info" and "Run anyway" if you trust this build.
@@ -24,6 +25,13 @@ If a run ends abnormally (the console window is closed, the process is ended in 
 crashes), its temporary folders (named ykr-*) can stay behind in the work folder without being
 overwritten. The next run warns about any that are older than 10 minutes: they may hold key material,
 so delete them securely (for example with Sysinternals SDelete).
+
+A work folder on a RAM disk or VeraCrypt volume inherits that volume's permissions. On a shared
+machine, restrict the folder to your own user account before using it.
+
+The Admin PIN is passed to the bundled ykman on its command line. Process-creation auditing or endpoint
+security software on a managed or audited machine can record command lines: on such a machine, change
+the Admin PIN afterwards (ykrecover.exe --ykman openpgp access change-admin-pin).
 
 Before using real backups, run the hardware checklist in recovery/README.md with a spare YubiKey on
 this Windows machine.
