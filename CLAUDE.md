@@ -8,7 +8,7 @@ Documentation project: a guide to using YubiKey with GnuPG for encryption, signi
 
 ## Build Commands
 
-No build system or tests. CI (`.github/workflows/lint.yml`) runs the three checks below; run them locally after editing docs or scripts.
+No build system. CI (`.github/workflows/lint.yml`) runs the checks below; run them locally after editing docs or scripts.
 
 ```bash
 # Markdown lint, incl. broken #anchor links (MD051). Config + file globs: .markdownlint-cli2.jsonc
@@ -19,7 +19,10 @@ python3 .github/scripts/check_toc.py README.md
 
 # Scripts (shellcheck via `pipx install shellcheck-py`). CI gates on errors only; existing
 # SC2155/SC2086/SC3045 warnings are upstream — don't add new ones.
-shellcheck --severity=error scripts/*.sh piv/*.sh
+shellcheck --severity=error scripts/*.sh piv/*.sh recovery/recoverCard.sh recovery/tests/fixtures/make_fixtures.sh
+
+# Recovery toolset tests (Python + bash, fake card hardware)
+cd recovery && python3 -m unittest discover -s tests -t . -v
 
 # Build NixOS Live ISO
 nix build --experimental-features "nix-command flakes" nix#nixosConfigurations.yubikeyLive.x86_64-linux.config.system.build.isoImage
@@ -47,6 +50,7 @@ nix flake update --commit-lock-file
 
 - `generateKeys.sh` and `resetCard.sh` are bash (`#!/usr/bin/env bash`); `switchKeys.sh` is `#!/bin/sh`. Only `resetCard.sh` sends raw APDUs via `gpg-connect-agent`.
 - `nix/flake.nix` pins `nixos-26.05` (`system.stateVersion` stays "25.05" intentionally) and builds an air-gapped XFCE ISO for x86_64 and aarch64. It embeds `README.md`, `config/gpg.conf` and `config/gpg-agent.conf` — editing those changes the ISO.
+- `recovery/` holds two implementations of the same tool (`ykrecover/` Python + Tkinter, `recoverCard.sh` bash). They must print byte-identical `--dry-run` plans (`recovery/tests/golden/`); change Python first, regenerate with `UPDATE_GOLDEN=1`, then make bash match.
 
 ## Repo Workflow
 

@@ -1821,6 +1821,9 @@ When a GnuPG key is added to YubiKey using `keytocard`, the credential is delete
 
 When a Subkey is added to an additional YubiKey, the stub is overwritten and will now point to the latest YubiKey. GnuPG will request a specific YubiKey by serial number, as referenced by the stub, and will not recognize another YubiKey with a different serial number.
 
+> [!TIP]
+> To load backed-up keys onto a new set of YubiKeys, for example after a YubiKey is damaged or lost, use the [recovery toolset](recovery/README.md).
+
 To scan an additional YubiKey and recreate the correct stub:
 
 ```bash
