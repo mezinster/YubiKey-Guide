@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from . import EXIT_BACKUP, RecoveryError
+
 MAX_BASE_LEN = 60  # gpg-agent socket paths must stay well under the 108-byte limit
 
 
@@ -46,8 +48,15 @@ class Home:
 
     @classmethod
     def create(cls, label: str) -> "Home":
-        path = Path(tempfile.mkdtemp(prefix=f"ykr-{label}-", dir=runtime_base()))
-        path.chmod(0o700)
+        path = None
+        try:
+            path = Path(tempfile.mkdtemp(prefix=f"ykr-{label}-", dir=runtime_base()))
+            path.chmod(0o700)
+        except OSError as err:
+            if path:
+                shutil.rmtree(path, ignore_errors=True)
+            raise RecoveryError(f"cannot create a temporary GnuPG home in {runtime_base()}: {err}",
+                                EXIT_BACKUP) from err
         return cls(path)
 
     def env(self) -> dict:
@@ -64,8 +73,12 @@ class Home:
     def clone(self, label: str) -> "Home":
         self.kill_agents()
         new = Home.create(label)
-        shutil.copytree(self.path, new.path, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("S.*", "*.lock", ".#*", "random_seed"))
+        try:
+            shutil.copytree(self.path, new.path, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("S.*", "*.lock", ".#*", "random_seed"))
+        except OSError:
+            new.destroy()
+            raise
         return new
 
     def destroy(self) -> None:

@@ -219,7 +219,10 @@ class Session:
 
     def _execute(self) -> int:
         o = self.opts
-        o.out.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            o.out.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as err:
+            raise RecoveryError(f"cannot create the --out folder {o.out}: {err}", EXIT_USAGE) from err
         self.apply_mode()
         if o.mode != "clone":
             while not self.ui.confirm(f"New backup written to {o.out}. Saved it to offline storage?"):
@@ -318,9 +321,12 @@ class Session:
     def _write_card(self, r: CardResult) -> None:
         cardhome = verifyhome = None
         try:
-            cardhome = self.staging.clone("card")
-            verifyhome = Home.create("verify")
-            (verifyhome.path / "test.txt").write_text(secrets.token_hex(32) + "\n")
+            try:
+                cardhome = self.staging.clone("card")
+                verifyhome = Home.create("verify")
+                (verifyhome.path / "test.txt").write_text(secrets.token_hex(32) + "\n")
+            except (OSError, RecoveryError) as err:
+                raise StepError("prepare card home", f"could not prepare temporary GnuPG homes: {err}") from err
             surname, given = card.split_name(self.opts.name)
             tokens = {**self._tokens(), f"<SERIAL{r.index}>": r.serial, "<ADMIN_PIN>": r.admin_pin,
                       "<USER_PIN>": r.user_pin, "<LOGIN>": self.logins[r.index], "<SURNAME>": surname,

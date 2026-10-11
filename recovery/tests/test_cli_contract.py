@@ -13,8 +13,8 @@ class ContractTests:
 
     IMPL = ""
 
-    def cli(self, *args, stdin=""):
-        return run_impl(self.IMPL, list(args), stdin)
+    def cli(self, *args, stdin="", env=None):
+        return run_impl(self.IMPL, list(args), stdin, env)
 
     def test_missing_backup_is_usage_error(self):
         self.assertEqual(self.cli("--mode", "clone").returncode, 1)
@@ -107,6 +107,14 @@ class ContractTests:
         # rotate writes newly generated subkeys, so stubs for the old ones do not matter
         result = self.cli("--backup", str(copy), "--mode", "rotate", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unwritable_runtime_dir_is_a_staging_error(self):
+        base = short_tempdir(self, "rt")
+        base.chmod(0o500)
+        result = self.cli("--backup", ED_EXPORT, "--dry-run", env={"XDG_RUNTIME_DIR": str(base)})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("cannot create a temporary GnuPG home", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_read_only_backup(self):
         copy = short_tempdir(self, "ro") / "backup"

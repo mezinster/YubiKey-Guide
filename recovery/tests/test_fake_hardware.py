@@ -107,6 +107,16 @@ class FakeHardwareTests:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("expected exactly one YubiKey, found 0: fake ykman: cannot reach pcscd", result.stderr)
 
+    def test_out_that_cannot_be_created(self):
+        env = fake_hardware(self, [S1])
+        blocker = short_tempdir(self, "out") / "file"
+        blocker.write_text("not a folder")
+        result = run_impl(self.IMPL, ["--backup", str(FIXTURES / "ed25519" / "export"), "--out",
+                                      str(blocker / "new")], f"{PASSPHRASE}\ny\n", env)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("cannot create the --out folder", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_skip_after_failure(self):
         result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\ns\n", fail_at="sign")
         self.assertEqual(result.returncode, 3)

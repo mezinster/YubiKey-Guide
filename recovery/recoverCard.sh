@@ -549,8 +549,8 @@ main() {
   parse_args "$@"
   validate_options
   preflight
-  new_home work WORK
-  new_home staging STAGING
+  new_home work WORK || die "$EXIT_BACKUP" "cannot create a temporary GnuPG home in $(runtime_base)"
+  new_home staging STAGING || die "$EXIT_BACKUP" "cannot create a temporary GnuPG home in $(runtime_base)"
   detect
   choose_candidate
   load_candidate "$CHOSEN"
@@ -854,7 +854,7 @@ run_live() {
   describe_key
   unlock
   if ! (( YES )) && ! confirm "Write subkeys of $KEY_FP to $CARDS card(s)?"; then exit "$EXIT_INTERRUPT"; fi
-  mkdir -p -m 700 -- "$OUT"
+  mkdir -p -m 700 -- "$OUT" || die "$EXIT_USAGE" "cannot create the --out folder $OUT"
   TOKENS=(['<CERTIFY_PASS>']=$CERTIFY_PASS ['<OUT>']=$OUT ['<DATE>']=$(date +%F)
     ['<DEFAULT_ADMIN_PIN>']=$DEFAULT_ADMIN_PIN ['<DEFAULT_USER_PIN>']=$DEFAULT_USER_PIN ['<STAGING>']=$STAGING)
   if ! { mode_steps && backup_steps; }; then

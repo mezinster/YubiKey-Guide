@@ -129,13 +129,16 @@ def load(candidate: Candidate, staging: Home) -> list:
         staging.kill_agents()
         for src in candidate.files:  # read-only media keeps its mode bits; make the copies usable
             dst = staging.path / src.name
-            if src.is_dir():
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-                for p in [dst, *dst.rglob("*")]:
-                    p.chmod(0o700 if p.is_dir() else 0o600)
-            else:
-                shutil.copy2(src, dst)
-                dst.chmod(0o600)
+            try:
+                if src.is_dir():
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                    for p in [dst, *dst.rglob("*")]:
+                        p.chmod(0o700 if p.is_dir() else 0o600)
+                else:
+                    shutil.copy2(src, dst)
+                    dst.chmod(0o600)
+            except (OSError, shutil.Error) as err:
+                raise RecoveryError(f"cannot copy {src} into staging: {err}", EXIT_BACKUP) from err
     else:
         for src in candidate.files:
             result = staging.run(["gpg", "--batch", "--import", str(src)])
