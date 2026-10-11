@@ -48,6 +48,27 @@
                 name = "yubikey-guide";
                 paths = [viewYubikeyGuide shortcut];
               };
+              recoveryPython = pkgs.python3.withPackages (ps: [ps.tkinter]);
+              recoveryGui = pkgs.writeShellScriptBin "yubikey-recovery" ''
+                export PYTHONPATH="${self}/../recovery''${PYTHONPATH:+:$PYTHONPATH}"
+                exec ${recoveryPython}/bin/python3 -m ykrecover "$@"
+              '';
+              recoveryScript = pkgs.writeShellScriptBin "recoverCard" ''
+                exec ${pkgs.bash}/bin/bash "${self}/../recovery/recoverCard.sh" "$@"
+              '';
+              recoveryShortcut = pkgs.makeDesktopItem {
+                name = "yubikey-recovery";
+                icon = "${pkgs.yubioath-flutter}/share/icons/com.yubico.yubioath.png";
+                desktopName = "YubiKey Recovery";
+                genericName = "Migrate GnuPG key backups to new YubiKeys";
+                comment = "Write backed-up GnuPG subkeys to new YubiKeys";
+                categories = ["Utility"];
+                exec = "${recoveryGui}/bin/yubikey-recovery";
+              };
+              yubikeyRecovery = pkgs.symlinkJoin {
+                name = "yubikey-recovery";
+                paths = [recoveryGui recoveryScript recoveryShortcut];
+              };
               dicewareScript = pkgs.writeShellScriptBin "diceware-webapp" ''
                 viewer="$(type -P xdg-open || true)"
                 if [ -z "$viewer" ]; then
@@ -213,6 +234,10 @@
                 # to open it in a non-graphical environment).
                 yubikeyGuide
 
+                # Migrate key backups to new YubiKeys (`yubikey-recovery`, or
+                # `recoverCard` in a terminal). See recovery/README.md.
+                yubikeyRecovery
+
                 # PDF and Markdown viewer
                 kdePackages.okular
               ];
@@ -258,6 +283,7 @@
                 chown nixos ${homeDir} ${desktopDir} ${documentsDir}
 
                 ln -sf ${yubikeyGuide}/share/applications/yubikey-guide.desktop ${desktopDir}
+                ln -sf ${yubikeyRecovery}/share/applications/yubikey-recovery.desktop ${desktopDir}
                 ln -sf ${dicewareWebApp}/share/applications/${dicewareWebApp.name} ${desktopDir}
                 ln -sfT ${self} ${documentsDir}/YubiKey-Guide
               '';
