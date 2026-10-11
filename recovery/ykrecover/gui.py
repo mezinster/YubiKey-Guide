@@ -28,7 +28,7 @@ MODE_HELP = ("clone: write the backed-up subkeys as they are.\n"
              "rotate: create new subkeys (needs the Certify key). Choose this if the old cards may be "
              "lost or compromised.")
 # Window size in units of the default font, so it grows with Windows display scaling (125%, 150%).
-WINDOW_EMS = (84, 30)  # width in "0" widths, height in line heights
+WINDOW_EMS = (84, 32)  # width in "0" widths, height in line heights
 # Core errors name CLI flags; the wizard names its fields instead. Checked in order.
 GUI_WORDS = (
     ("cannot create the --out folder", "cannot create the output folder"),
@@ -392,6 +392,17 @@ class App:
         self.back_btn.state(["!disabled"] if 0 < page < 6 or before_start else ["disabled"])
         self.next_btn.state(["!disabled"] if page < 6 else ["disabled"])
         self.pages[page][0]()
+        self.fit_page()
+
+    def fit_page(self):
+        # The font-based minimum fits every page on the fonts we test; grow it if this system's fonts need more.
+        root = self.root
+        root.update_idletasks()
+        min_width, min_height = root.minsize()
+        width = min(max(min_width, root.winfo_reqwidth()), root.winfo_screenwidth() - 40)
+        height = min(max(min_height, root.winfo_reqheight()), root.winfo_screenheight() - 80)
+        if (width, height) != (min_width, min_height):
+            root.minsize(width, height)
 
     def next(self):
         leave = self.pages[self.page][1]

@@ -337,6 +337,7 @@ class GuiLayoutTests(unittest.TestCase):
                 with self.subTest(scaling=round(scaling, 2), page=page):
                     app.show(page)
                     root.update()
+                    self.assertEqual(root.minsize(), (width, height))  # fit_page did not have to grow it
                     self.assertLessEqual(root.winfo_reqwidth(), width)
                     self.assertLessEqual(root.winfo_reqheight(), height)
                     for button in (app.back_btn, app.next_btn):
@@ -363,9 +364,13 @@ class GuiLayoutTests(unittest.TestCase):
     def test_card_table_columns_fit(self):
         for scaling in SCALINGS:
             root, app = self.app(scaling)
+            width, height = root.minsize()
+            root.geometry(f"{width}x{height}")
             app.show(6)
-            columns = sum(app.table.column(c, "width") for c in ("#0", "status"))
-            self.assertLessEqual(columns, root.minsize()[0] - 48)
+            root.update()
+            table = app.table
+            self.assertLessEqual(root.winfo_reqwidth(), width)
+            self.assertLessEqual(table.winfo_x() + table.winfo_width(), table.master.winfo_width())
 
     def test_dialogs_fit_the_screen(self):
         from ykrecover.gui import ChoiceDialog
