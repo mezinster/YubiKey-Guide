@@ -11,7 +11,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError
+from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError, osdeps
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
 from .migrate import Options, Session
@@ -116,7 +116,7 @@ class App:
         self.table = None
         self.logbox = None
         self.v = {
-            "folder": tk.StringVar(), "passphrase": tk.StringVar(), "mode": tk.StringVar(value="clone"),
+            "folder": tk.StringVar(), "workdir": tk.StringVar(), "passphrase": tk.StringVar(), "mode": tk.StringVar(value="clone"),
             "expire": tk.StringVar(value="2y"), "algo": tk.StringVar(value=""), "revoke": tk.BooleanVar(),
             "cards": tk.StringVar(value="1"), "pins": tk.StringVar(value="generate"), "same": tk.BooleanVar(),
             "retries": tk.StringVar(value="5,5,5"), "sig": tk.StringVar(value="on"),
@@ -149,8 +149,10 @@ class App:
     def poll(self):
         if self.poll_id:
             self.root.after_cancel(self.poll_id)  # a direct call must not start a second chain
+        reschedule = True
         try:
             if self.terminate_requested:
+                reschedule = False  # the window is destroyed: a new "after" would outlive it
                 self.terminate()
                 return
             while True:
@@ -166,10 +168,12 @@ class App:
                     except Exception:
                         pass
         finally:
-            try:
-                self.poll_id = self.root.after(100, self.poll)
-            except tk.TclError:  # window already destroyed
-                self.poll_id = None
+            self.poll_id = None
+            if reschedule:
+                try:
+                    self.poll_id = self.root.after(100, self.poll)
+                except tk.TclError:  # window already destroyed
+                    pass
 
     def stop_polling(self, event):
         if event.widget is self.root and self.poll_id:
@@ -244,6 +248,29 @@ class App:
         self.cand_list.pack(fill="x", pady=8)
         self.refresh_candidates()
         self.row("Certify key passphrase", lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
+        frame = ttk.Frame(self.body)
+        frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(frame, text="Work folder (optional)", width=26).pack(side="left")
+        ttk.Entry(frame, textvariable=self.v["workdir"]).pack(side="left", fill="x", expand=True)
+        ttk.Button(frame, text="Browse…", command=lambda: self.v["workdir"].set(
+            filedialog.askdirectory(parent=self.root, mustexist=True) or self.v["workdir"].get())).pack(
+            side="left", padx=4)
+        self.workdir_note = ttk.Label(self.body, wraplength=700, justify="left")
+        self.workdir_note.pack(anchor="w")
+        self.v["workdir"].trace_add("write", lambda *_: self.update_workdir_note())
+        self.update_workdir_note()
+
+    def update_workdir_note(self):
+        text = self.v["workdir"].get().strip()
+        if text and not Path(text).is_dir():
+            note = "This folder does not exist."
+        else:
+            base = Path(text) if text else osdeps.work_base()
+            note = (f"Temporary key copies go to {base} (memory-backed)." if osdeps.memory_backed(base) else
+                    f"Temporary key copies go to {base}, which is on disk. Choose a RAM disk or an "
+                    "encrypted volume to avoid that.")
+        if self.workdir_note.winfo_exists():
+            self.workdir_note.config(text=note)
 
     def browse_backup(self):
         folder = filedialog.askdirectory(parent=self.root, mustexist=True)
@@ -273,13 +300,21 @@ class App:
             self.alert("Select a detected backup.")
             return False
         candidate = self.candidates[chosen[0]]
+        text = self.v["workdir"].get().strip()
+        workdir = Path(text) if text else None
         s = self.session
-        if s and s.passphrase and s.bundle and (s.opts.backup, s.opts.source) == (candidate.path, candidate.kind):
+        if (s and s.passphrase and s.bundle and (s.opts.backup, s.opts.source) == (candidate.path, candidate.kind)
+                and s.opts.workdir == workdir):
             self.v["passphrase"].set("")
             return True  # already loaded and unlocked (the user went Back): keep it
         if self.session:
             self.session.cleanup()
-        self.session = Session(Options(backup=candidate.path, source=candidate.kind), self.ui)
+        self.session = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
+        try:
+            self.session.validate_workdir()
+        except RecoveryError as err:
+            self.alert(str(err))
+            return False
         while True:
             try:
                 self.session.load()

@@ -13,6 +13,27 @@ except ImportError:  # python3-tk not installed
 
 @unittest.skipIf(tk is None or not os.environ.get("DISPLAY"), "needs tkinter and a display")
 class GuiSmokeTests(unittest.TestCase):
+    def test_work_folder_is_applied_before_loading(self):
+        from pathlib import Path
+        from ykrecover import osdeps
+        from ykrecover.gui import App
+        from tests.helpers import FIXTURES, PASSPHRASE, short_tempdir
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        app.alert = lambda text: None
+        self.addCleanup(lambda: app.session and app.session.cleanup())
+        self.addCleanup(osdeps.set_workdir, None)
+        workdir = short_tempdir(self, "wd")
+        app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
+        app.v["workdir"].set(str(workdir))
+        app.v["passphrase"].set(PASSPHRASE)
+        app.show(1)
+        root.update()
+        self.assertTrue(app.leave_backup())
+        self.assertEqual(Path(app.session.staging.path).parent, workdir)
+        self.assertIn(str(workdir), app.workdir_note.cget("text"))
+
     def test_wizard_builds_and_closes(self):
         from ykrecover.gui import App
         root = tk.Tk()
