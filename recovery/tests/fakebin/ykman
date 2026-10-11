@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Test double for ykman: records calls; `list --serials` hands out the next serial from `cards`."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+STATE = Path(os.environ["FAKE_HW_DIR"])
+
+
+def main():
+    args = sys.argv[1:]
+    if "-a" in args:
+        args[args.index("-a") + 1] = "<pin>"
+    with open(STATE / "calls.log", "a", encoding="utf-8") as f:
+        f.write("ykman " + " ".join(args) + "\n")
+    if args[:2] == ["list", "--serials"]:
+        cards = (STATE / "cards").read_text().split()
+        counter = STATE / "list_count"
+        n = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(n + 1))
+        if n < len(cards):
+            (STATE / "current").write_text(cards[n])
+            print(cards[n])
+        return 0
+    serial = args[args.index("--device") + 1] if "--device" in args else ""
+    current = STATE / "current"
+    if serial != (current.read_text().strip() if current.exists() else ""):
+        sys.stderr.write("fake ykman: wrong device\n")
+        return 1
+    for kind in ("reset", "set-retries", "set-touch"):
+        if kind in args:
+            wanted, marker = STATE / "fail_at", STATE / "failed_once"
+            if wanted.exists() and wanted.read_text().strip() == kind and not marker.exists():
+                marker.touch()
+                sys.stderr.write(f"fake failure at {kind}\n")
+                return 2
+            if kind == "reset":
+                (STATE / f"card-{serial}.json").write_text(json.dumps({"fpr": ["", "", ""]}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

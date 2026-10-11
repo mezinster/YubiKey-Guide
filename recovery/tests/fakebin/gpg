@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Test double for gpg: card operations are simulated, everything else runs the real gpg."""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ARGS = sys.argv[1:]
+REAL = os.environ["REAL_GPG"]
+STATE = Path(os.environ["FAKE_HW_DIR"])
+
+
+def log(kind):
+    with open(STATE / "calls.log", "a", encoding="utf-8") as f:
+        f.write(kind + "\n")
+
+
+def maybe_fail(kind):
+    marker, wanted = STATE / "failed_once", STATE / "fail_at"
+    if wanted.exists() and wanted.read_text().strip() == kind and not marker.exists():
+        marker.touch()
+        sys.stderr.write(f"fake failure at {kind}\n")
+        sys.exit(2)
+
+
+def current_card():
+    current = STATE / "current"
+    serial = current.read_text().strip() if current.exists() else ""
+    path = STATE / f"card-{serial}.json"
+    data = json.loads(path.read_text()) if path.exists() else {"fpr": ["", "", ""]}
+    return serial, path, data
+
+
+def main():
+    if "--card-status" in ARGS:
+        log("card-status")
+        serial, _, data = current_card()
+        print(f"serial:{serial}:")
+        print("fpr:" + ":".join(data["fpr"]) + ":")
+        return 0
+    if "--change-pin" in ARGS or "--edit-card" in ARGS or "--card-edit" in ARGS:
+        kind = "change-pin" if "--change-pin" in ARGS else "edit-card"
+        script = sys.stdin.read()
+        log(kind)
+        with open(STATE / f"{kind}.txt", "a", encoding="utf-8") as f:
+            f.write(script)
+        maybe_fail(kind)
+        return 0
+    if "--edit-key" in ARGS:
+        script = sys.stdin.read()
+        lines = script.splitlines()
+        if "keytocard" not in lines:
+            return subprocess.run([REAL, *ARGS], input=script, text=True, check=False).returncode
+        slot = int(lines[lines.index("keytocard") + 1])
+        log(f"keytocard{slot}")
+        maybe_fail(f"keytocard{slot}")
+        serial, path, data = current_card()
+        data["fpr"][slot - 1] = lines[0].split()[1].upper()
+        path.write_text(json.dumps(data))
+        keys = STATE / f"keys-{serial}"
+        if not keys.exists():
+            shutil.copytree(os.environ["GNUPGHOME"], keys, ignore=shutil.ignore_patterns("S.*", "*.lock"))
+        return 0
+    if "--detach-sign" in ARGS or "--decrypt" in ARGS:
+        kind = "sign" if "--detach-sign" in ARGS else "decrypt"
+        sys.stdin.read()
+        log(kind)
+        maybe_fail(kind)
+        serial, _, _ = current_card()
+        env = {**os.environ, "GNUPGHOME": str(STATE / f"keys-{serial}")}
+        return subprocess.run([REAL, *ARGS], input=os.environ["FAKE_CERTIFY_PASS"] + "\n", text=True,
+                              env=env, check=False).returncode
+    os.execv(REAL, [REAL, *ARGS])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

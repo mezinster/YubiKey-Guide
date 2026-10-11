@@ -4,15 +4,17 @@ The CLI (run) and the GUI drive the same Session methods.
 """
 
 import datetime
+import secrets
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import EXIT_BACKUP, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
+from . import EXIT_BACKUP, EXIT_CARD, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
 from . import backup, card, modes
 from .gpg import Home, base_is_tmpfs, gpg_version, runtime_base
-from .plan import STAGING, format_plan, public_tokens, substitute
+from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, substitute
 
 
 @dataclass
@@ -192,6 +194,123 @@ class Session:
         self.bundle = backup.choose_key(backup.list_bundles(self.staging), self.bundle.key_fp)
         self.targets = modes.select_targets(self.bundle)
         self.staging.kill_agents()
+
+    def execute(self) -> int:
+        """Everything after the passphrase is unlocked and the key confirmed."""
+        o = self.opts
+        o.out.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.apply_mode()
+        if o.mode != "clone":
+            while not self.ui.confirm(f"New backup written to {o.out}. Saved it to offline storage?"):
+                self.ui.warn("copy the new backup before writing cards")
+        self.assign_pins()
+        self.write_cards()
+        return self.finish()
+
+    def assign_pins(self) -> None:
+        o = self.opts
+        self.results = [CardResult(i) for i in range(1, o.cards + 1)]
+        shared = None
+        for r in self.results:
+            if not (o.same_pins and shared):
+                if o.pins == "generate":
+                    shared = card.generate_pins()
+                else:
+                    label = "all cards" if o.same_pins else f"card {r.index}"
+                    shared = (self._ask_pin(f"Admin PIN ({label})", 8), self._ask_pin(f"User PIN ({label})", 6))
+            r.admin_pin, r.user_pin = shared
+            self.logins[r.index] = o.login or card.random_login()
+
+    def _ask_pin(self, label: str, minimum: int) -> str:
+        while True:
+            pin = self.ui.ask_secret(f"{label}:")
+            if not minimum <= len(pin) <= 127:
+                self.ui.warn(f"must be {minimum} to 127 characters")
+                continue
+            if self.ui.ask_secret(f"Repeat {label}:") != pin:
+                self.ui.warn("entries differ")
+                continue
+            return pin
+
+    def write_cards(self) -> None:
+        # Release the card from the user's own scdaemon so ykman can open it.
+        subprocess.run(["gpgconf", "--kill", "scdaemon"], capture_output=True, check=False)
+        done = set()
+        for r in self.results:
+            r.serial = self._wait_for_card(r.index, done)
+            done.add(r.serial)
+            if not self.ui.confirm_reset(r.serial):
+                r.status, r.detail = "SKIPPED", "reset not confirmed"
+                continue
+            while True:
+                try:
+                    self._write_card(r)
+                except StepError as err:
+                    choice = self.ui.card_failed(r.index, r.serial, err.shown, str(err))
+                    if choice == "retry":
+                        continue
+                    r.status, r.detail = "FAILED", err.shown
+                    if choice == "abort":
+                        raise Aborted() from err
+                    break
+                r.status, r.detail = "OK", ""
+                self.ui.progress(r.index, f"{r.serial}: OK")
+                break
+
+    def _wait_for_card(self, index: int, done: set) -> str:
+        while True:
+            self.ui.wait_for_card(index, self.opts.cards)
+            listing = subprocess.run(["ykman", "list", "--serials"], capture_output=True, text=True, check=False)
+            serials = card.parse_serials(listing.stdout)
+            if len(serials) != 1:
+                self.ui.warn(f"expected exactly one YubiKey, found {len(serials)}")
+            elif serials[0] in done:
+                self.ui.warn(f"card {serials[0]} was already written in this session")
+            else:
+                return serials[0]
+
+    def _write_card(self, r: CardResult) -> None:
+        cardhome = self.staging.clone("card")
+        verifyhome = Home.create("verify")
+        try:
+            (verifyhome.path / "test.txt").write_text(secrets.token_hex(32) + "\n")
+            surname, given = card.split_name(self.opts.name)
+            tokens = {**self._tokens(), f"<SERIAL{r.index}>": r.serial, "<ADMIN_PIN>": r.admin_pin,
+                      "<USER_PIN>": r.user_pin, "<LOGIN>": self.logins[r.index], "<SURNAME>": surname,
+                      "<GIVEN>": given, "<URL>": self.opts.url, "<CARDHOME>": str(cardhome.path),
+                      "<VERIFYHOME>": str(verifyhome.path)}
+            homes = {STAGING: self.staging, CARDHOME: cardhome, VERIFYHOME: verifyhome}
+            for step in self.card_plan(r.index, self.targets):
+                self.ui.progress(r.index, f"{r.serial}: {substitute(' '.join(step.argv), public_tokens(tokens))}")
+                self._check(step, self._exec(step, homes, tokens), verifyhome)
+        finally:
+            cardhome.destroy()
+            verifyhome.destroy()
+
+    def _check(self, step, output: str, verifyhome: Home) -> None:
+        if step.check == "cardstatus":
+            want = [self.targets[u].upper() for u in modes.USAGES]
+            got = card.parse_card_fprs(output)
+            if got != want:
+                raise StepError("card fingerprints", f"card has {got}, expected {want}")
+        elif step.check == "roundtrip":
+            if (verifyhome.path / "test.out").read_bytes() != (verifyhome.path / "test.txt").read_bytes():
+                raise StepError("decrypt round-trip", "decrypted text differs from the original")
+
+    def finish(self) -> int:
+        b, o = self.bundle, self.opts
+        for step in modes.finish_steps(b.key_fp, b.key_id, self.targets):
+            try:
+                self._exec(step, {STAGING: self.staging}, self._tokens())
+            except StepError as err:
+                self.ui.warn(f"export failed: {err}")
+        self.ui.show_pins([(r.serial, r.admin_pin, r.user_pin) for r in self.results if r.status == "OK"])
+        summary = [f"card {r.index} {r.serial or '-'} {r.status} {r.detail}".rstrip() for r in self.results]
+        self.ui.info("Summary:\n" + "\n".join(summary))
+        public = o.out / f"public-{b.key_id}-{datetime.date.today().isoformat()}.asc"
+        self.ui.info(f"On your daily machine run: yubikey-recovery --cli update-stubs --import {public} "
+                     f"--cards {o.cards}")
+        return EXIT_OK if all(r.status == "OK" for r in self.results) else EXIT_CARD
 
     def dry_run_text(self) -> str:
         targets = modes.ROTATED if self.opts.mode == "rotate" else self.targets
