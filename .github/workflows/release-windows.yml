@@ -10,6 +10,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -17,17 +18,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install Gpg4win
+      - name: install GnuPG
+        # Official GnuPG installer, pinned by version and SHA-256 (signature verified against the
+        # GnuPG release key 6DAA6E64A76D2840571B4902528897B826403ADA when the pin was set).
+        timeout-minutes: 10
+        env:
+          GNUPG_URL: https://gnupg.org/ftp/gcrypt/binary/gnupg-w32-2.5.24_20260923.exe
+          GNUPG_SHA256: EA6F9DEE2CCCD83287432625B8B399173805ADD81D27067FCAF019C0C4DA1AD8
         run: |
-          choco install gpg4win -y --no-progress
+          $installer = Join-Path $env:RUNNER_TEMP "gnupg-w32.exe"
+          Invoke-WebRequest -Uri $env:GNUPG_URL -OutFile $installer
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
+          if ($hash -ne $env:GNUPG_SHA256) { throw "GnuPG installer hash mismatch: $hash" }
+          $process = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "GnuPG installer failed with exit code $($process.ExitCode)" }
+          $found = $false
           foreach ($dir in "${env:ProgramFiles(x86)}\GnuPG\bin", "$env:ProgramFiles\GnuPG\bin") {
-            if (Test-Path $dir) { $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+            if (Test-Path "$dir\gpg.exe") {
+              $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              & "$dir\gpg.exe" --version
+              $found = $true
+            }
           }
+          if (-not $found) { throw "gpg.exe not found after installing GnuPG" }
 
       - name: install build requirements
         run: python -m pip install -r recovery/packaging/requirements-windows.txt
 
       - name: recovery tests
+        timeout-minutes: 20
         working-directory: recovery
         run: python -m unittest discover -s tests -t . -v
 

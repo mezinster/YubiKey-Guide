@@ -1,5 +1,6 @@
 # Builds dist\ykrecover-windows-x64.zip: ykrecover.exe, ykrecover-gui.exe, README-windows.txt, LICENSE.
-# Run from any folder on Windows with Python 3.11+ on PATH.
+# Run from any folder on Windows with Python 3.11+ on PATH, for example from cmd:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File recovery\packaging\build-windows.ps1
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
