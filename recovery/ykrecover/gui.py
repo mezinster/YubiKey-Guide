@@ -17,7 +17,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError, osdeps
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
-from .migrate import Options, Session, update_stubs_command, valid_metadata, valid_retries
+from .migrate import (Options, Session, update_stubs_command, update_stubs_where, valid_metadata,
+                      valid_retries)
 
 TITLE = "YubiKey recovery"
 METADATA_WARNING = ("OpenPGP card metadata (name, login, URL) can be read by anyone holding the card. "
@@ -752,6 +753,8 @@ class App:
         lines += ["", f"Files are in {o.out}.", "", "On your daily machine run:",
                   f"  {update_stubs_command()} --import <public key file> --remove-serial <old serial> "
                   f"--cards {o.cards}"]
+        if update_stubs_where():
+            lines.append(update_stubs_where())
         if self.pins:
             self.pin_btn = ttk.Button(self.body, text="Show PINs (once)", command=self.reveal_pins)
             self.pin_btn.pack(side="bottom", anchor="e", pady=8)

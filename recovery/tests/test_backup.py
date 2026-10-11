@@ -122,11 +122,16 @@ class UpdateStubsHintTests(unittest.TestCase):
     def test_hint_names_the_platform_command(self):
         from unittest import mock
         from ykrecover import osdeps
-        from ykrecover.migrate import update_stubs_command
-        for platform, expected in (("linux", "yubikey-recovery --cli update-stubs"),
+        from ykrecover.migrate import update_stubs_command, update_stubs_where
+        for platform, expected in (("linux", "python3 -m ykrecover --cli update-stubs"),
                                    ("win32", "ykrecover.exe --cli update-stubs")):
             with mock.patch.object(osdeps.sys, "platform", platform):
                 self.assertEqual(update_stubs_command(), expected)
+        with mock.patch.object(osdeps.sys, "platform", "linux"):
+            self.assertIn("recovery folder", update_stubs_where())
+            self.assertIn("yubikey-recovery --cli update-stubs", update_stubs_where())
+        with mock.patch.object(osdeps.sys, "platform", "win32"):
+            self.assertEqual(update_stubs_where(), "")
 
 
 class PreflightWarningTests(unittest.TestCase):

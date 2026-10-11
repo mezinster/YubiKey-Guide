@@ -18,7 +18,15 @@ from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, sub
 TOUCH_PROMPT = "Touch the YubiKey when it blinks"
 def update_stubs_command() -> str:
     """How the user starts update-stubs on this platform."""
-    return "ykrecover.exe --cli update-stubs" if osdeps.is_windows() else "yubikey-recovery --cli update-stubs"
+    return "ykrecover.exe --cli update-stubs" if osdeps.is_windows() else "python3 -m ykrecover --cli update-stubs"
+
+
+def update_stubs_where() -> str:
+    """Where update_stubs_command() works; empty when it is self-explanatory (the Windows exe)."""
+    if osdeps.is_windows():
+        return ""
+    return ("Run it in the recovery folder of a YubiKey-Guide checkout "
+            "(on the NixOS live image: yubikey-recovery --cli update-stubs).")
 
 
 def valid_metadata(value: str, limit: int) -> bool:
@@ -438,6 +446,8 @@ class Session:
         public = o.out / f"public-{b.key_id}-{datetime.date.today().isoformat()}.asc"
         self.ui.info(f"On your daily machine run: {update_stubs_command()} --import {public} "
                      f"--cards {o.cards}")
+        if update_stubs_where():
+            self.ui.info(update_stubs_where())
         return EXIT_OK if all(r.status == "OK" for r in self.results) else EXIT_CARD
 
     def dry_run_text(self) -> str:
