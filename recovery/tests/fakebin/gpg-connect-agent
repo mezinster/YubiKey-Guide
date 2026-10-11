@@ -7,4 +7,11 @@ from pathlib import Path
 
 with open(Path(os.environ["FAKE_HW_DIR"]) / "calls.log", "a", encoding="utf-8") as f:
     f.write("gpg-connect-agent " + " | ".join(sys.argv[1:]) + "\n")
+state = Path(os.environ["FAKE_HW_DIR"])
+marker, wanted = state / "failed_once", state / "fail_at"
+if "learn --force" in sys.argv[1:] and wanted.exists() and wanted.read_text().strip() == "learn" \
+        and not marker.exists():
+    marker.touch()
+    sys.stderr.write("fake failure at learn\n")
+    sys.exit(1)
 print("OK")

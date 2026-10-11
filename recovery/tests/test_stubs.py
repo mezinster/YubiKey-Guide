@@ -40,6 +40,24 @@ class StubsTests:
         result = self.run_stubs(["--remove-serial", OLD], "n\n\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(list((self.home / "private-keys-v1.d").iterdir())), 3)
+        self.assertEqual(list(self.home.glob("stub-backup-*")), [])
+
+    def test_serial_must_match_aid_field(self):
+        keys = self.home / "private-keys-v1.d"
+        (keys / "DDDD.key").write_text(stub("99992222", 1))
+        result = self.run_stubs(["--remove-serial", OLD], "y\n\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((keys / "DDDD.key").exists())
+        self.assertFalse((keys / "AAAA.key").exists())
+
+    def test_non_numeric_serial_rejected(self):
+        result = self.run_stubs(["--remove-serial", "0006X"], "y\n\n")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(list((self.home / "private-keys-v1.d").iterdir())), 3)
+
+    def test_learn_failure_exits_3(self):
+        self.env = {**fake_hardware(self, ["44444444"], fail_at="learn"), "GNUPGHOME": str(self.home)}
+        self.assertEqual(self.run_stubs([], "\n").returncode, 3)
 
     def test_import_public_key(self):
         info = fixture_info("ed25519")

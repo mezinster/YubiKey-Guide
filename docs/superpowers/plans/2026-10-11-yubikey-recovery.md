@@ -1969,6 +1969,13 @@ from pathlib import Path
 
 with open(Path(os.environ["FAKE_HW_DIR"]) / "calls.log", "a", encoding="utf-8") as f:
     f.write("gpg-connect-agent " + " | ".join(sys.argv[1:]) + "\n")
+state = Path(os.environ["FAKE_HW_DIR"])
+marker, wanted = state / "failed_once", state / "fail_at"
+if "learn --force" in sys.argv[1:] and wanted.exists() and wanted.read_text().strip() == "learn" \
+        and not marker.exists():
+    marker.touch()
+    sys.stderr.write("fake failure at learn\n")
+    sys.exit(1)
 print("OK")
 ```
 
@@ -2292,7 +2299,7 @@ git commit -m "recovery: write and verify cards, with fake hardware tests"
 **Interfaces:**
 
 - Consumes: `CliUI` protocol, `Aborted`, `RecoveryError`.
-- Produces: `user_home() -> Path`, `find_stubs(home, serial) -> list[Path]` (matches `Token:` lines only), `update_stubs(ui, import_file, remove_serials, cards) -> int`.
+- Produces: `user_home() -> Path`, `find_stubs(home, serial) -> list[Path]` (matches `Token:` lines only), `update_stubs(ui, import_file, remove_serials, cards) -> int`. `--remove-serial` values must be all digits (else exit 1); a stub matches only when its Token AID's serial field (chars 20-28) equals the zero-padded serial; exit 3 if any `learn --force` fails; stubs move into a unique `mkdtemp` backup dir and an OSError reports moved/not-moved files (exit 1).
 - CLI contract: `update-stubs [--import FILE] [--remove-serial S ...] [--cards N]`. Prompts: `Move <n> stub(s) for card <S> out of the keyring?…[y/N]`, then `Insert card <i> of <N> and press Enter` per card. It operates on the inherited `GNUPGHOME` or `~/.gnupg`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2342,6 +2349,24 @@ class StubsTests:
         result = self.run_stubs(["--remove-serial", OLD], "n\n\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(list((self.home / "private-keys-v1.d").iterdir())), 3)
+        self.assertEqual(list(self.home.glob("stub-backup-*")), [])
+
+    def test_serial_must_match_aid_field(self):
+        keys = self.home / "private-keys-v1.d"
+        (keys / "DDDD.key").write_text(stub("99992222", 1))
+        result = self.run_stubs(["--remove-serial", OLD], "y\n\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((keys / "DDDD.key").exists())
+        self.assertFalse((keys / "AAAA.key").exists())
+
+    def test_non_numeric_serial_rejected(self):
+        result = self.run_stubs(["--remove-serial", "0006X"], "y\n\n")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(list((self.home / "private-keys-v1.d").iterdir())), 3)
+
+    def test_learn_failure_exits_3(self):
+        self.env = {**fake_hardware(self, ["44444444"], fail_at="learn"), "GNUPGHOME": str(self.home)}
+        self.assertEqual(self.run_stubs([], "\n").returncode, 3)
 
     def test_import_public_key(self):
         info = fixture_info("ed25519")
@@ -2380,9 +2405,10 @@ import datetime
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
-from . import EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
+from . import EXIT_CARD, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
 
 
 def user_home() -> Path:
@@ -2390,12 +2416,14 @@ def user_home() -> Path:
 
 
 def find_stubs(home: Path, serial: str) -> list:
-    """Shadowed-key files whose Token line names the card serial."""
+    """Shadowed-key files whose Token line carries the card serial in its AID."""
+    wanted = serial.zfill(8)
     found = []
     for path in sorted((home / "private-keys-v1.d").glob("*.key")):
         for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
             parts = line.split()
-            if len(parts) > 1 and parts[0] == "Token:" and serial in parts[1]:
+            if len(parts) > 1 and parts[0] == "Token:" and len(parts[1]) >= 28 \
+                    and parts[1][20:28].upper() == wanted:
                 found.append(path)
                 break
     return found
@@ -2403,7 +2431,11 @@ def find_stubs(home: Path, serial: str) -> list:
 
 def update_stubs(ui, import_file=None, remove_serials=(), cards=1) -> int:
     home = user_home()
+    exit_code = EXIT_OK
     try:
+        for serial in remove_serials:
+            if not serial.isascii() or not serial.isdigit():
+                raise RecoveryError(f"--remove-serial must be all digits: {serial}", EXIT_USAGE)
         missing = [t for t in ("gpg", "gpg-connect-agent") if shutil.which(t) is None]
         if missing:
             raise RecoveryError(f"missing tools: {' '.join(missing)}", EXIT_USAGE)
@@ -2413,27 +2445,42 @@ def update_stubs(ui, import_file=None, remove_serials=(), cards=1) -> int:
             if result.returncode != 0:
                 raise RecoveryError(f"import failed: {result.stderr.strip()}", EXIT_USAGE)
         for serial in remove_serials:
-            stubs = find_stubs(home, serial)
+            try:
+                stubs = find_stubs(home, serial)
+            except OSError as err:
+                raise RecoveryError(f"cannot read stubs in {home}: {err}", EXIT_USAGE) from err
             if not stubs:
                 ui.info(f"no stubs reference card {serial}")
                 continue
             names = "".join(f"\n  {p.name}" for p in stubs)
             if not ui.confirm(f"Move {len(stubs)} stub(s) for card {serial} out of the keyring?{names}\n"):
                 continue
-            dest = home / f"stub-backup-{datetime.datetime.now():%Y%m%d-%H%M%S}"
-            dest.mkdir(mode=0o700, exist_ok=True)
-            for path in stubs:
-                shutil.move(str(path), str(dest / path.name))
+            moved = []
+            try:
+                dest = Path(tempfile.mkdtemp(
+                    prefix=f"stub-backup-{datetime.datetime.now():%Y%m%d-%H%M%S}-", dir=home))
+                for path in stubs:
+                    shutil.move(str(path), str(dest / path.name))
+                    moved.append(path.name)
+            except OSError as err:
+                left = [p.name for p in stubs if p.name not in moved]
+                raise RecoveryError(
+                    f"moving stubs failed: {err}; moved: {' '.join(moved) or 'none'}; "
+                    f"not moved: {' '.join(left)}", EXIT_USAGE) from err
             ui.info(f"moved to {dest}")
         for index in range(1, cards + 1):
             ui.wait_for_card(index, cards)
             learn = subprocess.run(["gpg-connect-agent", "scd serialno", "learn --force", "/bye"],
                                    capture_output=True, text=True, check=False)
             if learn.returncode != 0:
-                ui.warn(learn.stderr.strip())
+                ui.warn(f"learn failed for card {index}: {learn.stderr.strip()}")
+                exit_code = EXIT_CARD
             status = subprocess.run(["gpg", "--batch", "--card-status"], capture_output=True, text=True, check=False)
-            ui.info(status.stdout.strip())
-        return EXIT_OK
+            if status.returncode != 0:
+                ui.warn(status.stderr.strip())
+            else:
+                ui.info(status.stdout.strip())
+        return exit_code
     except RecoveryError as err:
         ui.error(str(err))
         return err.code
@@ -2445,7 +2492,7 @@ def update_stubs(ui, import_file=None, remove_serials=(), cards=1) -> int:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd recovery && python3 -m unittest tests.test_stubs -v`
-Expected: `OK` (4 tests).
+Expected: `OK` (7 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -3919,8 +3966,8 @@ Expected: FAIL with exit 127 and `update_stubs: command not found`.
 # --- update-stubs: the only part that touches the user's own GNUPGHOME
 
 update_stubs() {
-  local import="" cards=1 home=${GNUPGHOME:-$HOME/.gnupg} serial f dest i answer t
-  local -a serials=() stubs=()
+  local import="" cards=1 home=${GNUPGHOME:-$HOME/.gnupg} serial padded f dest i answer t rc=$EXIT_OK
+  local -a serials=() stubs=() moved=() left=()
   while (( $# )); do
     case $1 in
       --import) (( $# >= 2 )) || bad_usage; import=$2; shift ;;
@@ -3932,15 +3979,19 @@ update_stubs() {
     shift
   done
   [[ $cards =~ ^[0-9]+$ ]] && (( cards >= 1 )) || die "$EXIT_USAGE" "--cards must be 1 or more"
+  for serial in "${serials[@]}"; do
+    [[ $serial =~ ^[0-9]+$ ]] || die "$EXIT_USAGE" "--remove-serial must be all digits: $serial"
+  done
   for t in gpg gpg-connect-agent; do command -v "$t" >/dev/null || die "$EXIT_USAGE" "missing tools: $t"; done
   if [[ -n $import ]]; then
     gpg --batch --import "$import" 2>/dev/null || die "$EXIT_USAGE" "import failed: $import"
   fi
   for serial in "${serials[@]}"; do
+    padded=$(printf '%8s' "$serial" | tr ' ' 0)
     stubs=()
     shopt -s nullglob
     for f in "$home"/private-keys-v1.d/*.key; do
-      if awk -v s="$serial" '$1 == "Token:" && index($2, s) {found = 1} END {exit !found}' "$f"; then
+      if awk -v s="$padded" '$1 == "Token:" && length($2) >= 28 && toupper(substr($2, 21, 8)) == s {found = 1} END {exit !found}' "$f"; then
         stubs+=("$f")
       fi
     done
@@ -3948,24 +3999,34 @@ update_stubs() {
     if (( ${#stubs[@]} == 0 )); then info "no stubs reference card $serial"; continue; fi
     confirm "Move ${#stubs[@]} stub(s) for card $serial out of the keyring?$(printf '\n  %s' "${stubs[@]##*/}")
 " || continue
-    dest=$home/stub-backup-$(date +%Y%m%d-%H%M%S)
-    mkdir -p -m 700 -- "$dest"
-    mv -- "${stubs[@]}" "$dest/"
+    moved=()
+    dest=$(mktemp -d "$home/stub-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX") || die "$EXIT_USAGE" "cannot create a backup directory in $home"
+    for f in "${stubs[@]}"; do
+      if ! mv -- "$f" "$dest/"; then
+        left=()
+        for t in "${stubs[@]}"; do [[ -e $t ]] && left+=("${t##*/}"); done
+        die "$EXIT_USAGE" "moving stubs failed; moved: ${moved[*]:-none}; not moved: ${left[*]}"
+      fi
+      moved+=("${f##*/}")
+    done
     info "moved to $dest"
   done
   for ((i = 1; i <= cards; i++)); do
     read_line "Insert card $i of $cards and press Enter" answer
-    gpg-connect-agent "scd serialno" "learn --force" /bye >/dev/null || warn "learn failed for card $i"
-    gpg --batch --card-status >&2 || true
+    if ! gpg-connect-agent "scd serialno" "learn --force" /bye >/dev/null; then
+      warn "learn failed for card $i"
+      rc=$EXIT_CARD
+    fi
+    gpg --batch --card-status >&2 || warn "card status failed for card $i"
   done
-  exit "$EXIT_OK"
+  exit "$rc"
 }
 ```
 
 - [ ] **Step 3: Run the tests to verify they pass**
 
 Run: `cd recovery && python3 -m unittest tests.test_stubs -v && shellcheck --severity=error recoverCard.sh`
-Expected: `OK` (8 tests); shellcheck prints nothing.
+Expected: `OK` (14 tests); shellcheck prints nothing.
 
 - [ ] **Step 4: Commit**
 
