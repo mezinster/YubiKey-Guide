@@ -10,7 +10,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import EXIT_INTERRUPT, Aborted, RecoveryError
+from . import EXIT_CARD, EXIT_INTERRUPT, Aborted, RecoveryError
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
 from .migrate import Options, Session
@@ -144,13 +144,26 @@ class App:
         self.tasks.put(fn)
 
     def poll(self):
-        while True:
+        if self.poll_id:
+            self.root.after_cancel(self.poll_id)  # a direct call must not start a second chain
+        try:
+            while True:
+                try:
+                    task = self.tasks.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    task()
+                except Exception as err:
+                    try:
+                        self.log(f"error: {err}")
+                    except Exception:
+                        pass
+        finally:
             try:
-                task = self.tasks.get_nowait()
-            except queue.Empty:
-                break
-            task()
-        self.poll_id = self.root.after(100, self.poll)
+                self.poll_id = self.root.after(100, self.poll)
+            except tk.TclError:  # window already destroyed
+                self.poll_id = None
 
     def stop_polling(self, event):
         if event.widget is self.root and self.poll_id:
@@ -376,6 +389,7 @@ class App:
         self.worker.start()
 
     def work(self):
+        code = EXIT_CARD
         try:
             code = self.session.execute()
         except RecoveryError as err:
@@ -384,7 +398,11 @@ class App:
         except Aborted:
             self.ui.error("aborted")
             code = EXIT_INTERRUPT
-        self.post(lambda: self.finished(code))
+        except Exception as err:
+            self.ui.error(f"{type(err).__name__}: {err}")
+            code = EXIT_CARD
+        finally:
+            self.post(lambda: self.finished(code))
 
     def finished(self, code):
         self.log(f"finished with exit code {code}")
@@ -408,7 +426,9 @@ class App:
 
     def close(self):
         busy = self.worker is not None and self.worker.is_alive()
-        if busy and not messagebox.askyesno(TITLE, "Card writing is in progress. Quit anyway?", parent=self.root):
+        if busy:
+            messagebox.showinfo(TITLE, "Card writing is in progress. Finish it, or choose Cancel at the next "
+                                       "card prompt to abort; PINs are shown afterwards.", parent=self.root)
             return
         if self.session:
             self.session.cleanup()

@@ -31,6 +31,44 @@ class GuiSmokeTests(unittest.TestCase):
         app.ui.progress(1, "hello")  # queued, not executed on this thread
         self.assertFalse(app.tasks.empty())
 
+    def test_poll_survives_failing_task(self):
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        flag = []
+
+        def boom():
+            raise ValueError("boom")
+
+        app.post(boom)
+        app.post(lambda: flag.append(1))
+        app.poll()
+        self.assertEqual(flag, [1])
+        self.assertIsNotNone(app.poll_id)  # rescheduled
+
+    def test_worker_unexpected_error_posts_finished(self):
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+
+        class Stub:
+            results = []
+
+            def execute(self):
+                raise OSError("boom")
+
+        app.session = Stub()
+        app.next_btn.state(["disabled"])
+        app.logbox = tk.Text(root)
+        app.work()
+        app.poll()
+        self.assertFalse(app.next_btn.instate(["disabled"]))
+        text = app.logbox.get("1.0", "end")
+        self.assertIn("error: OSError: boom", text)
+        self.assertIn("finished with exit code 3", text)
+
 
 if __name__ == "__main__":
     unittest.main()
