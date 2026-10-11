@@ -5,3 +5,4 @@ __pycache__/
 !.gitattributes
 recovery/packaging/build/
 recovery/packaging/dist/
+recovery/packaging/.venv/
