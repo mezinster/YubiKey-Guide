@@ -13,7 +13,7 @@ On the LiveCD built from `nix/` both are installed, and "YubiKey Recovery" is on
 > Every card you write is **reset**: all OpenPGP keys and PINs on it are erased. The tool asks you to type `RESET <serial>` for each card.
 
 > [!IMPORTANT]
-> Run this on an air-gapped system. The Certify key passphrase and your backup are loaded into memory-backed temporary folders that are deleted when the tool exits.
+> Run this on an air-gapped system. Your backup is copied into temporary GnuPG homes under `$XDG_RUNTIME_DIR` (or `/tmp` when that path is unset or too long), which are deleted when the tool exits. They are memory-backed only when that folder is on tmpfs, as on the LiveCD; otherwise the tool prints a warning, and key material may reach the disk.
 
 ## Modes
 
@@ -36,6 +36,10 @@ recoverCard.sh --backup /mnt/backup --mode rotate --revoke-old --dry-run
 ```
 
 `--dry-run` prints every command the run would execute, with secrets shown as `<ADMIN_PIN>`-style placeholders, and touches nothing.
+
+`--out` is required for every run except `--dry-run`, `clone` included: the public key (`public-KEYID-DATE.asc`) and the SSH public key (`ssh-KEYID.pub`) are written there, and for `renew` and `rotate` the new backup too. It must be outside the backup folder and must not already hold `secret-*.key` files.
+
+A backup made with the main guide often holds both the exported key files (`secret-*-Certify.key`, `secret-*-Subkeys.key`) and a copy of the GnuPG home. The tool then stops and asks you to choose with `--source`. Pass `--source export`: the exports were made before `keytocard` and hold the secret subkeys, while a GnuPG home copied after `keytocard` holds only card stubs, which the tool refuses for `clone` and `renew`.
 
 Run `recoverCard.sh --help` for every option. The defaults are:
 
@@ -70,7 +74,7 @@ If you renewed or rotated, also publish the new public key wherever you publishe
 
 1. The backup is imported into a temporary staging GnuPG home. The backup itself is only read.
 2. The mode is applied in staging.
-3. For each card, staging is copied into a fresh home. The card is reset; the PIN retry counters are set while the PINs are still default (changing the retry counters can reset the PINs); the PINs are changed; cardholder data is set; `keytocard` moves the subkeys; the touch policy is set; and then that copy is deleted. Staging is never consumed, so a failed card can be retried safely.
+3. For each card, staging is copied into a fresh home. The card is reset; the PIN retry counters are set while the PINs are still default (changing the retry counters can reset the PINs); the PINs are changed; cardholder data is set; `keytocard` moves the subkeys; the touch policy is set; and then that copy is deleted. Staging is never consumed, so a failed card can be retried safely. Before a retry, the tool checks that the same card is still the only one connected, and asks you to reconnect it otherwise.
 4. A third home holding only the public key verifies the card:
    - the card's fingerprints match the subkeys;
    - a test signature verifies;
@@ -78,11 +82,11 @@ If you renewed or rotated, also publish the new public key wherever you publishe
 
    With touch on (the default), the tool prints "Touch the YubiKey when it blinks" before the test signature and before the decryption: touch the card each time, or the step times out and the card fails.
 
-The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted, so a partially written card is never left with unknown PINs. Write them down then.
+The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted and runs stopped by Ctrl-C, SIGTERM or SIGHUP, so a partially written card is never left with unknown PINs. The GUI shows them as soon as card writing finishes. Write them down then.
 
 Both tools run with umask 077, so everything written to `--out` is readable only by its owner.
 
-Before every scripted gpg or ykman command, `gpgconf --kill all` clears cached passphrases and card sessions, so prompts always arrive in the expected order.
+Before every card session (each scripted `gpg --change-pin`, `--edit-card` or `--edit-key` run) and every ykman command, `gpgconf --kill all` clears cached passphrases and card sessions, so prompts always arrive in the expected order.
 
 The Admin PIN is passed to `ykman` with `-a`, as in the main guide. On a multi-user machine other users could briefly see it in the process list; on the intended single-user air-gapped system that risk does not apply.
 
