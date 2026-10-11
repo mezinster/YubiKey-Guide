@@ -55,12 +55,14 @@ def run_impl(impl: str, args: list, stdin: str = "", env: dict = None) -> subpro
                           cwd=RECOVERY, timeout=600, check=False)
 
 
-def fake_hardware(test, serials: list, fail_at: str = "") -> dict:
-    """Env overrides that put fake ykman/gpg card operations first on PATH."""
+def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> dict:
+    """Env overrides that put fake ykman/gpg card operations first on PATH (see fakebin/ykman)."""
     state = short_tempdir(test, "hw")
     (state / "cards").write_text("".join(f"{s}\n" for s in serials))
     if fail_at:
         (state / "fail_at").write_text(fail_at)
+    if list_script is not None:
+        (state / "list_script").write_text("".join(f"{s}\n" for s in list_script))
     return {
         "PATH": f"{FAKEBIN}:{os.environ['PATH']}",
         "FAKE_HW_DIR": str(state),

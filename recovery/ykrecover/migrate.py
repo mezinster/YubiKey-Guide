@@ -273,6 +273,7 @@ class Session:
                 except StepError as err:
                     choice = self.ui.card_failed(r.index, r.serial, err.shown, str(err))
                     if choice == "retry":
+                        self._recheck_card(r)
                         continue
                     r.status, r.detail = "FAILED", err.shown
                     if r.pins_set:
@@ -284,13 +285,31 @@ class Session:
                 self.ui.progress(r.index, f"{r.serial}: OK")
                 break
 
+    @staticmethod
+    def _list_serials() -> tuple:
+        """Connected serials, and ': <ykman error>' when the listing itself failed."""
+        listing = subprocess.run(["ykman", "list", "--serials"], capture_output=True, text=True, check=False)
+        problem = ""
+        if listing.returncode != 0:
+            problem = f": {listing.stderr.strip() or f'ykman exited with status {listing.returncode}'}"
+        return card.parse_serials(listing.stdout), problem
+
+    def _recheck_card(self, r: CardResult) -> None:
+        """A retry must reach the same card, and only it: gpg talks to whichever card is connected."""
+        while True:
+            serials, problem = self._list_serials()
+            if serials == [r.serial]:
+                return
+            self.ui.warn(f"card {r.serial} must be the only YubiKey connected; "
+                         f"found {' '.join(serials) or 'none'}{problem}")
+            self.ui.wait_for_card(r.index, self.opts.cards)
+
     def _wait_for_card(self, index: int, done: set) -> str:
         while True:
             self.ui.wait_for_card(index, self.opts.cards)
-            listing = subprocess.run(["ykman", "list", "--serials"], capture_output=True, text=True, check=False)
-            serials = card.parse_serials(listing.stdout)
+            serials, problem = self._list_serials()
             if len(serials) != 1:
-                self.ui.warn(f"expected exactly one YubiKey, found {len(serials)}")
+                self.ui.warn(f"expected exactly one YubiKey, found {len(serials)}{problem}")
             elif serials[0] in done:
                 self.ui.warn(f"card {serials[0]} was already written in this session")
             else:

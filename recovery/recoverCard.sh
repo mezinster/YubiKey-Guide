@@ -675,7 +675,7 @@ ask_pin() { # ask_pin LABEL MIN VAR
 
 declare -A ADMIN_PINS=() USER_PINS=() LOGINS=() SERIALS=() STATUS=() DETAIL=() PINS_SET=()
 PINS_SHOWN=0
-PAIR_ADMIN="" PAIR_USER="" SERIAL="" SURNAME="" GIVEN=""
+PAIR_ADMIN="" PAIR_USER="" SERIAL="" SURNAME="" GIVEN="" LISTED=() LIST_PROBLEM=""
 
 assign_pins() {
   local i label have=0
@@ -707,19 +707,41 @@ split_name() { # sets SURNAME and GIVEN
   fi
 }
 
+list_serials() { # sets LISTED to the connected serials, LIST_PROBLEM to ": <ykman error>" if listing failed
+  local listing rc=0 err
+  listing=$(ykman list --serials 2>"$WORK/list.err") || rc=$?
+  mapfile -t LISTED < <(grep -E '^[0-9]+$' <<<"$listing" || true)
+  LIST_PROBLEM=""
+  if (( rc )); then
+    err=$(<"$WORK/list.err")
+    LIST_PROBLEM=": ${err:-ykman exited with status $rc}"
+  fi
+}
+
 wait_for_card() { # wait_for_card INDEX DONE_LIST → SERIAL
-  local answer serials=()
+  local answer
   while true; do
     read_line "Insert card $1 of $CARDS and press Enter" answer
-    mapfile -t serials < <(ykman list --serials 2>/dev/null | grep -E '^[0-9]+$' || true)
-    if (( ${#serials[@]} != 1 )); then
-      warn "expected exactly one YubiKey, found ${#serials[@]}"
-    elif [[ $2 == *" ${serials[0]} "* ]]; then
-      warn "card ${serials[0]} was already written in this session"
+    list_serials
+    if (( ${#LISTED[@]} != 1 )); then
+      warn "expected exactly one YubiKey, found ${#LISTED[@]}$LIST_PROBLEM"
+    elif [[ $2 == *" ${LISTED[0]} "* ]]; then
+      warn "card ${LISTED[0]} was already written in this session"
     else
-      SERIAL=${serials[0]}
+      SERIAL=${LISTED[0]}
       return 0
     fi
+  done
+}
+
+recheck_card() { # recheck_card INDEX SERIAL: a retry must reach the same card, and only it
+  local answer found
+  while true; do
+    list_serials
+    if (( ${#LISTED[@]} == 1 )) && [[ ${LISTED[0]} == "$2" ]]; then return 0; fi
+    found=${LISTED[*]}
+    warn "card $2 must be the only YubiKey connected; found ${found:-none}$LIST_PROBLEM"
+    read_line "Insert card $1 of $CARDS and press Enter" answer
   done
 }
 
@@ -788,7 +810,10 @@ write_cards() {
       warn "card $SERIAL failed at: $CURRENT_STEP"
       tail -c 2000 "$WORK/step.err" >&2 || true
       read_choice choice
-      if [[ $choice == retry ]]; then continue; fi
+      if [[ $choice == retry ]]; then
+        recheck_card "$i" "$SERIAL"
+        continue
+      fi
       STATUS[$i]=FAILED
       DETAIL[$i]=$CURRENT_STEP
       if [[ -n ${PINS_SET[$i]:-} ]]; then DETAIL[$i]+=" (PINs were changed; see PINs shown)"; fi

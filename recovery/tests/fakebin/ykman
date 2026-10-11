@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Test double for ykman: records calls; `list --serials` hands out the next serial from `cards`."""
+"""Test double for ykman: records calls and simulates which card is connected.
+
+`list --serials` answers, in order of precedence:
+- with a `list_script` file: its next line per call (a serial, or blank for no card);
+- right after a fake injected a card failure (`card_failed` marker, cleared here): the card that
+  failed, which is still connected, so a retry's re-check finds it;
+- otherwise: the next serial from `cards`, as if the next card had been inserted.
+`fail_at=list` makes one `list` call fail with an error on stderr.
+"""
 
 import json
 import os
@@ -9,6 +17,38 @@ from pathlib import Path
 STATE = Path(os.environ["FAKE_HW_DIR"])
 
 
+def inject(kind):
+    wanted, marker = STATE / "fail_at", STATE / "failed_once"
+    if wanted.exists() and wanted.read_text().strip() == kind and not marker.exists():
+        marker.touch()
+        return True
+    return False
+
+
+def list_serials():
+    current, script = STATE / "current", STATE / "list_script"
+    if inject("list"):
+        sys.stderr.write("fake ykman: cannot reach pcscd\n")
+        return 1
+    if script.exists():
+        lines = script.read_text().splitlines()
+        answer = lines.pop(0).strip() if lines else ""
+        script.write_text("".join(f"{line}\n" for line in lines))
+    elif (STATE / "card_failed").exists() and current.exists():
+        (STATE / "card_failed").unlink()
+        answer = current.read_text().strip()
+    else:
+        cards = (STATE / "cards").read_text().split()
+        counter = STATE / "list_count"
+        n = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(n + 1))
+        answer = cards[n] if n < len(cards) else ""
+    if answer:
+        current.write_text(answer)
+        print(answer)
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     if "-a" in args:
@@ -16,14 +56,7 @@ def main():
     with open(STATE / "calls.log", "a", encoding="utf-8") as f:
         f.write("ykman " + " ".join(args) + "\n")
     if args[:2] == ["list", "--serials"]:
-        cards = (STATE / "cards").read_text().split()
-        counter = STATE / "list_count"
-        n = int(counter.read_text()) if counter.exists() else 0
-        counter.write_text(str(n + 1))
-        if n < len(cards):
-            (STATE / "current").write_text(cards[n])
-            print(cards[n])
-        return 0
+        return list_serials()
     serial = args[args.index("--device") + 1] if "--device" in args else ""
     current = STATE / "current"
     if serial != (current.read_text().strip() if current.exists() else ""):
@@ -31,9 +64,8 @@ def main():
         return 1
     for kind in ("reset", "set-retries", "set-touch"):
         if kind in args:
-            wanted, marker = STATE / "fail_at", STATE / "failed_once"
-            if wanted.exists() and wanted.read_text().strip() == kind and not marker.exists():
-                marker.touch()
+            if inject(kind):
+                (STATE / "card_failed").touch()
                 sys.stderr.write(f"fake failure at {kind}\n")
                 return 2
             if kind == "reset":

@@ -18,8 +18,8 @@ class FakeHardwareTests:
 
     IMPL = ""
 
-    def migrate(self, profile, extra, stdin, serials=(S1,), fail_at=""):
-        env = fake_hardware(self, list(serials), fail_at)
+    def migrate(self, profile, extra, stdin, serials=(S1,), fail_at="", list_script=None):
+        env = fake_hardware(self, list(serials), fail_at, list_script)
         out = short_tempdir(self, "out")
         result = run_impl(self.IMPL, ["--backup", str(FIXTURES / profile / "export"), "--out", str(out), *extra],
                           stdin, env)
@@ -81,6 +81,31 @@ class FakeHardwareTests:
         result, _, calls, _ = self.migrate("ed25519", [], stdin, fail_at="keytocard2")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls.count(f"ykman --device {S1} openpgp reset -f"), 2)
+
+    def test_retry_requires_the_same_card(self):
+        stdin = f"{PASSPHRASE}\ny\n\nRESET {S1}\nr\n\n"
+        result, _, calls, state = self.migrate("ed25519", [], stdin, fail_at="keytocard2",
+                                               list_script=(S1, S2, S1))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"card {S1} must be the only YubiKey connected; found {S2}", result.stderr)
+        self.assertEqual(calls.count("ykman list --serials"), 3)
+        self.assertEqual(calls.count(f"ykman --device {S1} openpgp reset -f"), 2)
+        self.assertNotIn(f"--device {S2}", calls)
+        info = fixture_info("ed25519")
+        self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
+
+    def test_retry_without_the_card_aborts_at_eof(self):
+        stdin = f"{PASSPHRASE}\ny\n\nRESET {S1}\nr\n"
+        result, _, calls, _ = self.migrate("ed25519", [], stdin, fail_at="keytocard2", list_script=(S1, ""))
+        self.assertEqual(result.returncode, 130, result.stderr)
+        self.assertIn(f"card {S1} must be the only YubiKey connected; found none", result.stderr)
+        self.assertEqual(calls.count(f"ykman --device {S1} openpgp reset -f"), 1)
+        self.assertIn(f"Card {S1}: Admin PIN", result.stderr)
+
+    def test_failed_card_listing_shows_ykman_error(self):
+        result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\n\nRESET {S1}\n", fail_at="list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("expected exactly one YubiKey, found 0: fake ykman: cannot reach pcscd", result.stderr)
 
     def test_skip_after_failure(self):
         result, _, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\ns\n", fail_at="sign")

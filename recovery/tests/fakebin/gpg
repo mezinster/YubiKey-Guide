@@ -22,6 +22,7 @@ def maybe_fail(kind):
     marker, wanted = STATE / "failed_once", STATE / "fail_at"
     if wanted.exists() and wanted.read_text().strip() == kind and not marker.exists():
         marker.touch()
+        (STATE / "card_failed").touch()  # the failed card stays connected; see fakebin/ykman
         sys.stderr.write(f"fake failure at {kind}\n")
         sys.exit(2)
 
