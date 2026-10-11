@@ -487,6 +487,44 @@ class GuiBehaviourTests(unittest.TestCase):
         self.assertTrue(pins.winfo_exists())  # only "I wrote them down" closes it
         pins.destroy()
 
+    def clipboard(self, app):
+        try:
+            return app.root.clipboard_get()
+        except tk.TclError:  # empty
+            return ""
+
+    def test_copied_pins_leave_the_clipboard_on_confirm(self):
+        app = self.app()
+        pins = app.pins_dialog([("12345678", "11111111", "222222")])
+        self.assertIn("clipboard is cleared", "".join(self.label_texts(pins)))
+        pins.copy()
+        self.assertIn("Admin PIN 11111111", self.clipboard(app))
+        pins.done(True)
+        self.assertNotIn("11111111", self.clipboard(app))
+
+    def test_confirming_pins_keeps_what_was_copied_since(self):
+        app = self.app()
+        pins = app.pins_dialog([("12345678", "11111111", "222222")])
+        pins.copy()
+        app.root.clipboard_clear()
+        app.root.clipboard_append("my password manager note")
+        pins.done(True)
+        self.assertEqual(self.clipboard(app), "my password manager note")
+        other = app.failure_dialog("12345678", "step", "step\nerror text")
+        other.copy()
+        other.done("abort")  # other dialogs leave the clipboard alone
+        self.assertEqual(self.clipboard(app), "error text")
+
+    def label_texts(self, widget):
+        out = []
+        try:
+            out.append(str(widget.cget("text")))
+        except tk.TclError:
+            pass
+        for child in widget.winfo_children():
+            out.extend(self.label_texts(child))
+        return out
+
     def test_key_chooser_works_from_the_keyboard(self):
         from ykrecover.gui import ChoiceDialog
         app = self.app()

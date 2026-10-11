@@ -160,9 +160,11 @@ class TextDialog(Modal):
     """Read-only, scrollable text (error output, PINs) with a Copy button."""
 
     def __init__(self, parent, title, header, content, buttons, wrap="word", lines=12, closable=True,
-                 close_value=None):
+                 close_value=None, clear_clipboard=False):
         super().__init__(parent, title, header, buttons, closable, close_value)
         self.text_content = content
+        self.clear_clipboard = clear_clipboard  # on close, unless something else was copied since
+        self.copied = False
         frame, self.text = scrolled_text(self.content, 1, wrap)
         font = self.text.cget("font")
         longest = max((len(line) for line in content.splitlines()), default=0)
@@ -177,6 +179,16 @@ class TextDialog(Modal):
     def copy(self):
         self.clipboard_clear()
         self.clipboard_append(self.text_content)
+        self.copied = True
+
+    def done(self, value):
+        if self.clear_clipboard and self.copied:
+            try:
+                if self.clipboard_get() == self.text_content:
+                    self.clipboard_clear()
+            except tk.TclError:  # empty, or holds something that is not text
+                pass
+        super().done(value)
 
 
 class ChoiceDialog(Modal):
@@ -468,8 +480,10 @@ class App:
 
     def pins_dialog(self, pins):
         text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in pins)
-        return TextDialog(self.root, "PINs", "Write these PINs down now. They are not shown again.", text,
-                          (("I wrote them down", True),), wrap="none", lines=len(pins), closable=False)
+        return TextDialog(self.root, "PINs", "Write these PINs down now. They are not shown again.\n"
+                          "If you copy them, the clipboard is cleared when you confirm.", text,
+                          (("I wrote them down", True),), wrap="none", lines=len(pins), closable=False,
+                          clear_clipboard=True)
 
     # pages
     def build_preflight(self):
