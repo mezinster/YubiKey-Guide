@@ -34,8 +34,10 @@ def _gpg4win_dirs() -> list:
 
 
 def _scripts_allowed() -> bool:
-    """Test-only: the Windows test suite runs its fake tools through .cmd shims put first on PATH."""
-    return os.environ.get("YKRECOVER_TEST_ALLOW_SCRIPTS") == "1"
+    """Test-only: the Windows test suite runs its fake tools through .cmd shims put first on PATH.
+
+    The packaged app ignores it, so a user environment variable cannot hand the PINs to a script."""
+    return os.environ.get("YKRECOVER_TEST_ALLOW_SCRIPTS") == "1" and not getattr(sys, "frozen", False)
 
 
 def _which(name: str, extensions=(".exe",)):

@@ -102,6 +102,11 @@ function New-AdminOnlyFolder {
     # folder is created, so a non-administrator never gets a chance to put files into it.
     $path = Join-Path $env:ProgramData ("ykrecover-{0}" -f [guid]::NewGuid())
     if (Test-Path $path) { throw "$path already exists" }
+    if ($PSVersionTable.PSEdition -eq "Core") {
+        # PowerShell 7 resolves type names only in loaded assemblies, and the ACL types live in one that is not
+        # loaded at startup. Windows PowerShell 5.1 has them in mscorlib and no assembly by this name.
+        Add-Type -AssemblyName System.IO.FileSystem.AccessControl
+    }
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in "S-1-5-32-544", "S-1-5-18") {   # Administrators, SYSTEM

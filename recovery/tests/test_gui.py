@@ -31,6 +31,27 @@ class GuiAvailable(unittest.TestCase):
         self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
 
 
+def when_dialog_up(root, action):
+    """Calls action(dialog) from the event loop once a modal dialog holds the grab."""
+    def check():
+        dialog = root.grab_current()
+        if dialog is None:
+            root.after(20, check)
+        else:
+            root.after(3000, unblock)
+            action(dialog)
+
+    def unblock():  # a failing test must not hang in a dialog nobody answers
+        try:
+            for widget in root.winfo_children():
+                if isinstance(widget, tk.Toplevel):
+                    widget.destroy()
+        except tk.TclError:  # the root is gone
+            pass
+
+    root.after(20, check)
+
+
 @SKIP_GUI
 class GuiSmokeTests(unittest.TestCase):
     def test_work_folder_is_applied_before_loading(self):
@@ -188,6 +209,55 @@ class GuiSmokeTests(unittest.TestCase):
             app.close()
         self.assertEqual(shown.call_count, 1)
         self.assertIn("User PIN 123456", shown.call_args.args[0].text_content)
+
+    def test_close_is_refused_while_a_dialog_is_up(self):
+        """The window manager's close button is not blocked by a grab: leave_backup() must not go on
+        loading the key after the window was closed under the leftover warning."""
+        from ykrecover.migrate import Session
+        from tests.helpers import FIXTURES, short_tempdir
+        from ykrecover import osdeps
+        app = self.app_with_pins()
+        app.pins = []
+        self.addCleanup(osdeps.set_workdir, None)
+        workdir = short_tempdir(self, "wd")
+        leftover = workdir / "ykr-staging-old"
+        leftover.mkdir()
+        os.utime(leftover, (1, 1))
+        app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
+        app.v["workdir"].set(str(workdir))
+        app.show(1)
+        app.root.update()
+        seen = []
+
+        def close_then_answer(dialog):
+            app.root.tk.call(app.root.protocol("WM_DELETE_WINDOW"))
+            seen.append((dialog.title(), app.root.winfo_exists(), dialog.winfo_exists()))
+            dialog.done(None)
+
+        when_dialog_up(app.root, close_then_answer)
+        with mock.patch.object(Session, "load") as load, mock.patch.object(Session, "unlock", return_value=True):
+            self.assertTrue(app.leave_backup())
+        self.assertEqual(seen, [("Work folder", 1, 1)])
+        load.assert_called_once()
+        self.assertTrue(app.root.winfo_exists())
+
+    def test_close_under_the_pin_dialog_does_not_nest_a_second_one(self):
+        from ykrecover.gui import TextDialog
+        app = self.app_with_pins()
+        seen = []
+
+        def close_then_confirm(dialog):
+            app.close()  # refused: the dialog holds the grab
+            app.reveal_pins()  # re-entrant call: nothing left to show
+            seen.append(sum(isinstance(w, TextDialog) for w in app.root.winfo_children()))
+            dialog.done(True)
+
+        when_dialog_up(app.root, close_then_confirm)
+        app.reveal_pins()
+        self.assertEqual(seen, [1])
+        self.assertEqual(app.pins, [])
+        self.assertTrue(app.pins_shown)
+        self.assertTrue(app.root.winfo_exists())
 
     def test_termination_signal_reveals_pins_and_closes(self):
         app = self.app_with_pins()
@@ -416,6 +486,68 @@ class GuiBehaviourTests(unittest.TestCase):
         pins.tk.call(pins.protocol("WM_DELETE_WINDOW"))
         self.assertTrue(pins.winfo_exists())  # only "I wrote them down" closes it
         pins.destroy()
+
+    def clipboard(self, app):
+        try:
+            return app.root.clipboard_get()
+        except tk.TclError:  # empty
+            return ""
+
+    def test_copied_pins_leave_the_clipboard_on_confirm(self):
+        app = self.app()
+        pins = app.pins_dialog([("12345678", "11111111", "222222")])
+        self.assertIn("clipboard is cleared", "".join(self.label_texts(pins)))
+        pins.copy()
+        self.assertIn("Admin PIN 11111111", self.clipboard(app))
+        pins.done(True)
+        self.assertNotIn("11111111", self.clipboard(app))
+
+    def test_confirming_pins_keeps_what_was_copied_since(self):
+        app = self.app()
+        pins = app.pins_dialog([("12345678", "11111111", "222222")])
+        pins.copy()
+        app.root.clipboard_clear()
+        app.root.clipboard_append("my password manager note")
+        pins.done(True)
+        self.assertEqual(self.clipboard(app), "my password manager note")
+        other = app.failure_dialog("12345678", "step", "step\nerror text")
+        other.copy()
+        other.done("abort")  # other dialogs leave the clipboard alone
+        self.assertEqual(self.clipboard(app), "error text")
+
+    def label_texts(self, widget):
+        out = []
+        try:
+            out.append(str(widget.cget("text")))
+        except tk.TclError:
+            pass
+        for child in widget.winfo_children():
+            out.extend(self.label_texts(child))
+        return out
+
+    def test_key_chooser_works_from_the_keyboard(self):
+        from ykrecover.gui import ChoiceDialog
+        app = self.app()
+        app.root.update()
+        dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second", "third"])
+        seen = []
+
+        def press(dialog, *keys):
+            # Tk delivers keys only to the focused widget, and a CI display without a window manager
+            # never focuses the dialog itself; so force it, after checking where the dialog put it.
+            dialog.update()
+            seen.append(str(dialog.tk.call("focus", "-lastfor", dialog)) == str(dialog.listbox))
+            dialog.listbox.focus_force()
+            dialog.update()
+            for key in keys:
+                dialog.listbox.event_generate(key)
+
+        when_dialog_up(app.root, lambda d: press(d, "<Down>", "<Return>"))
+        self.assertEqual(dialog.run(), 1)
+        dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second"])
+        when_dialog_up(app.root, lambda d: press(d, "<Return>"))
+        self.assertEqual(dialog.run(), 0)  # the first row is chosen without touching the list
+        self.assertEqual(seen, [True, True])
 
     def test_settings_are_validated_on_their_page(self):
         app = self.app()
