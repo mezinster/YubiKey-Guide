@@ -31,12 +31,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install GnuPG
-        run: sudo apt-get update && sudo apt-get install -y gnupg scdaemon
+      - name: install GnuPG, Tk and a virtual display
+        run: sudo apt-get update && sudo apt-get install -y gnupg scdaemon python3-tk xvfb
 
-      - name: recovery tests (Python and bash)
+      - name: recovery tests (Python, bash and the GUI)
         working-directory: recovery
-        run: python3 -m unittest discover -s tests -t . -v
+        env:
+          YKRECOVER_REQUIRE_GUI: "1"  # fail, rather than skip, when the GUI tests cannot run
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python3 -m unittest discover -s tests -t . -v
 
   windows:
     runs-on: windows-latest
