@@ -146,6 +146,22 @@ class ToolTests(unittest.TestCase):
                     mock.patch.object(osdeps.sys, "executable", str(app / "ykrecover-gui.exe")):
                 self.assertEqual(osdeps.tool("ykman"), [str(app / "ykrecover.exe"), "--ykman"])
 
+    def test_frozen_app_ignores_the_script_override(self):
+        win(self)
+        gnupg = self.path_dir_with(*(f"{name}.exe" for name in osdeps.GNUPG_TOOLS))
+        d = self.path_dir_with(*(f"{name}.cmd" for name in osdeps.GNUPG_TOOLS))
+        env = {"PATH": str(d), "PATHEXT": ".COM;.EXE;.BAT;.CMD", "YKRECOVER_TEST_ALLOW_SCRIPTS": "1"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(osdeps.sys, "frozen", True, create=True):
+            for dirs in ([gnupg], []):
+                with mock.patch.object(osdeps, "_gpg4win_dirs", lambda: dirs):
+                    for name in osdeps.GNUPG_TOOLS:
+                        with self.subTest(name=name, gpg4win=bool(dirs)):
+                            if dirs:
+                                self.assertEqual(osdeps.tool(name), [str(gnupg / f"{name}.exe")])
+                            else:  # the .cmd on PATH is never a fallback
+                                with self.assertRaises(RecoveryError):
+                                    osdeps.tool(name)
+
     def test_windows_unknown_tool_raises(self):
         win(self)
         with mock.patch.object(osdeps, "_which", return_value=None):
