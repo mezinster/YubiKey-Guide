@@ -401,6 +401,17 @@ class GuiBehaviourTests(unittest.TestCase):
         app.session = fake_session(cards=2)
         return app
 
+    def test_closing_the_failure_dialog_aborts_but_the_pins_need_confirming(self):
+        app = self.app()
+        failure = app.failure_dialog("12345678", "gpg --edit-card", "gpg --edit-card\ngpg: card error")
+        failure.tk.call(failure.protocol("WM_DELETE_WINDOW"))
+        self.assertEqual(failure.value, "abort")
+        self.assertFalse(failure.winfo_exists())
+        pins = app.pins_dialog([("12345678", "11111111", "222222")])
+        pins.tk.call(pins.protocol("WM_DELETE_WINDOW"))
+        self.assertTrue(pins.winfo_exists())  # only "I wrote them down" closes it
+        pins.destroy()
+
     def test_settings_are_validated_on_their_page(self):
         app = self.app()
         app.show(4)

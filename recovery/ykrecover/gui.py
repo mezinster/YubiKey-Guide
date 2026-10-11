@@ -442,12 +442,14 @@ class App:
         self.pins = list(pins)
 
     def failure_dialog(self, serial, step, error):
-        """Retry, skip or abort a failed card; shows only the error output under a one-line header."""
+        """Retry, skip or abort a failed card; shows only the error output under a one-line header.
+
+        Closing the window aborts, as Cancel did in the message box this replaces."""
         output = error[len(step):] if error.startswith(step) else error  # StepError text starts with the step
         return TextDialog(self.root, "Card failed", f"Card {serial} failed at: {step}\n"
                           "Retry after fixing the problem, skip this card, or abort the run.",
                           output.strip() or "(no error output)",
-                          (("Retry", "retry"), ("Skip", "skip"), ("Abort", "abort")), closable=False)
+                          (("Retry", "retry"), ("Skip", "skip"), ("Abort", "abort")), close_value="abort")
 
     def pins_dialog(self, pins):
         text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in pins)
