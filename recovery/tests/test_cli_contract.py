@@ -1,4 +1,6 @@
+import os
 import shutil
+import subprocess
 import unittest
 
 from tests.helpers import FIXTURES, run_impl, short_tempdir
@@ -76,6 +78,35 @@ class ContractTests:
         expired = str(FIXTURES / "expired" / "export")
         self.assertEqual(self.cli("--backup", expired, "--dry-run").returncode, 2)
         self.assertEqual(self.cli("--backup", expired, "--mode", "renew", "--dry-run").returncode, 0)
+
+    def test_backup_with_card_stubs_rejected(self):
+        """A GnuPG home copied after keytocard holds only stubs for the subkeys."""
+        copy = short_tempdir(self, "stubs") / "backup"
+        shutil.copytree(FIXTURES / "ed25519" / "gnupghome", copy)
+        copy.chmod(0o700)
+        listing = subprocess.run(["gpg", "--batch", "--with-colons", "--with-keygrip", "--list-secret-keys"],
+                                 env={**os.environ, "GNUPGHOME": str(copy)}, capture_output=True, text=True,
+                                 check=True).stdout
+        grips, in_sub = [], False
+        for line in listing.splitlines():
+            fields = line.split(":")
+            if fields[0] in ("sec", "ssb"):
+                in_sub = fields[0] == "ssb"
+            elif fields[0] == "grp" and in_sub:
+                grips.append(fields[9])
+        self.assertEqual(len(grips), 3)
+        subprocess.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(copy)}, check=False)
+        for grip in grips:
+            (copy / "private-keys-v1.d" / f"{grip}.key").unlink()
+        for mode in ("clone", "renew"):
+            with self.subTest(mode=mode):
+                result = self.cli("--backup", str(copy), "--mode", mode, "--dry-run")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("the backup holds card stubs, not secret subkeys:", result.stderr)
+                self.assertEqual(result.stdout, "")
+        # rotate writes newly generated subkeys, so stubs for the old ones do not matter
+        result = self.cli("--backup", str(copy), "--mode", "rotate", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_read_only_backup(self):
         copy = short_tempdir(self, "ro") / "backup"

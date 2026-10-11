@@ -139,6 +139,12 @@ class Session:
         if mode != "clone" and not self.bundle.has_certify_secret:
             raise RecoveryError(f"--mode {mode} needs the Certify key, but this backup only has subkeys",
                                 EXIT_BACKUP)
+        if mode != "rotate":  # rotate writes new subkeys; the old ones are only revoked or left
+            by_fpr = {k.fpr: k for k in self.bundle.subkeys}
+            stubs = [f for f in modes.unique(self.targets[u] for u in modes.USAGES) if not by_fpr[f].secret]
+            if stubs:
+                raise RecoveryError(f"the backup holds card stubs, not secret subkeys: {' '.join(stubs)}",
+                                    EXIT_BACKUP)
         stale = modes.expired(self.bundle, self.targets, int(time.time()))
         if stale and mode == "clone":
             raise RecoveryError(f"subkeys have expired: {' '.join(stale)}; use --mode renew or --mode rotate",

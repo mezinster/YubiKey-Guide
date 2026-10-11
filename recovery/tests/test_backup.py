@@ -32,6 +32,7 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((sign.usage, sign.algo, sign.expires), ("s", "ed25519", 1854789024))
         self.assertEqual(sign.keygrip, "EEA8DE772E836F74E1BB4AC797F79DB808D4A3BD")
         self.assertEqual((enc.usage, enc.algo, enc.expires), ("e", "rsa4096", 0))
+        self.assertEqual((sign.secret, enc.secret), (True, False))
         self.assertFalse(second.has_certify_secret)
 
     def test_choose_key(self):

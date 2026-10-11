@@ -21,7 +21,7 @@ RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS="
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
 KEY_FP="" KEY_ID="" HAS_SECRET=0
 CAND_KIND=() CAND_PATH=() CAND_FILES=()
-UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=()
+UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
 declare -A TARGET=() TOKENS=()
 
 die() { # Prints an error and exits with the given code.
@@ -267,19 +267,19 @@ choose_candidate() {
   die "$EXIT_BACKUP" "several backups found; narrow --backup or pass --source:$listing"
 }
 
-list_keys() { # list_keys HOME → "sec FPR KEYID SECRET" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO"
+list_keys() { # list_keys HOME → "sec FPR KEYID SECRET" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
   GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
     awk -F: '
       $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1; next }
       $1 == "ssb" { insub = 1; insec = 0; usage = $12; created = $6 + 0; expires = $7 + 0
-                    validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; next }
+                    validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
       $1 == "fpr" && insec { print "sec", $10, kid, secret; insec = 0; next }
-      $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo; insub = 0; next }
+      $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
       $1 == "uid" { print "uid", $10 }'
 }
 
 load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and SUB_* arrays
-  local kind a b c d e f line current="" want=${KEY^^} fps=() matches=() listing=""
+  local kind a b c d e f g line current="" want=${KEY^^} fps=() matches=() listing=""
   want=${want// /}
   while read -r kind a _; do
     if [[ $kind == sec ]]; then fps+=("$a"); fi
@@ -294,16 +294,16 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
     die "$EXIT_BACKUP" "several keys found; choose one with --key:$listing"
   fi
   KEY_FP=${matches[0]}
-  UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=()
+  UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
   while IFS= read -r line; do
-    read -r kind a b c d e f <<<"$line"
+    read -r kind a b c d e f g <<<"$line"
     case $kind in
       sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; fi ;;
       uid) if [[ $current == "$KEY_FP" ]]; then UIDS+=("${line#uid }"); fi ;;
       ssb)
         if [[ $current == "$KEY_FP" ]]; then
           SUB_FPR+=("$a"); SUB_USAGE+=("$b"); SUB_CREATED+=("$c"); SUB_EXPIRES+=("$d")
-          SUB_VALIDITY+=("$e"); SUB_ALGO+=("$f")
+          SUB_VALIDITY+=("$e"); SUB_ALGO+=("$f"); SUB_SECRET+=("$g")
         fi ;;
     esac
   done < <(list_keys "$1")
@@ -351,12 +351,20 @@ unique_targets() { # unique_targets ARRAY_NAME: target fingerprints in s, e, a o
 }
 
 check_bundle() {
-  local now f i fprs=() stale=()
+  local now f i fprs=() stale=() stubs=()
   if [[ $MODE != clone ]] && (( ! HAS_SECRET )); then
     die "$EXIT_BACKUP" "--mode $MODE needs the Certify key, but this backup only has subkeys"
   fi
   now=$(date +%s)
   unique_targets fprs
+  if [[ $MODE != rotate ]]; then # rotate writes new subkeys; the old ones are only revoked or left
+    for f in "${fprs[@]}"; do
+      for i in "${!SUB_FPR[@]}"; do
+        if [[ ${SUB_FPR[i]} == "$f" && ${SUB_SECRET[i]} != 1 ]]; then stubs+=("$f"); fi
+      done
+    done
+    if (( ${#stubs[@]} )); then die "$EXIT_BACKUP" "the backup holds card stubs, not secret subkeys: ${stubs[*]}"; fi
+  fi
   for f in "${fprs[@]}"; do
     for i in "${!SUB_FPR[@]}"; do
       if [[ ${SUB_FPR[i]} == "$f" ]] && (( SUB_EXPIRES[i] > 0 && SUB_EXPIRES[i] <= now )); then stale+=("$f"); fi

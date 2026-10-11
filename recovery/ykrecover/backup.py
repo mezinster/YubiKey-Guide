@@ -28,6 +28,7 @@ class Subkey:
     created: int
     expires: int  # 0 means never
     validity: str
+    secret: bool = True  # False when the home holds only a stub (on a card, or missing)
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ def parse_secret_keys(colons: str) -> list:
         elif f[0] == "ssb" and current is not None:
             close_sub()
             sub = {"fpr": "", "keygrip": "", "usage": f[11], "algo": f[16] or f"rsa{f[2]}",
-                   "created": int(f[5] or 0), "expires": int(f[6] or 0), "validity": f[1]}
+                   "created": int(f[5] or 0), "expires": int(f[6] or 0), "validity": f[1], "secret": f[14] == "+"}
         elif f[0] == "fpr" and current is not None:
             if sub is not None and not sub["fpr"]:
                 sub["fpr"] = f[9]
