@@ -168,8 +168,7 @@ class TextDialog(Modal):
                  close_value=None, clear_clipboard=False):
         super().__init__(parent, title, header, buttons, closable, close_value)
         self.text_content = content
-        self.clear_clipboard = clear_clipboard  # on close, unless something else was copied since
-        self.copied = False
+        self.clear_clipboard = clear_clipboard  # on close, if the clipboard holds any of the text
         frame, self.text = scrolled_text(self.content, 1, wrap)
         font = self.text.cget("font")
         longest = max((len(line) for line in content.splitlines()), default=0)
@@ -184,12 +183,12 @@ class TextDialog(Modal):
     def copy(self):
         self.clipboard_clear()
         self.clipboard_append(self.text_content)
-        self.copied = True
 
     def done(self, value):
-        if self.clear_clipboard and self.copied:
+        if self.clear_clipboard:
             try:
-                if self.clipboard_get() == self.text_content:
+                clip = self.clipboard_get()  # the Copy button, or a selection copied with Ctrl+C
+                if clip and clip in self.text_content:  # something copied from elsewhere stays
                     self.clipboard_clear()
             except tk.TclError:  # empty, or holds something that is not text
                 pass

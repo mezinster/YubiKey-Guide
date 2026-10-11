@@ -609,6 +609,17 @@ class GuiBehaviourTests(unittest.TestCase):
         pins.done(True)
         self.assertNotIn("11111111", self.clipboard(app))
 
+    def test_pins_copied_from_a_selection_leave_the_clipboard_on_confirm(self):
+        app = self.app()
+        for first, last in (("1.0", "end-1c"), ("1.25", "1.33")):  # all, and just the Admin PIN
+            with self.subTest(selection=(first, last)):
+                pins = app.pins_dialog([("12345678", "11111111", "222222")])
+                pins.text.tag_add("sel", first, last)
+                pins.text.event_generate("<<Copy>>")  # what Ctrl+C sends; the text is read-only, not unselectable
+                self.assertIn("11111111", self.clipboard(app))
+                pins.done(True)
+                self.assertEqual(self.clipboard(app), "")
+
     def test_confirming_pins_keeps_what_was_copied_since(self):
         app = self.app()
         pins = app.pins_dialog([("12345678", "11111111", "222222")])
