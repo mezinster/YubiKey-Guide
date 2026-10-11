@@ -214,7 +214,7 @@ cleanup() {
 }
 
 trap cleanup EXIT
-trap 'exit "$EXIT_INTERRUPT"' INT TERM
+trap 'exit "$EXIT_INTERRUPT"' INT TERM HUP
 
 # --- backup detection and loading (sources are only read)
 

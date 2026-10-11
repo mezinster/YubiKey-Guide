@@ -1,10 +1,12 @@
 import json
 import os
+import signal
 import stat
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, run_impl, short_tempdir
+from tests.helpers import (FIXTURES, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until, run_impl,
+                           short_tempdir, spawn_impl)
 
 S1, S2 = "11111111", "22222222"
 
@@ -135,6 +137,22 @@ class FakeHardwareTests:
         self.assertEqual(result.returncode, 130)
         self.assertEqual(tool_homes() - before, set())
         self.assertIn("Card 11111111: Admin PIN", result.stderr)
+
+    def test_termination_signal_at_a_prompt_cleans_up(self):
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                before = tool_homes()
+                env = fake_hardware(self, [S1])
+                out = short_tempdir(self, "out")
+                proc = spawn_impl(self, self.IMPL, ["--backup", str(FIXTURES / "ed25519" / "export"),
+                                                    "--out", str(out)], env)
+                proc.stdin.write(f"{PASSPHRASE}\ny\n".encode())
+                proc.stdin.flush()
+                read_until(proc.stderr, "Insert card 1 of 1 and press Enter", timeout=60)
+                self.assertNotEqual(tool_homes() - before, set())  # staging exists while waiting
+                proc.send_signal(sig)
+                self.assertEqual(proc.wait(timeout=15), 130)
+                self.assertEqual(tool_homes() - before, set())
 
     def test_reset_not_confirmed(self):
         result, _, calls, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nreset please\n")

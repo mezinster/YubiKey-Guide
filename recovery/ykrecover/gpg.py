@@ -1,5 +1,6 @@
 """Throwaway GnuPG homes and subprocess helpers. Secrets only ever travel on stdin."""
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 from . import EXIT_BACKUP, RecoveryError
 
 MAX_BASE_LEN = 60  # gpg-agent socket paths must stay well under the 108-byte limit
+_LIVE_HOMES = set()  # every home created and not yet destroyed; removed at exit if still there
 
 
 def runtime_base() -> Path:
@@ -51,10 +53,12 @@ class Home:
         path = None
         try:
             path = Path(tempfile.mkdtemp(prefix=f"ykr-{label}-", dir=runtime_base()))
+            _LIVE_HOMES.add(path)
             path.chmod(0o700)
         except OSError as err:
             if path:
                 shutil.rmtree(path, ignore_errors=True)
+                _LIVE_HOMES.discard(path)
             raise RecoveryError(f"cannot create a temporary GnuPG home in {runtime_base()}: {err}",
                                 EXIT_BACKUP) from err
         return cls(path)
@@ -84,3 +88,11 @@ class Home:
     def destroy(self) -> None:
         self.kill_agents()
         shutil.rmtree(self.path, ignore_errors=True)
+        _LIVE_HOMES.discard(self.path)
+
+
+@atexit.register
+def destroy_all_homes() -> None:
+    """Last line of defence when a run ends without its own cleanup (for example a signal mid-cleanup)."""
+    for path in list(_LIVE_HOMES):
+        Home(path).destroy()

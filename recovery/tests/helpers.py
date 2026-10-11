@@ -1,10 +1,12 @@
 """Shared test helpers: fixtures, running either implementation, fake hardware."""
 
 import os
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 RECOVERY = Path(__file__).resolve().parents[1]
@@ -44,15 +46,50 @@ def short_tempdir(test, label: str) -> Path:
     return path
 
 
-def run_impl(impl: str, args: list, stdin: str = "", env: dict = None) -> subprocess.CompletedProcess:
-    """Run the Python CLI or the bash script with the same arguments."""
+def _command(impl: str, args: list, env: dict) -> tuple:
     if impl == "python":
         cmd = [sys.executable, "-m", "ykrecover", "--cli", *args]
     else:
         cmd = ["bash", str(RECOVERY / "recoverCard.sh"), *args]
-    full_env = {**os.environ, "PYTHONPATH": str(RECOVERY), "LC_ALL": "C", **(env or {})}
+    return cmd, {**os.environ, "PYTHONPATH": str(RECOVERY), "LC_ALL": "C", **(env or {})}
+
+
+def run_impl(impl: str, args: list, stdin: str = "", env: dict = None) -> subprocess.CompletedProcess:
+    """Run the Python CLI or the bash script with the same arguments."""
+    cmd, full_env = _command(impl, args, env)
     return subprocess.run(cmd, input=stdin, capture_output=True, text=True, env=full_env,
                           cwd=RECOVERY, timeout=600, check=False)
+
+
+def spawn_impl(test, impl: str, args: list, env: dict = None) -> subprocess.Popen:
+    """Start either implementation with stdin and stderr as pipes (binary); killed on cleanup."""
+    cmd, full_env = _command(impl, args, env)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            env=full_env, cwd=RECOVERY)
+
+    def cleanup():
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdin.close()
+        proc.stderr.close()
+
+    test.addCleanup(cleanup)
+    return proc
+
+
+def read_until(stream, text: str, timeout: float) -> str:
+    """Read a pipe until text appears (prompts end without a newline); fails after timeout seconds."""
+    seen, deadline = b"", time.monotonic() + timeout
+    while text.encode() not in seen:
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([stream], [], [], left)[0]:
+            raise AssertionError(f"timed out waiting for {text!r}; got:\n{seen.decode(errors='replace')}")
+        chunk = os.read(stream.fileno(), 4096)
+        if not chunk:
+            raise AssertionError(f"stream closed before {text!r}; got:\n{seen.decode(errors='replace')}")
+        seen += chunk
+    return seen.decode(errors="replace")
 
 
 def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> dict:

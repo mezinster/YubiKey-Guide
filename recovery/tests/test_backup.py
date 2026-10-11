@@ -67,6 +67,19 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, EXIT_BACKUP)
 
 
+class HomeRegistryTests(unittest.TestCase):
+    def test_exit_hook_removes_homes_left_behind(self):
+        from ykrecover import gpg
+        kept, done = Home.create("test"), Home.create("test")
+        self.addCleanup(kept.destroy)
+        done.destroy()
+        self.assertIn(kept.path, gpg._LIVE_HOMES)
+        self.assertNotIn(done.path, gpg._LIVE_HOMES)
+        gpg.destroy_all_homes()
+        self.assertFalse(kept.path.exists())
+        self.assertEqual(gpg._LIVE_HOMES, set())
+
+
 class LoadTests(unittest.TestCase):
     def setUp(self):
         self.home = Home.create("test")

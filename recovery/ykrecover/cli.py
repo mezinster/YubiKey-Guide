@@ -2,10 +2,11 @@
 
 import argparse
 import getpass
+import signal
 import sys
 from pathlib import Path
 
-from . import EXIT_USAGE, Aborted
+from . import EXIT_INTERRUPT, EXIT_USAGE, Aborted
 from .card import TOUCH_POLICIES
 from .migrate import Options, run
 
@@ -122,7 +123,23 @@ def _parse(parser: argparse.ArgumentParser, argv: list):
         return None, (EXIT_USAGE if exit_.code else 0)
 
 
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 def main(argv: list) -> int:
+    """SIGTERM and SIGHUP end the run like Ctrl-C: cleanup runs and the PINs are shown."""
+    previous = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:  # a second signal during cleanup; atexit still removes the homes
+        return EXIT_INTERRUPT
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _main(argv: list) -> int:
     if argv[:1] == ["update-stubs"]:
         args, code = _parse(stubs_parser(), argv[1:])
         if args is None:
