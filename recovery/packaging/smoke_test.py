@@ -1,4 +1,5 @@
 """CI smoke test for a built ykrecover executable: python smoke_test.py PATH_TO_EXE
+(dist/ykrecover-windows-x64/ykrecover.exe after build-windows.ps1)
 
 The dry-run needs gpg and gpgconf on PATH (Gpg4win on Windows, gnupg on Linux).
 """
@@ -15,6 +16,11 @@ def main() -> int:
         print("usage: python smoke_test.py PATH_TO_EXE")
         return 2
     exe = sys.argv[1]
+    folder = Path(exe).parent  # one-dir build: both executables share the _internal folder next to them
+    missing = [name for name in ("ykrecover-gui.exe", "_internal") if not (folder / name).exists()]
+    if Path(exe).suffix.lower() == ".exe" and missing:
+        print(f"missing next to {exe}: {', '.join(missing)}")
+        return 1
     plan = subprocess.run([exe, "--cli", "--backup", str(RECOVERY / "tests" / "fixtures" / "ed25519" / "export"),
                            "--dry-run"], capture_output=True, text=True, encoding="utf-8", check=False)
     if plan.returncode != 0:

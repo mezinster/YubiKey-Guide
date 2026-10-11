@@ -27,8 +27,8 @@ Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecov
 
 1. Install GnuPG: [Gpg4win](https://gpg4win.org), or run `Prepare-Windows.bat` as described below.
 2. Download `ykrecover-windows-x64.zip` from the repository's [Releases](https://github.com/mezinster/YubiKey-Guide/releases) page (or the latest `windows` CI run's artifacts).
-3. Extract the **whole** zip into a folder. `ykrecover-gui.exe` needs `ykrecover.exe` next to it, so don't run it from inside the zip.
-4. Double-click `ykrecover-gui.exe` for the wizard, or run `ykrecover.exe --cli --help` in cmd, PowerShell or Windows Terminal (Git Bash echoes the passphrase).
+3. Extract the **whole** zip. It holds one folder, `ykrecover-windows-x64`, with `ykrecover.exe`, `ykrecover-gui.exe` and the `_internal` folder both need; keep them together, and don't run them from inside the zip.
+4. In that folder, double-click `ykrecover-gui.exe` for the wizard, or run `ykrecover.exe --cli --help` in cmd, PowerShell or Windows Terminal (Git Bash echoes the passphrase).
 
 The executables are not code-signed, so SmartScreen may warn ("More info", then "Run anyway").
 
@@ -51,7 +51,7 @@ You need the repository checked out on the Windows machine.
    ```
 
    Or do both steps at once with `Prepare-Windows.bat -Build`. The build creates a fresh virtual environment, installs the pinned build tools, and writes `recovery\packaging\dist\ykrecover-windows-x64.zip`.
-3. **Check the build** (optional): `python smoke_test.py dist\ykrecover.exe` compares a dry run with the reference plan and checks the bundled ykman.
+3. **Check the build** (optional): `python smoke_test.py dist\ykrecover-windows-x64\ykrecover.exe` compares a dry run with the reference plan and checks the bundled ykman.
 4. Use the zip as in [Use the prebuilt zip](#use-the-prebuilt-zip), steps 3–4.
 
 Notes:

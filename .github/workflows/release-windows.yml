@@ -56,7 +56,7 @@ jobs:
         run: recovery/packaging/build-windows.ps1
 
       - name: smoke test
-        run: python recovery/packaging/smoke_test.py recovery/packaging/dist/ykrecover.exe
+        run: python recovery/packaging/smoke_test.py recovery/packaging/dist/ykrecover-windows-x64/ykrecover.exe
 
       - name: attach to the release
         env:
