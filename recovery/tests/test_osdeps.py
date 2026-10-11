@@ -94,6 +94,13 @@ class WorkBaseTests(unittest.TestCase):
         osdeps.set_workdir(Path("/some/where"))
         self.assertEqual(osdeps.work_base(), Path("/some/where"))
 
+    def test_default_work_base_ignores_the_override(self):
+        with mock.patch.object(osdeps.sys, "platform", "linux"), \
+                mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": ""}):
+            osdeps.set_workdir(Path("/some/where"))
+            self.assertEqual(osdeps.default_work_base(), Path("/tmp"))
+            self.assertEqual(osdeps.work_base(), Path("/some/where"))
+
     def test_linux_default(self):
         with mock.patch.object(osdeps.sys, "platform", "linux"), \
                 mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": ""}):

@@ -137,6 +137,8 @@ class App:
             (self.build_output, self.leave_output), (self.build_cards, None), (self.build_summary, None),
         ]
         self.page = 0
+        self.workdir_note = None
+        self.v["workdir"].trace_add("write", lambda *_: self.update_workdir_note())
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.poll_id = root.after(100, self.poll)
         root.bind("<Destroy>", self.stop_polling)
@@ -152,8 +154,8 @@ class App:
         reschedule = True
         try:
             if self.terminate_requested:
-                reschedule = False  # the window is destroyed: a new "after" would outlive it
                 self.terminate()
+                reschedule = False  # the window is destroyed: a new "after" would outlive it
                 return
             while True:
                 try:
@@ -257,20 +259,24 @@ class App:
             side="left", padx=4)
         self.workdir_note = ttk.Label(self.body, wraplength=700, justify="left")
         self.workdir_note.pack(anchor="w")
-        self.v["workdir"].trace_add("write", lambda *_: self.update_workdir_note())
         self.update_workdir_note()
 
     def update_workdir_note(self):
+        if self.workdir_note is None:
+            return
         text = self.v["workdir"].get().strip()
         if text and not Path(text).is_dir():
             note = "This folder does not exist."
         else:
-            base = Path(text) if text else osdeps.work_base()
+            base = Path(text) if text else osdeps.default_work_base()
             note = (f"Temporary key copies go to {base} (memory-backed)." if osdeps.memory_backed(base) else
                     f"Temporary key copies go to {base}, which is on disk. Choose a RAM disk or an "
                     "encrypted volume to avoid that.")
-        if self.workdir_note.winfo_exists():
-            self.workdir_note.config(text=note)
+        try:
+            if self.workdir_note.winfo_exists():
+                self.workdir_note.config(text=note)
+        except tk.TclError:  # interpreter already gone
+            pass
 
     def browse_backup(self):
         folder = filedialog.askdirectory(parent=self.root, mustexist=True)
@@ -307,14 +313,15 @@ class App:
                 and s.opts.workdir == workdir):
             self.v["passphrase"].set("")
             return True  # already loaded and unlocked (the user went Back): keep it
-        if self.session:
-            self.session.cleanup()
-        self.session = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
+        new = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
         try:
-            self.session.validate_workdir()
+            new.validate_workdir()
         except RecoveryError as err:
             self.alert(str(err))
             return False
+        if self.session:
+            self.session.cleanup()
+        self.session = new
         while True:
             try:
                 self.session.load()

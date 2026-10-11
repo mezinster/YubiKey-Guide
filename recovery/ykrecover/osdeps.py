@@ -90,8 +90,11 @@ def set_workdir(path) -> None:
 
 
 def work_base() -> Path:
-    if _workdir is not None:
-        return _workdir
+    return _workdir if _workdir is not None else default_work_base()
+
+
+def default_work_base() -> Path:
+    """The base used when no work folder was chosen (ignores any set_workdir override)."""
     if is_windows():
         root = os.environ.get("LOCALAPPDATA")
         base = Path(root) / "Temp" / "ykrecover" if root else Path(tempfile.gettempdir()) / "ykrecover"

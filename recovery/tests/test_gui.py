@@ -34,6 +34,52 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(Path(app.session.staging.path).parent, workdir)
         self.assertIn(str(workdir), app.workdir_note.cget("text"))
 
+    def test_note_ignores_a_stale_override_when_the_field_is_empty(self):
+        from pathlib import Path
+        from ykrecover import osdeps
+        from ykrecover.gui import App
+        from tests.helpers import short_tempdir
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        self.addCleanup(osdeps.set_workdir, None)
+        app = App(root)
+        app.show(1)
+        osdeps.set_workdir(short_tempdir(self, "stale"))
+        app.v["workdir"].set("")
+        app.update_workdir_note()
+        self.assertIn(str(osdeps.default_work_base()), app.workdir_note.cget("text"))
+        self.assertNotIn("stale", app.workdir_note.cget("text"))
+
+    def test_invalid_work_folder_alerts_without_staging(self):
+        from ykrecover.backup import Candidate
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        alerts = []
+        app.alert = alerts.append
+        app.show(1)
+        app.candidates = [Candidate("export", Path("/backup"), ())]
+        app.cand_list.insert("end", "export: /backup")
+        app.cand_list.selection_set(0)
+        app.v["workdir"].set("/nonexistent/work/folder")
+        self.assertFalse(app.leave_backup())
+        self.assertEqual(len(alerts), 1)
+        self.assertIsNone(app.session)
+
+    def test_poll_stops_after_terminate_and_survives_a_failing_one(self):
+        app = self.app_with_pins()
+        app.request_terminate(signal.SIGTERM, None)
+        with mock.patch("ykrecover.gui.messagebox.showinfo"):
+            app.poll()
+        self.assertIsNone(app.poll_id)
+        app = self.app_with_pins()
+        app.request_terminate(signal.SIGTERM, None)
+        with mock.patch.object(app, "terminate", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                app.poll()
+        self.assertIsNotNone(app.poll_id)
+
     def test_wizard_builds_and_closes(self):
         from ykrecover.gui import App
         root = tk.Tk()
