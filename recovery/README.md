@@ -9,7 +9,9 @@ Two equivalent tools:
 
 On the LiveCD built from `nix/` both are installed, and "YubiKey Recovery" is on the desktop.
 
-Both tools run on Linux only (the LiveCD, or another Linux system with `gpg` and `ykman`). On Windows or macOS they exit with an error. Boot the LiveCD instead, or use a Linux VM with the YubiKey passed through to it.
+The Python tool runs on Linux and Windows; the bash script is Linux-only. On other systems both exit with an error.
+
+**Windows:** install [Gpg4win](https://gpg4win.org), then download `ykrecover-windows-x64.zip` from the repository's Releases page (or the `windows` CI job's artifacts) and run `ykrecover-gui.exe`, or `ykrecover.exe --cli …` in a terminal. ykman is bundled. Windows has no memory-backed temporary folder, so the tool warns that key copies touch the disk while it runs; to avoid that, choose a RAM disk or an encrypted volume as the work folder (`--workdir DIR`, or "Work folder" in the wizard). Run the hardware checklist on Windows too: card access works differently there. To build locally, run `recovery/packaging/build-windows.ps1` on Windows.
 
 Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecover`. Running `ykrecover/gui.py` directly fails with "attempted relative import".
 
@@ -44,6 +46,8 @@ recoverCard.sh --backup /mnt/backup --mode rotate --revoke-old --dry-run
 `--out` is required for every run except `--dry-run`, `clone` included: the public key (`public-KEYID-DATE.asc`) and the SSH public key (`ssh-KEYID.pub`) are written there, and for `renew` and `rotate` the new backup too. It must be outside the backup folder and must not already hold `secret-*.key` files.
 
 A backup made with the main guide often holds both the exported key files (`secret-*-Certify.key`, `secret-*-Subkeys.key`) and a copy of the GnuPG home. The tool then stops and asks you to choose with `--source`. Pass `--source export`: the exports were made before `keytocard` and hold the secret subkeys, while a GnuPG home copied after `keytocard` holds only card stubs, which the tool refuses for `clone` and `renew`.
+
+`--workdir DIR`: where temporary GnuPG homes go (must exist; on Linux at most 60 characters)
 
 Run `recoverCard.sh --help` for every option. The defaults are:
 
