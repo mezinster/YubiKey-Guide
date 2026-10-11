@@ -1,15 +1,12 @@
 import os
 import shutil
 import subprocess
-import sys
 import unittest
 
-from tests.helpers import FIXTURES, run_impl, short_tempdir
+from ykrecover import osdeps
+from tests.helpers import FIXTURES, LINUX, run_impl, short_tempdir
 
 ED_EXPORT = str(FIXTURES / "ed25519" / "export")
-
-
-LINUX = sys.platform.startswith("linux")
 
 
 class ContractTests:
@@ -99,7 +96,7 @@ class ContractTests:
             elif fields[0] == "grp" and in_sub:
                 grips.append(fields[9])
         self.assertEqual(len(grips), 3)
-        subprocess.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(copy)}, check=False)
+        osdeps.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(copy)})
         for grip in grips:
             (copy / "private-keys-v1.d" / f"{grip}.key").unlink()
         for mode in ("clone", "renew"):
@@ -134,7 +131,7 @@ class ContractTests:
         ok = short_tempdir(self, "wd")
         result = self.cli("--backup", ED_EXPORT, "--workdir", str(ok), "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
-        if sys.platform.startswith("linux"):
+        if LINUX:
             deep = ok / ("d" * 70)
             deep.mkdir()
             self.assertEqual(self.cli("--backup", ED_EXPORT, "--workdir", str(deep), "--dry-run").returncode, 1)

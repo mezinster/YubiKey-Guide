@@ -1,8 +1,7 @@
 import os
-import sys
 import unittest
 
-from tests.helpers import GOLDEN, run_impl
+from tests.helpers import GOLDEN, LINUX, run_impl
 
 CASES = {
     "clone-ed25519-export": ["--backup", "tests/fixtures/ed25519/export"],
@@ -16,9 +15,6 @@ CASES = {
     "rotate-rsa-to-ed25519-revoke": [
         "--backup", "tests/fixtures/rsa4096/export", "--mode", "rotate", "--algo", "ed25519", "--revoke-old"],
 }
-
-
-LINUX = sys.platform.startswith("linux")
 
 
 class PlanParityTests:

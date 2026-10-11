@@ -1,17 +1,13 @@
-import sys
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, fake_hardware, fixture_info, run_impl, short_tempdir
+from tests.helpers import FIXTURES, LINUX, fake_hardware, fixture_info, run_impl, short_tempdir
 
 OLD, OTHER = "22222222", "33333333"
 
 
 def stub(serial, slot):
     return f"Key: (shadowed-private-key (ecc (curve Ed25519)))\nToken: D2760001240103040006{serial}0000 OPENPGP.{slot} - - -\n"
-
-
-LINUX = sys.platform.startswith("linux")
 
 
 class StubsTests:

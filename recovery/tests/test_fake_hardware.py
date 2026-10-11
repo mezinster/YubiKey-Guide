@@ -2,21 +2,17 @@ import json
 import os
 import signal
 import stat
-import sys
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until, run_impl,
-                           short_tempdir, spawn_impl)
+from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until,
+                           run_impl, short_tempdir, spawn_impl)
 
 S1, S2 = "11111111", "22222222"
 
 
 def tool_homes():
     return set(_runtime_base().glob("ykr-*"))
-
-
-LINUX = sys.platform.startswith("linux")
 
 
 class FakeHardwareTests:

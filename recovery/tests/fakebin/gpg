@@ -55,7 +55,7 @@ def main():
         script = sys.stdin.read()
         lines = script.splitlines()
         if "keytocard" not in lines:
-            return subprocess.run([REAL, *ARGS], input=script, text=True, check=False).returncode
+            return subprocess.run([REAL, *ARGS], input=script.encode("utf-8"), check=False).returncode
         slot = int(lines[lines.index("keytocard") + 1])
         log(f"keytocard{slot}")
         with open(STATE / "homes.log", "a", encoding="utf-8") as f:
@@ -75,7 +75,7 @@ def main():
         maybe_fail(kind)
         serial, _, _ = current_card()
         env = {**os.environ, "GNUPGHOME": str(STATE / f"keys-{serial}")}
-        return subprocess.run([REAL, *ARGS], input=os.environ["FAKE_CERTIFY_PASS"] + "\n", text=True,
+        return subprocess.run([REAL, *ARGS], input=(os.environ["FAKE_CERTIFY_PASS"] + "\n").encode("utf-8"),
                               env=env, check=False).returncode
     return subprocess.run([REAL, *ARGS], check=False).returncode
 
