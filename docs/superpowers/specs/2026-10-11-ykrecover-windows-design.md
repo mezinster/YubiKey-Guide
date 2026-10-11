@@ -116,3 +116,13 @@ Tool resolution happens only when a command is executed: `Home.run`, and the dir
 - **gpg-agent on Windows** uses a different socket emulation (Assuan sockets as files in the GnuPG home). `gpgconf --kill all` per home still applies. Deleting a home fails while its agent is alive, so the agents are killed before deletion and failures are tolerated.
 - **Real cards on Windows:** scdaemon and ykman compete for the card through WinSCard, as they do through pcscd on Linux. The kill-before-every-session rule covers this. The manual hardware checklist must be run on Windows too; the README says so.
 - **Unsigned executables** trigger SmartScreen warnings. This is documented in `README-windows.txt`.
+
+## Decisions made during planning
+
+- **Network check on Windows:** a UDP route probe to the TEST-NET address 192.0.2.1 (nothing is sent; `getsockname()` reveals a non-loopback source address when a route exists) instead of `GetAdaptersAddresses` through ctypes. Same purpose, far less ctypes code.
+- **GUI work folder:** the field sits on the Backup page, not Card settings, because the staging home is created when the backup is loaded, before Card settings is shown.
+- **ykman on Windows:** a `ykman` already on PATH (Yubico's installer, or the test fakes) is used before the bundled copy. From source, the bundled path is `python -c <shim>` calling `ykman._cli.__main__:main`; yubikey-manager has no `python -m ykman`.
+- **`--workdir` on Linux** must also be at most 60 characters long (gpg-agent socket limit). Both implementations reject longer paths with exit 1.
+- **Line endings:** `.gitattributes` marks fixtures and golden plans `-text` and keeps scripts LF, so Windows checkouts with `core.autocrlf` cannot corrupt them.
+- **Fake gpg** passes through to the real gpg with `subprocess.run` instead of `os.execv` (portable).
+- **Pins:** `yubikey-manager==5.9.2`, `pyinstaller==6.22.3`. Transitive dependencies are not pinned.
