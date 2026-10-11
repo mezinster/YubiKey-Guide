@@ -38,7 +38,7 @@ You need the repository checked out on the Windows machine.
 
 1. **Prepare the machine**: in File Explorer, open `recovery\packaging` and double-click `Prepare-Windows.bat` (run it normally, *not* "Run as administrator"). It:
    - asks for administrator rights once, only for the installation step;
-   - installs Chocolatey if it is missing;
+   - installs Chocolatey if it is missing (a pinned version, checked against its SHA-256);
    - installs Python 3.13 (into `C:\Program Files\Python313`) and GnuPG through Chocolatey, unless they are already installed under Program Files (an existing Gpg4win is used as is);
    - adds them to the machine PATH and sets `YKRECOVER_PYTHON`;
    - writes a log to `recovery\packaging\logs\`.
