@@ -13,13 +13,25 @@ except ImportError:  # python3-tk not installed
     tk = None
 
 
+NO_GUI = tk is None or (LINUX and not os.environ.get("DISPLAY"))
+# CI sets this so a missing python3-tk or display fails the run instead of silently skipping the GUI tests.
+REQUIRE_GUI = os.environ.get("YKRECOVER_REQUIRE_GUI") == "1"
+SKIP_GUI = unittest.skipIf(NO_GUI and not REQUIRE_GUI, "needs tkinter and a display")
+
+
 def shown_pins():
     """Patches the PIN dialog's run(); call_args.args[0] is the dialog, its text_content what it shows."""
     from ykrecover.gui import TextDialog
     return mock.patch.object(TextDialog, "run", autospec=True, return_value=True)
 
 
-@unittest.skipIf(tk is None or (LINUX and not os.environ.get("DISPLAY")), "needs tkinter and a display")
+class GuiAvailable(unittest.TestCase):
+    @unittest.skipUnless(REQUIRE_GUI, "YKRECOVER_REQUIRE_GUI is not set")
+    def test_gui_tests_can_run(self):
+        self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
+
+
+@SKIP_GUI
 class GuiSmokeTests(unittest.TestCase):
     def test_work_folder_is_applied_before_loading(self):
         from pathlib import Path
@@ -33,14 +45,19 @@ class GuiSmokeTests(unittest.TestCase):
         self.addCleanup(lambda: app.session and app.session.cleanup())
         self.addCleanup(osdeps.set_workdir, None)
         workdir = short_tempdir(self, "wd")
+        leftover = workdir / "ykr-staging-old"
+        leftover.mkdir()
+        os.utime(leftover, (1, 1))  # older than a run starting now
         app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
         app.v["workdir"].set(str(workdir))
         app.v["passphrase"].set(PASSPHRASE)
         app.show(1)
         root.update()
-        self.assertTrue(app.leave_backup())
+        with shown_pins() as shown:  # the leftover warning uses the same text dialog
+            self.assertTrue(app.leave_backup())
         self.assertEqual(Path(app.session.staging.path).parent, workdir)
         self.assertIn(str(workdir), app.workdir_note.cget("text"))
+        self.assertIn(str(leftover), shown.call_args.args[0].text_content)
 
     def test_note_for_a_chosen_disk_work_folder(self):
         import tempfile
@@ -262,6 +279,243 @@ class GuiSmokeTests(unittest.TestCase):
         text = app.logbox.get("1.0", "end")
         self.assertIn("error: OSError: boom", text)
         self.assertIn("finished with exit code 3", text)
+
+
+FPR = "6359B871334E108D81DA7EF884CA380EC0FAA9DB"
+DESCRIBE = "\n".join([f"Key {FPR}", "  uid Firstname Lastname-Longname <firstname.lastname@example-company.org>",
+                      *(f"  [{u}] rsa4096 9418366136062EF6E76E67506A666220EEF5ACA5 expires 2028-10-11 <- card"
+                        for u in "SEA")])
+LONG_WARNINGS = (
+    "network interface wlp0s20f3 is up; an air-gapped system is recommended",
+    "temporary key copies are on disk at /tmp; use --workdir with a RAM disk or encrypted volume to avoid that",
+    "left over from an earlier run: /tmp/ykr-staging-abcdef12; it may hold key material — delete it securely",
+)
+# tk scaling at 100%, 125% and 150% Windows display scaling (1.33 is 96 dpi).
+SCALINGS = (96 / 72, 120 / 72, 144 / 72)
+
+
+def fake_session(cards=10):
+    from ykrecover.migrate import Options
+    opts = Options(backup=Path("/media/user/ENCRYPTED-BACKUP/gnupg-backup"), out=Path("/media/user/PUBLIC/out"),
+                   cards=cards)
+    results = [SimpleNamespace(index=i, serial="12345678", status="FAILED",
+                               detail="decrypt round-trip (PINs were changed; see PINs shown)")
+               for i in range(1, cards + 1)]
+    return SimpleNamespace(opts=opts, results=results, describe=lambda: DESCRIBE, cleanup=lambda: None,
+                           bundle=SimpleNamespace(has_certify_secret=True))
+
+
+@SKIP_GUI
+class GuiLayoutTests(unittest.TestCase):
+    """Every page and dialog fits its window at 100%, 125% and 150% display scaling."""
+
+    def app(self, scaling):
+        from ykrecover.gui import App
+        from ykrecover.migrate import Session
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        root.tk.call("tk", "scaling", scaling)  # before any font is used
+
+        def preflight(session):
+            for warning in LONG_WARNINGS:
+                session.ui.warn(warning)
+
+        patcher = mock.patch.object(Session, "preflight", preflight)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        app = App(root)
+        app.alert = lambda text: None
+        app.session = fake_session()
+        return root, app
+
+    def test_pages_fit_the_minimum_window(self):
+        for scaling in SCALINGS:
+            root, app = self.app(scaling)
+            width, height = root.minsize()
+            root.geometry(f"{width}x{height}")
+            for page in range(len(app.pages)):
+                with self.subTest(scaling=round(scaling, 2), page=page):
+                    app.show(page)
+                    root.update()
+                    self.assertLessEqual(root.winfo_reqwidth(), width)
+                    self.assertLessEqual(root.winfo_reqheight(), height)
+                    for button in (app.back_btn, app.next_btn):
+                        self.assertTrue(button.winfo_ismapped())
+                        self.assertLessEqual(button.winfo_y() + button.winfo_height(),
+                                             button.master.winfo_height())
+                        self.assertLessEqual(button.master.winfo_y() + button.master.winfo_height(),
+                                             root.winfo_height())
+                    for text in self.texts(app.body):
+                        self.assertEqual(text.cget("wrap"), "word")  # no line runs off the side
+
+    def texts(self, widget):
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Text):
+                yield child
+            yield from self.texts(child)
+
+    def test_window_fits_a_1080p_screen_at_150_percent(self):
+        root, _ = self.app(SCALINGS[2])
+        width, height = root.minsize()
+        self.assertLessEqual(width, 1920)
+        self.assertLessEqual(height, 1080 - 150)  # title bar and taskbar
+
+    def test_card_table_columns_fit(self):
+        for scaling in SCALINGS:
+            root, app = self.app(scaling)
+            app.show(6)
+            columns = sum(app.table.column(c, "width") for c in ("#0", "status"))
+            self.assertLessEqual(columns, root.minsize()[0] - 48)
+
+    def test_dialogs_fit_the_screen(self):
+        from ykrecover.gui import ChoiceDialog
+        stderr = "\n".join(f"gpg: line {i}: card communication failed with a long scdaemon message"
+                           for i in range(2000))
+        for scaling in SCALINGS:
+            root, app = self.app(scaling)
+            dialogs = {
+                "failure": app.failure_dialog("12345678", "gpg --edit-card", "gpg --edit-card\n" + stderr),
+                "pins": app.pins_dialog([(f"1000000{i}", "12345678", "123456") for i in range(10)]),
+                "keys": ChoiceDialog(root, "keys", "Choose a key.", [f"{FPR}  A Long Name <a.long@example.org>"] * 12),
+            }
+            for name, dialog in dialogs.items():
+                with self.subTest(scaling=round(scaling, 2), dialog=name):
+                    dialog.update_idletasks()
+                    self.assertLessEqual(dialog.winfo_reqheight(), 0.8 * root.winfo_screenheight())
+                    self.assertLessEqual(dialog.winfo_reqwidth(), 0.9 * root.winfo_screenwidth())
+            self.assertFalse(dialogs["failure"].text_content.startswith("gpg --edit-card"))  # not repeated
+            pins = dialogs["pins"].text
+            self.assertEqual(pins.cget("wrap"), "none")  # a card's two PINs stay on one line
+            self.assertGreaterEqual(pins.cget("width"), len("Card 10000000: Admin PIN 12345678   User PIN 123456"))
+
+
+@SKIP_GUI
+class GuiBehaviourTests(unittest.TestCase):
+    def app(self):
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        self.alerts = []
+        app.alert = self.alerts.append
+        app.session = fake_session(cards=2)
+        return app
+
+    def test_settings_are_validated_on_their_page(self):
+        app = self.app()
+        app.show(4)
+        app.v["retries"].set(" 3, 4 ,5 ")
+        self.assertTrue(app.leave_settings())
+        self.assertEqual(app.session.opts.retries, ("3", "4", "5"))
+        app.v["retries"].set("5,5")
+        app.v["name"].set("Bad <name>")
+        app.v["cards"].set("0")
+        self.assertFalse(app.leave_settings())
+        self.assertIn("Retries must be three numbers from 1 to 99", self.alerts[-1])
+        self.assertIn("Cardholder name must be", self.alerts[-1])
+        self.assertIn("Number of cards", self.alerts[-1])
+        self.assertNotIn("--", self.alerts[-1])
+
+    def test_output_folder_errors_use_field_names(self):
+        from ykrecover.gui import gui_wording
+        app = self.app()
+        app.show(5)
+        self.assertFalse(app.leave_output())
+        self.assertEqual(self.alerts, ["Choose an output folder."])
+        self.assertEqual(gui_wording("--out must be outside the backup folder"),
+                         "The output folder must be outside the backup folder")
+        self.assertEqual(gui_wording("cannot create the --out folder /x: denied"),
+                         "Cannot create the output folder /x: denied")
+
+    def test_back_works_on_the_card_page_until_start(self):
+        app = self.app()
+        app.show(6)
+        self.assertFalse(app.back_btn.instate(["disabled"]))
+        with mock.patch("ykrecover.gui.threading.Thread"):
+            app.start()
+        self.assertTrue(app.back_btn.instate(["disabled"]))
+        app.show(6)
+        self.assertTrue(app.back_btn.instate(["disabled"]))
+
+    def test_card_table_shows_step_names_and_the_log_full_commands(self):
+        app = self.app()
+        app.show(6)
+        command = "ykman --device 12345678 openpgp keys set-touch sig on -f -a <ADMIN_PIN>"
+        app.ui.progress(1, f"12345678: {command}")
+        app.poll()
+        self.assertEqual(app.table.item("1", "values"), ("12345678: set touch policy",))
+        self.assertIn(command, app.logbox.get("1.0", "end"))
+
+    def on_worker(self, app, fn):
+        """Runs fn on a worker thread, as Session does, while this thread serves its queued dialogs."""
+        import threading
+        from ykrecover import Aborted
+        outcome = []
+
+        def worker():
+            try:
+                outcome.append(fn())
+            except Aborted:
+                outcome.append("aborted")
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        while thread.is_alive():
+            app.poll()
+            thread.join(0.05)
+        return outcome[0]
+
+    def test_cancel_at_a_confirmation_aborts(self):
+        app = self.app()
+        with mock.patch("ykrecover.gui.messagebox.askyesnocancel", return_value=None):
+            self.assertEqual(self.on_worker(app, lambda: app.ui.confirm("Saved it to offline storage?")), "aborted")
+        with mock.patch("ykrecover.gui.messagebox.askyesnocancel", return_value=False):
+            self.assertIs(self.on_worker(app, lambda: app.ui.confirm("Saved it to offline storage?")), False)
+
+    def test_failed_card_choice_comes_from_the_dialog(self):
+        from ykrecover.gui import TextDialog
+        app = self.app()
+        with mock.patch.object(TextDialog, "run", autospec=True, return_value="skip") as shown:
+            answer = self.on_worker(app, lambda: app.ui.card_failed(1, "12345678", "change PIN",
+                                                                   "change PIN\ngpg: Bad PIN"))
+        self.assertEqual(answer, "skip")
+        self.assertEqual(shown.call_args.args[0].text_content, "gpg: Bad PIN")
+
+    def test_several_keys_offer_a_chooser(self):
+        from ykrecover.backup import AmbiguousKey, Candidate
+        from ykrecover.gui import ChoiceDialog
+        from ykrecover.migrate import Session
+        app = self.app()
+        app.session = None
+        app.show(1)
+        app.candidates = [Candidate("export", Path("/backup"), ())]
+        app.cand_list.insert("end", "export: /backup")
+        app.cand_list.selection_set(0)
+        bundles = [SimpleNamespace(key_fp="A" * 40, uids=("one",)), SimpleNamespace(key_fp="B" * 40, uids=("two",))]
+        with mock.patch.object(Session, "load", side_effect=[AmbiguousKey(bundles), None]), \
+                mock.patch.object(Session, "unlock", return_value=True), \
+                mock.patch.object(ChoiceDialog, "run", return_value=1):
+            self.assertTrue(app.leave_backup())
+        self.assertEqual(app.session.opts.key, "B" * 40)
+
+    def test_work_folder_applies_only_once_the_session_is_adopted(self):
+        from ykrecover import osdeps
+        from ykrecover.migrate import Options, Session
+        from tests.helpers import short_tempdir
+        self.addCleanup(osdeps.set_workdir, None)
+        osdeps.set_workdir(None)
+        workdir = short_tempdir(self, "adopt")
+        Session(Options(backup=Path("/backup"), workdir=workdir), None).validate_workdir(apply=False)
+        self.assertEqual(osdeps.work_base(), osdeps.default_work_base())
+        Session(Options(backup=Path("/backup"), workdir=workdir), None).validate_workdir()
+        self.assertEqual(osdeps.work_base(), workdir.resolve())
+
+    def test_detection_errors_are_shown_beside_the_list(self):
+        app = self.app()
+        app.v["folder"].set("/nonexistent")
+        app.show(1)
+        self.assertEqual(app.cand_list.size(), 0)
+        self.assertTrue(app.cand_error.cget("text"))
 
 
 if __name__ == "__main__":
