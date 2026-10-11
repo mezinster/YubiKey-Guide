@@ -1,0 +1,12 @@
+{
+  // Disabled rules match intentional conventions in this guide.
+  "config": {
+    "MD013": false, // long prose lines
+    "MD025": false, // multiple top-level `#` sections
+    "MD033": false, // <details>/<summary> HTML
+    "MD036": false, // bold platform labels (**macOS**, **OpenBSD**, ...)
+    "MD041": false, // README opens with prose, no H1
+    "MD028": false  // adjacent GitHub alert blocks ([!NOTE], [!TIP], ...)
+  },
+  "globs": ["README.md", "SECENV.md", "piv/README.md", "recovery/README.md"]
+}

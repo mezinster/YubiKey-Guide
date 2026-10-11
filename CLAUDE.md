@@ -4,48 +4,55 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is **YubiKey-Guide** — a comprehensive guide to using YubiKey as a smart card for GnuPG-based encryption, signing, and SSH authentication. It is primarily a documentation and configuration project (not a traditional software project), forked from drduh/YubiKey-Guide.
-
-The main content is in `README.md` (~2,300 lines) covering the full YubiKey setup lifecycle: secure environment preparation, GPG key generation, subkey creation, transferring keys to YubiKey, and ongoing use for SSH/email/signing.
-
-## Key Files
-
-- **README.md** — The primary guide (setup, key management, SSH, email, maintenance)
-- **SECENV.md** — Supplementary guide for air-gapped Alpine Linux environments
-- **config/gpg.conf** — Hardened GPG configuration (AES256, SHA512, smartcard)
-- **config/gpg-agent.conf** — GPG agent config for PIN entry, SSH, cache TTL
-- **scripts/generate.sh** — Automated GPG key generation (RSA4096/ed25519, passphrase generation)
-- **scripts/reset-yubikey** — Factory reset via APDU commands
-- **scripts/switch-to-backup-yubikey** — Multi-YubiKey switching utility
-- **nix/flake.nix** — NixOS flake for building a LiveCD ISO with YubiKey tools
+Documentation project: a guide to using YubiKey with GnuPG for encryption, signing and SSH. `README.md` (~2,300 lines) is the main content. Also present: `SECENV.md` (air-gapped Alpine Linux setup, not linked from README), `piv/` (separate PIV certificate guide + `generateCerts.sh`), `config/` (gpg, gpg-agent, scdaemon, dirmngr confs), `scripts/` (`generateKeys.sh`, `resetCard.sh`, `switchKeys.sh`), `nix/` (LiveCD flake).
 
 ## Build Commands
 
-There is no traditional build system. The Nix flake builds a LiveCD ISO:
+No build system. CI (`.github/workflows/lint.yml`) runs the checks below; run them locally after editing docs or scripts.
 
 ```bash
-# Build NixOS Live ISO image
+# Markdown lint, incl. broken #anchor links (MD051). Config + file globs: .markdownlint-cli2.jsonc
+npx --yes markdownlint-cli2@0.23.3
+
+# Every README heading must appear in the hand-written ToC
+python3 .github/scripts/check_toc.py README.md
+
+# Scripts (shellcheck via `pipx install shellcheck-py`). CI gates on errors only; existing
+# SC2155/SC2086/SC3045 warnings are upstream — don't add new ones.
+shellcheck --severity=error scripts/*.sh piv/*.sh recovery/recoverCard.sh recovery/tests/fixtures/make_fixtures.sh
+
+# Recovery toolset tests (Python + bash, fake card hardware)
+cd recovery && python3 -m unittest discover -s tests -t . -v
+
+# Build NixOS Live ISO
 nix build --experimental-features "nix-command flakes" nix#nixosConfigurations.yubikeyLive.x86_64-linux.config.system.build.isoImage
 
-# Update Nix flake dependencies
-nix flake update --commit-lock-file
+# Test ISO in QEMU
+qemu-system-x86_64 -enable-kvm -m 4G -smp 2 \
+  -drive readonly=on,media=cdrom,format=raw,file=result/iso/yubikeyLive.iso
 
-# Test ISO with QEMU
-qemu-system-x86_64 -enable-kvm -m 4G -smp 2 -drive format=raw,file=result/iso/nixos.iso
+# Format flake.nix (alejandra)
+nix fmt
+
+# Update flake inputs
+nix flake update --commit-lock-file
 ```
 
-## Content Architecture
+## README Conventions
 
-The README follows a sequential workflow:
-1. **Environment Setup** — Platform-specific install instructions (Debian, Fedora, Arch, macOS, OpenBSD, NixOS)
-2. **Key Generation** — Certify key → Subkeys (Sign, Encrypt, Authenticate) → Verification → Backup
-3. **YubiKey Configuration** — PIN setup, attribute setting, key transfer
-4. **Operational Use** — Encryption/decryption, signatures, SSH, GitHub, agent forwarding, email clients
-5. **Maintenance** — Key renewal, rotation, YubiKey reset
+- The table of contents (lines ~3–62) is hand-maintained and mirrors every heading. Adding/renaming a heading requires updating it, using GitHub slug anchors (lowercase, spaces→`-`, punctuation dropped, e.g. `#use-sgpg-agentssh`).
+- ` ```bash ` blocks are plain copy-paste commands with no `$` prompt; ` ```console ` blocks show `$ cmd` followed by sample output.
+- Shell variables are exported once early and reused in later sections: `$GNUPGHOME`, `$IDENTITY`, `$KEY_TYPE`, `$KEY_EXPIRATION`, `$CERTIFY_PASS`, `$KEY_FP`, `$KEY_ID`, `$ADMIN_PIN`/`$USER_PIN`. Keep names consistent across the file ("Updating keys" re-exports them). Pass passphrases as `printf '%s' "$CERTIFY_PASS" | gpg --batch --passphrase-fd 0 ...`.
+- Platform variants use bold labels (`**macOS**`, `**OpenBSD**`, `**NixOS**`, …), not headings. Preserve coverage: Debian Live (primary), Arch, Fedora, macOS/MacPorts, OpenBSD, NixOS, Windows/WSL, Tails.
+- Links to repo files use absolute drduh upstream URLs (`github.com/drduh/YubiKey-Guide/blob/main/...`), not relative paths.
 
-## Editing Guidelines
+## Scripts and Nix
 
-- All Markdown content uses fenced code blocks with shell commands users copy-paste into terminals. Ensure commands are correct and complete.
-- The guide supports multiple platforms; platform-specific instructions are clearly sectioned. When editing, preserve platform coverage.
-- Scripts in `scripts/` use POSIX-compatible shell and interact with `gpg-connect-agent` via APDU commands.
-- The Nix flake (`nix/flake.nix`) targets NixOS 25.05 and builds an XFCE-based LiveCD.
+- `generateKeys.sh` and `resetCard.sh` are bash (`#!/usr/bin/env bash`); `switchKeys.sh` is `#!/bin/sh`. Only `resetCard.sh` sends raw APDUs via `gpg-connect-agent`.
+- `nix/flake.nix` pins `nixos-26.05` (`system.stateVersion` stays "25.05" intentionally) and builds an air-gapped XFCE ISO for x86_64 and aarch64. It embeds `README.md`, `config/gpg.conf` and `config/gpg-agent.conf` — editing those changes the ISO.
+- `recovery/` holds two implementations of the same tool (`ykrecover/` Python + Tkinter, `recoverCard.sh` bash). They must print byte-identical `--dry-run` plans (`recovery/tests/golden/`); change Python first, regenerate with `UPDATE_GOLDEN=1`, then make bash match.
+
+## Repo Workflow
+
+- `.gitignore` is `.*` — new dotfiles/dirs are silently ignored unless whitelisted with a `!` line (as done for `.github/` and `.markdownlint-cli2.jsonc`).
+- Fork of `drduh/YubiKey-Guide`. Local `master` syncs from upstream `main` via merge commits; only `origin` (mezinster fork) is configured as a remote.

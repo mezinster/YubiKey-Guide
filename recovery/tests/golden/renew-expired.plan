@@ -1,0 +1,76 @@
+STEP 1 mode <STAGING> gpg --batch --pinentry-mode loopback --passphrase-fd 0 --quick-set-expire 22CADE5109A7ABA3A5220FE79E022B438D8C91A2 2y 2D25F036E9EB30A6A60E0C24343D91B87EDAD6E4 F36CF422C475D33716BBC798F72F6162578EC3AF 19818386473E357AA56476816776ADBB90A681BB
+STDIN <CERTIFY_PASS>
+STEP 2 backup <STAGING> gpg --batch --pinentry-mode loopback --passphrase-fd 0 --yes --armor --output <OUT>/secret-9E022B438D8C91A2-Certify.key --export-secret-keys 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STDIN <CERTIFY_PASS>
+STEP 3 backup <STAGING> gpg --batch --pinentry-mode loopback --passphrase-fd 0 --yes --armor --output <OUT>/secret-9E022B438D8C91A2-Subkeys.key --export-secret-subkeys 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STDIN <CERTIFY_PASS>
+STEP 4 backup <STAGING> gpg --batch --yes --armor --output <OUT>/public-9E022B438D8C91A2-<DATE>.asc --export 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STEP 5 card1 <CARDHOME> gpgconf --kill all
+STEP 6 card1 <CARDHOME> ykman --device <SERIAL1> openpgp reset -f
+STEP 7 card1 <CARDHOME> gpgconf --kill all
+STEP 8 card1 <CARDHOME> ykman --device <SERIAL1> openpgp access set-retries 5 5 5 -f -a <DEFAULT_ADMIN_PIN>
+STEP 9 card1 <CARDHOME> gpgconf --kill all
+STEP 10 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --change-pin
+STDIN 3
+STDIN <DEFAULT_ADMIN_PIN>
+STDIN <ADMIN_PIN>
+STDIN <ADMIN_PIN>
+STDIN q
+STEP 11 card1 <CARDHOME> gpgconf --kill all
+STEP 12 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --change-pin
+STDIN 1
+STDIN <DEFAULT_USER_PIN>
+STDIN <USER_PIN>
+STDIN <USER_PIN>
+STDIN q
+STEP 13 card1 <CARDHOME> gpgconf --kill all
+STEP 14 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --edit-card
+STDIN admin
+STDIN login
+STDIN <LOGIN>
+STDIN <ADMIN_PIN>
+STDIN quit
+STEP 15 card1 <CARDHOME> gpgconf --kill all
+STEP 16 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --edit-key 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STDIN key 2D25F036E9EB30A6A60E0C24343D91B87EDAD6E4
+STDIN keytocard
+STDIN 1
+STDIN <CERTIFY_PASS>
+STDIN <ADMIN_PIN>
+STDIN save
+STEP 17 card1 <CARDHOME> gpgconf --kill all
+STEP 18 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --edit-key 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STDIN key F36CF422C475D33716BBC798F72F6162578EC3AF
+STDIN keytocard
+STDIN 2
+STDIN <CERTIFY_PASS>
+STDIN <ADMIN_PIN>
+STDIN save
+STEP 19 card1 <CARDHOME> gpgconf --kill all
+STEP 20 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --edit-key 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STDIN key 19818386473E357AA56476816776ADBB90A681BB
+STDIN keytocard
+STDIN 3
+STDIN <CERTIFY_PASS>
+STDIN <ADMIN_PIN>
+STDIN save
+STEP 21 card1 <CARDHOME> gpgconf --kill all
+STEP 22 card1 <CARDHOME> ykman --device <SERIAL1> openpgp keys set-touch sig on -f -a <ADMIN_PIN>
+STEP 23 card1 <CARDHOME> gpgconf --kill all
+STEP 24 card1 <CARDHOME> ykman --device <SERIAL1> openpgp keys set-touch dec on -f -a <ADMIN_PIN>
+STEP 25 card1 <CARDHOME> gpgconf --kill all
+STEP 26 card1 <CARDHOME> ykman --device <SERIAL1> openpgp keys set-touch aut on -f -a <ADMIN_PIN>
+STEP 27 verify1 <STAGING> gpg --batch --yes --armor --output <VERIFYHOME>/pub.asc --export 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STEP 28 verify1 <VERIFYHOME> gpg --batch --import <VERIFYHOME>/pub.asc
+STEP 29 verify1 <VERIFYHOME> gpg --batch --with-colons --card-status
+CHECK cardstatus
+STEP 30 verify1 <VERIFYHOME> gpg --batch --pinentry-mode loopback --passphrase-fd 0 --yes --local-user 2D25F036E9EB30A6A60E0C24343D91B87EDAD6E4! --output <VERIFYHOME>/test.sig --detach-sign <VERIFYHOME>/test.txt
+STDIN <USER_PIN>
+STEP 31 verify1 <VERIFYHOME> gpg --batch --verify <VERIFYHOME>/test.sig <VERIFYHOME>/test.txt
+STEP 32 verify1 <VERIFYHOME> gpg --batch --yes --trust-model always --recipient F36CF422C475D33716BBC798F72F6162578EC3AF! --output <VERIFYHOME>/test.gpg --encrypt <VERIFYHOME>/test.txt
+STEP 33 verify1 <VERIFYHOME> gpgconf --kill all
+STEP 34 verify1 <VERIFYHOME> gpg --batch --pinentry-mode loopback --passphrase-fd 0 --yes --output <VERIFYHOME>/test.out --decrypt <VERIFYHOME>/test.gpg
+STDIN <USER_PIN>
+CHECK roundtrip
+STEP 35 finish <STAGING> gpg --batch --yes --armor --output <OUT>/public-9E022B438D8C91A2-<DATE>.asc --export 22CADE5109A7ABA3A5220FE79E022B438D8C91A2
+STEP 36 finish <STAGING> gpg --batch --yes --output <OUT>/ssh-9E022B438D8C91A2.pub --export-ssh-key 19818386473E357AA56476816776ADBB90A681BB!
