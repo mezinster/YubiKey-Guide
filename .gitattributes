@@ -1,0 +1,6 @@
+# Test fixtures and golden plans are compared byte-for-byte; never convert line endings.
+recovery/tests/fixtures/** -text
+recovery/tests/golden/** -text
+# Scripts run by bash or as Python shebang scripts must keep LF on Windows checkouts.
+*.sh text eol=lf
+recovery/tests/fakebin/* text eol=lf

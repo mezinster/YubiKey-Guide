@@ -80,6 +80,194 @@ class HomeRegistryTests(unittest.TestCase):
         self.assertNotIn(kept.path, gpg._LIVE_HOMES)
 
 
+class HomeCreateTests(unittest.TestCase):
+    def test_unusable_work_base_is_a_backup_error(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        with mock.patch.object(osdeps, "work_base", side_effect=PermissionError("denied")):
+            with self.assertRaises(RecoveryError) as ctx:
+                Home.create("staging")
+        self.assertEqual(ctx.exception.code, EXIT_BACKUP)
+        self.assertIn("denied", str(ctx.exception))
+
+    def test_error_names_the_base_once_computed(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        missing = Path("/nonexistent-ykr-base")
+        with mock.patch.object(osdeps, "work_base", side_effect=[missing, Path("/elsewhere")]) as base:
+            with self.assertRaises(RecoveryError) as ctx:
+                Home.create("staging")
+        self.assertEqual(base.call_count, 1)
+        self.assertIn(f"in {missing}:", str(ctx.exception))
+
+
+class PreflightTests(unittest.TestCase):
+    def test_preflight_reports_missing_gpg4win(self):
+        from unittest import mock
+        from ykrecover import EXIT_USAGE, osdeps
+        from ykrecover.migrate import Options, Session
+
+        class UI:
+            def warn(self, msg): pass
+
+        session = Session(Options(backup=Path("."), dry_run=True), UI())
+        with mock.patch.object(osdeps, "available", lambda name: name != "gpg"):
+            with self.assertRaises(RecoveryError) as ctx:
+                session.preflight()
+        self.assertEqual(ctx.exception.code, EXIT_USAGE)
+        self.assertIn("gpg", str(ctx.exception))
+
+
+class UpdateStubsHintTests(unittest.TestCase):
+    def test_hint_names_the_platform_command(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        from ykrecover.migrate import update_stubs_command
+        for platform, expected in (("linux", "yubikey-recovery --cli update-stubs"),
+                                   ("win32", "ykrecover.exe --cli update-stubs")):
+            with mock.patch.object(osdeps.sys, "platform", platform):
+                self.assertEqual(update_stubs_command(), expected)
+
+
+class PreflightWarningTests(unittest.TestCase):
+    """Non-dry-run preflight warnings, with the tools and the environment faked."""
+
+    def preflight(self, workdir=None, tools=None):
+        import tempfile
+        from unittest import mock
+        from ykrecover import migrate, osdeps
+        from ykrecover.migrate import Options, Session
+
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(base, ignore_errors=True))
+        self.addCleanup(osdeps.set_workdir, None)
+        osdeps.set_workdir(workdir or base)
+        warnings = []
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        patches = [mock.patch.object(osdeps, "available", lambda name: True),
+                   mock.patch.object(migrate, "gpg_version", lambda: (2, 4)),
+                   mock.patch.object(osdeps, "network_up", lambda: []),
+                   mock.patch.object(osdeps, "memory_backed", lambda path: True)]
+        if tools is not None:
+            patches += [mock.patch.object(osdeps.sys, "platform", "win32"),
+                        mock.patch.object(osdeps, "tool", lambda name: [tools[name]])]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return base, warnings, lambda: Session(Options(backup=Path(".")), UI()).preflight()
+
+    def test_old_leftover_folders_are_reported(self):
+        import os
+        import time
+        base, warnings, preflight = self.preflight()
+        old, fresh = base / "ykr-staging-x", base / "ykr-card-y"
+        old.mkdir()
+        fresh.mkdir()
+        (base / "ykt-other").mkdir()
+        hour_ago = time.time() - 3600
+        os.utime(old, (hour_ago, hour_ago))
+        preflight()
+        self.assertEqual(warnings, [f"left over from an earlier run: {old}; it may hold key material — "
+                                    "delete it securely"])
+
+    def test_disk_warning_names_a_chosen_work_folder(self):
+        from unittest import mock
+        from ykrecover import osdeps
+        from ykrecover.migrate import Options, Session
+        base, warnings, preflight = self.preflight()
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        with mock.patch.object(osdeps, "memory_backed", lambda path: False):
+            Session(Options(backup=Path("."), workdir=base), UI()).preflight()
+            preflight()  # no --workdir: the base is the default one
+        self.assertEqual(warnings, [f"work folder {base} is not a RAM disk; make sure it is an encrypted volume",
+                                    f"temporary key copies are on disk at {base}; "
+                                    "use --workdir with a RAM disk or encrypted volume to avoid that"])
+
+    def test_mixed_gnupg_installs_are_reported_on_windows(self):
+        one, two = str(Path("/gpg4win/bin")), str(Path("/other/bin"))
+        tools = {"gpg": str(Path(one) / "gpg.exe"), "gpgconf": str(Path(one) / "gpgconf.exe"),
+                 "gpg-connect-agent": str(Path(two) / "gpg-connect-agent.exe")}
+        _, warnings, preflight = self.preflight(tools=tools)
+        preflight()
+        self.assertEqual(warnings, [f"GnuPG tools come from different folders (gpg in {one}, gpgconf in {one}, "
+                                    f"gpg-connect-agent in {two}); use the ones from a single Gpg4win installation"])
+
+    def test_one_gnupg_install_is_not_reported(self):
+        folder = str(Path("/gpg4win/bin"))
+        tools = {name: str(Path(folder) / f"{name}.exe") for name in ("gpg", "gpgconf", "gpg-connect-agent")}
+        _, warnings, preflight = self.preflight(tools=tools)
+        preflight()
+        self.assertEqual(warnings, [])
+
+    def test_fresh_folders_are_not_reported(self):
+        base, warnings, preflight = self.preflight()
+        (base / "ykr-staging-x").mkdir()
+        preflight()
+        self.assertEqual(warnings, [])
+
+
+class CleanupWarningTests(unittest.TestCase):
+    def test_cleanup_warns_when_the_staging_home_survives(self):
+        from unittest import mock
+        from ykrecover import gpg, osdeps
+        from ykrecover.migrate import Options, Session
+
+        warnings = []
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        session = Session(Options(backup=Path("."), dry_run=True), UI())
+        session.staging = Home.create("test")
+        path = session.staging.path
+        self.addCleanup(lambda: (gpg._LIVE_HOMES.discard(path), Home(path).destroy()))
+        with mock.patch.object(osdeps, "secure_delete", lambda p: False):
+            session.cleanup()
+        self.assertEqual(warnings, [f"could not remove the temporary folder {path}; delete it manually"])
+        self.assertIn(path, gpg._LIVE_HOMES)
+        self.assertIsNone(session.staging)
+
+    def test_write_card_warns_when_card_homes_survive(self):
+        from unittest import mock
+        from ykrecover import gpg, osdeps
+        from ykrecover.migrate import CardResult, Options, Session
+
+        warnings = []
+
+        class UI:
+            def warn(self, msg): warnings.append(msg)
+
+        session = Session(Options(backup=Path("."), dry_run=True), UI())
+        made = []
+        real_create = Home.create
+
+        def create(label):
+            made.append(real_create(label))
+            return made[-1]
+
+        def cleanup():
+            for h in made:
+                gpg._LIVE_HOMES.discard(h.path)
+                Home(h.path).destroy()
+        self.addCleanup(cleanup)
+        with mock.patch.object(Home, "create", staticmethod(create)), \
+                mock.patch.object(Session, "card_plan", lambda *a: []), \
+                mock.patch.object(Session, "_tokens", lambda *a: {}), \
+                mock.patch.object(osdeps, "secure_delete", lambda p: False):
+            session.staging = Home(Path(self.enterContext(__import__("tempfile").TemporaryDirectory())))
+            session.logins = {1: "x"}
+            session._write_card(CardResult(index=1, serial="1"))
+        self.assertTrue(made)
+        for h in made:
+            self.assertIn(f"could not remove the temporary folder {h.path}; delete it manually", warnings)
+
+
 class LoadTests(unittest.TestCase):
     def setUp(self):
         self.home = Home.create("test")

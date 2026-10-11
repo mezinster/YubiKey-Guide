@@ -6,15 +6,17 @@ which owns all widgets and dialogs.
 
 import queue
 import signal
+import sys
 import threading
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import EXIT_CARD, EXIT_INTERRUPT, Aborted, RecoveryError
+from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError, osdeps
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
-from .migrate import Options, Session
+from .migrate import Options, Session, update_stubs_command
 
 TITLE = "YubiKey recovery"
 METADATA_WARNING = ("OpenPGP card metadata (name, login, URL) can be read by anyone holding the card. "
@@ -116,7 +118,7 @@ class App:
         self.table = None
         self.logbox = None
         self.v = {
-            "folder": tk.StringVar(), "passphrase": tk.StringVar(), "mode": tk.StringVar(value="clone"),
+            "folder": tk.StringVar(), "workdir": tk.StringVar(), "passphrase": tk.StringVar(), "mode": tk.StringVar(value="clone"),
             "expire": tk.StringVar(value="2y"), "algo": tk.StringVar(value=""), "revoke": tk.BooleanVar(),
             "cards": tk.StringVar(value="1"), "pins": tk.StringVar(value="generate"), "same": tk.BooleanVar(),
             "retries": tk.StringVar(value="5,5,5"), "sig": tk.StringVar(value="on"),
@@ -137,6 +139,8 @@ class App:
             (self.build_output, self.leave_output), (self.build_cards, None), (self.build_summary, None),
         ]
         self.page = 0
+        self.workdir_note = None
+        self.v["workdir"].trace_add("write", lambda *_: self.update_workdir_note())
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.poll_id = root.after(100, self.poll)
         root.bind("<Destroy>", self.stop_polling)
@@ -149,9 +153,11 @@ class App:
     def poll(self):
         if self.poll_id:
             self.root.after_cancel(self.poll_id)  # a direct call must not start a second chain
+        reschedule = True
         try:
             if self.terminate_requested:
                 self.terminate()
+                reschedule = False  # the window is destroyed: a new "after" would outlive it
                 return
             while True:
                 try:
@@ -166,10 +172,12 @@ class App:
                     except Exception:
                         pass
         finally:
-            try:
-                self.poll_id = self.root.after(100, self.poll)
-            except tk.TclError:  # window already destroyed
-                self.poll_id = None
+            self.poll_id = None
+            if reschedule:
+                try:
+                    self.poll_id = self.root.after(100, self.poll)
+                except tk.TclError:  # window already destroyed
+                    pass
 
     def stop_polling(self, event):
         if event.widget is self.root and self.poll_id:
@@ -244,6 +252,37 @@ class App:
         self.cand_list.pack(fill="x", pady=8)
         self.refresh_candidates()
         self.row("Certify key passphrase", lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
+        frame = ttk.Frame(self.body)
+        frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(frame, text="Work folder (optional)", width=26).pack(side="left")
+        ttk.Entry(frame, textvariable=self.v["workdir"]).pack(side="left", fill="x", expand=True)
+        ttk.Button(frame, text="Browse…", command=lambda: self.v["workdir"].set(
+            filedialog.askdirectory(parent=self.root, mustexist=True) or self.v["workdir"].get())).pack(
+            side="left", padx=4)
+        self.workdir_note = ttk.Label(self.body, wraplength=700, justify="left")
+        self.workdir_note.pack(anchor="w")
+        self.update_workdir_note()
+
+    def update_workdir_note(self):
+        if self.workdir_note is None:
+            return
+        text = self.v["workdir"].get().strip()
+        if text and not Path(text).is_dir():
+            note = "This folder does not exist."
+        else:
+            base = Path(text) if text else osdeps.default_work_base()
+            if osdeps.memory_backed(base):
+                note = f"Temporary key copies go to {base} (memory-backed)."
+            elif text:
+                note = f"Work folder {base} is not a RAM disk; make sure it is an encrypted volume."
+            else:
+                note = (f"Temporary key copies go to {base}, which is on disk. Choose a RAM disk or an "
+                        "encrypted volume to avoid that.")
+        try:
+            if self.workdir_note.winfo_exists():
+                self.workdir_note.config(text=note)
+        except tk.TclError:  # interpreter already gone
+            pass
 
     def browse_backup(self):
         folder = filedialog.askdirectory(parent=self.root, mustexist=True)
@@ -273,13 +312,22 @@ class App:
             self.alert("Select a detected backup.")
             return False
         candidate = self.candidates[chosen[0]]
+        text = self.v["workdir"].get().strip()
+        workdir = Path(text) if text else None
         s = self.session
-        if s and s.passphrase and s.bundle and (s.opts.backup, s.opts.source) == (candidate.path, candidate.kind):
+        if (s and s.passphrase and s.bundle and (s.opts.backup, s.opts.source) == (candidate.path, candidate.kind)
+                and s.opts.workdir == workdir):
             self.v["passphrase"].set("")
             return True  # already loaded and unlocked (the user went Back): keep it
+        new = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
+        try:
+            new.validate_workdir()
+        except RecoveryError as err:
+            self.alert(str(err))
+            return False
         if self.session:
             self.session.cleanup()
-        self.session = Session(Options(backup=candidate.path, source=candidate.kind), self.ui)
+        self.session = new
         while True:
             try:
                 self.session.load()
@@ -424,7 +472,7 @@ class App:
         o = self.session.opts
         lines = [f"card {r.index}  {r.serial or '-'}  {r.status}  {r.detail}" for r in self.session.results]
         lines += ["", f"Files are in {o.out}.", "On your daily machine run:",
-                  "  yubikey-recovery --cli update-stubs --import <public key file> --remove-serial <old serial> "
+                  f"  {update_stubs_command()} --import <public key file> --remove-serial <old serial> "
                   f"--cards {o.cards}"]
         self.readonly_text("\n".join(lines), 12)
         if self.pins:
@@ -457,8 +505,18 @@ class App:
             self.session.cleanup()
         self.root.destroy()
 
+    def report_error(self, kind, value, tb):
+        """Tk callback errors: the windowed executable has no console, so log them and show a dialog."""
+        if sys.stderr is not None:
+            traceback.print_exception(kind, value, tb)
+        try:
+            self.log(f"error: {kind.__name__}: {value}")
+            messagebox.showerror(TITLE, f"Unexpected error: {kind.__name__}: {value}", parent=self.root)
+        except tk.TclError:  # the window is already gone
+            pass
+
     def request_terminate(self, signum, frame):
-        """SIGTERM/SIGHUP handler: only sets a flag, which poll() acts on inside the Tk loop."""
+        """SIGTERM/SIGHUP/SIGBREAK handler: only sets a flag, which poll() acts on inside the Tk loop."""
         self.terminate_requested = True
 
     def terminate(self):
@@ -474,7 +532,8 @@ class App:
 def main() -> int:
     root = tk.Tk()
     app = App(root)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    root.report_callback_exception = app.report_error
+    for sig in TERMINATION_SIGNALS:
         signal.signal(sig, app.request_terminate)
     root.mainloop()
     return 0

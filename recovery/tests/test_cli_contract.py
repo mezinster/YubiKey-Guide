@@ -3,7 +3,8 @@ import shutil
 import subprocess
 import unittest
 
-from tests.helpers import FIXTURES, run_impl, short_tempdir
+from ykrecover import osdeps
+from tests.helpers import FIXTURES, LINUX, run_impl, short_tempdir
 
 ED_EXPORT = str(FIXTURES / "ed25519" / "export")
 
@@ -95,7 +96,7 @@ class ContractTests:
             elif fields[0] == "grp" and in_sub:
                 grips.append(fields[9])
         self.assertEqual(len(grips), 3)
-        subprocess.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(copy)}, check=False)
+        osdeps.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(copy)})
         for grip in grips:
             (copy / "private-keys-v1.d" / f"{grip}.key").unlink()
         for mode in ("clone", "renew"):
@@ -108,6 +109,7 @@ class ContractTests:
         result = self.cli("--backup", str(copy), "--mode", "rotate", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(LINUX, "POSIX directory modes and XDG_RUNTIME_DIR")
     def test_unwritable_runtime_dir_is_a_staging_error(self):
         base = short_tempdir(self, "rt")
         base.chmod(0o500)
@@ -124,6 +126,16 @@ class ContractTests:
         result = self.cli("--backup", str(copy), "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_workdir_must_exist_and_be_short(self):
+        self.assertEqual(self.cli("--backup", ED_EXPORT, "--workdir", "/nonexistent/dir", "--dry-run").returncode, 1)
+        ok = short_tempdir(self, "wd")
+        result = self.cli("--backup", ED_EXPORT, "--workdir", str(ok), "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        if LINUX:
+            deep = ok / ("d" * 70)
+            deep.mkdir()
+            self.assertEqual(self.cli("--backup", ED_EXPORT, "--workdir", str(deep), "--dry-run").returncode, 1)
+
     def test_dry_run_prints_only_the_plan(self):
         result = self.cli("--backup", ED_EXPORT, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -134,6 +146,7 @@ class PythonContractTests(ContractTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashContractTests(ContractTests, unittest.TestCase):
     IMPL = "bash"
 

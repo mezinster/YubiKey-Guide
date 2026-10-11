@@ -4,17 +4,11 @@ This is the only part of the toolset that touches the user's own GNUPGHOME.
 """
 
 import datetime
-import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
-from . import EXIT_CARD, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
-
-
-def user_home() -> Path:
-    return Path(os.environ.get("GNUPGHOME") or Path.home() / ".gnupg")
+from . import EXIT_CARD, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError, osdeps
 
 
 def find_stubs(home: Path, serial: str) -> list:
@@ -32,18 +26,17 @@ def find_stubs(home: Path, serial: str) -> list:
 
 
 def update_stubs(ui, import_file=None, remove_serials=(), cards=1) -> int:
-    home = user_home()
+    home = osdeps.user_gnupg_home()
     exit_code = EXIT_OK
     try:
         for serial in remove_serials:
             if not serial.isascii() or not serial.isdigit():
                 raise RecoveryError(f"--remove-serial must be all digits: {serial}", EXIT_USAGE)
-        missing = [t for t in ("gpg", "gpg-connect-agent") if shutil.which(t) is None]
+        missing = [t for t in ("gpg", "gpg-connect-agent") if not osdeps.available(t)]
         if missing:
             raise RecoveryError(f"missing tools: {' '.join(missing)}", EXIT_USAGE)
         if import_file:
-            result = subprocess.run(["gpg", "--batch", "--import", str(import_file)],
-                                    capture_output=True, text=True, check=False)
+            result = osdeps.run(["gpg", "--batch", "--import", str(import_file)])
             if result.returncode != 0:
                 raise RecoveryError(f"import failed: {result.stderr.strip()}", EXIT_USAGE)
         for serial in remove_serials:
@@ -72,15 +65,14 @@ def update_stubs(ui, import_file=None, remove_serials=(), cards=1) -> int:
             ui.info(f"moved to {dest}")
         for index in range(1, cards + 1):
             ui.wait_for_card(index, cards)
-            learn = subprocess.run(["gpg-connect-agent", "scd serialno", "learn --force", "/bye"],
-                                   capture_output=True, text=True, check=False)
+            learn = osdeps.run(["gpg-connect-agent", "scd serialno", "learn --force", "/bye"])
             # gpg-connect-agent exits 0 even when a command answers ERR, so read its output too.
             errors = [line for line in learn.stdout.splitlines() if line.startswith("ERR")]
             if learn.returncode != 0 or errors:
                 detail = errors[0] if errors else learn.stderr.strip()
                 ui.warn(f"learn failed for card {index}: {detail}")
                 exit_code = EXIT_CARD
-            status = subprocess.run(["gpg", "--batch", "--card-status"], capture_output=True, text=True, check=False)
+            status = osdeps.run(["gpg", "--batch", "--card-status"])
             if status.returncode != 0:
                 ui.warn(f"card status failed for card {index}: {status.stderr.strip()}")
                 exit_code = EXIT_CARD

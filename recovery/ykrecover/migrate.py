@@ -6,18 +6,22 @@ The CLI (run) and the GUI drive the same Session methods.
 import datetime
 import os
 import secrets
-import shutil
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import EXIT_BACKUP, EXIT_CARD, EXIT_INTERRUPT, EXIT_OK, EXIT_USAGE, Aborted, RecoveryError
-from . import backup, card, modes
-from .gpg import Home, base_is_tmpfs, gpg_version, runtime_base
+from . import backup, card, modes, osdeps
+from .gpg import Home, gpg_version
 from .plan import CARDHOME, STAGING, VERIFYHOME, format_plan, public_tokens, substitute
 
 TOUCH_PROMPT = "Touch the YubiKey when it blinks"
+def update_stubs_command() -> str:
+    """How the user starts update-stubs on this platform."""
+    return "ykrecover.exe --cli update-stubs" if osdeps.is_windows() else "yubikey-recovery --cli update-stubs"
+
+
+LEFTOVER_AGE = 600  # seconds: a ykr-* folder older than this is not from a run starting now
 
 
 @dataclass
@@ -38,6 +42,7 @@ class Options:
     url: str = ""
     source: str = ""
     key: str = ""
+    workdir: Path = None
     dry_run: bool = False
     yes: bool = False
 
@@ -59,18 +64,6 @@ class StepError(Exception):
         self.shown = shown
 
 
-def network_interfaces_up() -> list:
-    up = []
-    for iface in sorted(Path("/sys/class/net").glob("*")):
-        try:
-            state = (iface / "operstate").read_text().strip()
-        except OSError:
-            continue
-        if iface.name != "lo" and state == "up":
-            up.append(iface.name)
-    return up
-
-
 class Session:
     def __init__(self, opts: Options, ui):
         self.opts, self.ui = opts, ui
@@ -81,12 +74,28 @@ class Session:
         self.results = []
         self.logins = {}
 
+    def _destroy(self, home) -> None:
+        if not home.destroy():
+            self.ui.warn(f"could not remove the temporary folder {home.path}; delete it manually")
+
+    def validate_workdir(self) -> None:
+        workdir = self.opts.workdir
+        if workdir is not None:
+            workdir = Path(workdir).resolve()
+            if not workdir.is_dir():
+                raise RecoveryError(f"--workdir must be an existing folder: {workdir}", EXIT_USAGE)
+            if not osdeps.is_windows() and len(str(workdir)) > osdeps.MAX_BASE_LEN:
+                raise RecoveryError(f"--workdir path is too long for gpg-agent sockets "
+                                    f"(at most {osdeps.MAX_BASE_LEN} characters): {workdir}", EXIT_USAGE)
+        osdeps.set_workdir(workdir)
+
     def validate_options(self) -> None:
         o = self.opts
         for flag, value, limit in (("--name", o.name, 39), ("--login", o.login, 254), ("--url", o.url, 254)):
             if len(value) > limit or not all(" " <= c <= "~" and c != "<" for c in value):
                 raise RecoveryError(f"{flag} must be at most {limit} printable ASCII characters without '<'",
                                     EXIT_USAGE)
+        self.validate_workdir()
         if o.mode not in ("clone", "renew", "rotate"):
             raise RecoveryError(f"unknown mode {o.mode}", EXIT_USAGE)
         if o.cards < 1:
@@ -113,22 +122,62 @@ class Session:
 
     def preflight(self) -> None:
         tools = ["gpg", "gpgconf"] if self.opts.dry_run else ["gpg", "gpgconf", "gpg-connect-agent", "ykman"]
-        missing = [t for t in tools if shutil.which(t) is None]
+        missing = [t for t in tools if not osdeps.available(t)]
         if missing:
-            raise RecoveryError(f"missing tools: {' '.join(missing)}", EXIT_USAGE)
+            hint = " (install Gpg4win: https://gpg4win.org)" if osdeps.is_windows() and set(missing) - {"ykman"} else ""
+            raise RecoveryError(f"missing tools: {' '.join(missing)}{hint}", EXIT_USAGE)
         if gpg_version() < (2, 2):
             raise RecoveryError("gpg 2.2 or newer is required", EXIT_USAGE)
         if self.opts.dry_run:
             return
-        for iface in network_interfaces_up():
+        self._warn_mixed_gnupg()
+        for iface in osdeps.network_up():
             self.ui.warn(f"network interface {iface} is up; an air-gapped system is recommended")
-        if not base_is_tmpfs(runtime_base()):
-            self.ui.warn(f"{runtime_base()} is not tmpfs; key material may touch disk")
+        base = osdeps.work_base()
+        if not osdeps.memory_backed(base):
+            if self.opts.workdir is not None:
+                self.ui.warn(f"work folder {base} is not a RAM disk; make sure it is an encrypted volume")
+            else:
+                self.ui.warn(f"temporary key copies are on disk at {base}; "
+                             "use --workdir with a RAM disk or encrypted volume to avoid that")
+        for leftover in self._leftovers(base):
+            self.ui.warn(f"left over from an earlier run: {leftover}; it may hold key material — "
+                         "delete it securely")
+
+    def _warn_mixed_gnupg(self) -> None:
+        """Two GnuPG installs (Gpg4win and another on PATH) can disagree about the agent and its sockets."""
+        if not osdeps.is_windows():
+            return
+        folders = {}
+        for name in osdeps.GNUPG_TOOLS:
+            try:
+                folders[name] = str(Path(osdeps.tool(name)[0]).parent)
+            except RecoveryError:
+                return  # reported as a missing tool
+        if len(set(folders.values())) > 1:
+            where = ", ".join(f"{name} in {folder}" for name, folder in folders.items())
+            self.ui.warn(f"GnuPG tools come from different folders ({where}); "
+                         "use the ones from a single Gpg4win installation")
+
+    @staticmethod
+    def _leftovers(base: Path) -> list:
+        """ykr-* folders a forced end (closed console, killed process, crash) left in the work base."""
+        cutoff = time.time() - LEFTOVER_AGE
+        found = []
+        try:
+            for path in sorted(base.glob("ykr-*")):
+                info = path.lstat()
+                mine = not hasattr(os, "getuid") or info.st_uid == os.getuid()  # /tmp is shared on Linux
+                if path.is_dir() and not path.is_symlink() and mine and info.st_mtime < cutoff:
+                    found.append(path)
+        except OSError:
+            pass
+        return found
 
     def load(self) -> backup.KeyBundle:
         candidate = backup.choose(backup.detect(self.opts.backup), self.opts.source or None)
         if self.staging:
-            self.staging.destroy()
+            self._destroy(self.staging)
         self.staging = Home.create("staging")
         self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or None)
         self.targets = modes.select_targets(self.bundle)
@@ -262,7 +311,7 @@ class Session:
 
     def write_cards(self) -> None:
         # Release the card from the user's own scdaemon so ykman can open it.
-        subprocess.run(["gpgconf", "--kill", "scdaemon"], capture_output=True, check=False)
+        osdeps.run(["gpgconf", "--kill", "scdaemon"])
         done = set()
         for r in self.results:
             r.serial = self._wait_for_card(r.index, done)
@@ -291,7 +340,7 @@ class Session:
     @staticmethod
     def _list_serials() -> tuple:
         """Connected serials, and ': <ykman error>' when the listing itself failed."""
-        listing = subprocess.run(["ykman", "list", "--serials"], capture_output=True, text=True, check=False)
+        listing = osdeps.run(["ykman", "list", "--serials"])
         problem = ""
         if listing.returncode != 0:
             problem = f": {listing.stderr.strip() or f'ykman exited with status {listing.returncode}'}"
@@ -343,7 +392,7 @@ class Session:
         finally:
             for home in (cardhome, verifyhome):
                 if home:
-                    home.destroy()
+                    self._destroy(home)
 
     def _needs_touch(self, step) -> bool:
         """The verify signature and decryption use the card's sig and dec keys."""
@@ -371,7 +420,7 @@ class Session:
         summary = [f"card {r.index} {r.serial or '-'} {r.status} {r.detail}".rstrip() for r in self.results]
         self.ui.info("Summary:\n" + "\n".join(summary))
         public = o.out / f"public-{b.key_id}-{datetime.date.today().isoformat()}.asc"
-        self.ui.info(f"On your daily machine run: yubikey-recovery --cli update-stubs --import {public} "
+        self.ui.info(f"On your daily machine run: {update_stubs_command()} --import {public} "
                      f"--cards {o.cards}")
         return EXIT_OK if all(r.status == "OK" for r in self.results) else EXIT_CARD
 
@@ -385,7 +434,7 @@ class Session:
 
     def cleanup(self) -> None:
         if self.staging:
-            self.staging.destroy()
+            self._destroy(self.staging)
             self.staging = None
         self.passphrase = ""
 

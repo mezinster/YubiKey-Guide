@@ -1,0 +1,3 @@
+# Build-time requirements for the Windows executables (pinned; newest releases >= 14 days old on 2026-10-11).
+yubikey-manager==5.9.2
+pyinstaller==6.22.3

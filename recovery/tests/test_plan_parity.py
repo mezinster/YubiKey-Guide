@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from tests.helpers import GOLDEN, run_impl
+from tests.helpers import GOLDEN, LINUX, run_impl
 
 CASES = {
     "clone-ed25519-export": ["--backup", "tests/fixtures/ed25519/export"],
@@ -38,6 +38,7 @@ class PythonPlanParityTests(PlanParityTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashPlanParityTests(PlanParityTests, unittest.TestCase):
     IMPL = "bash"
 

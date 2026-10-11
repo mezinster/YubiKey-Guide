@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, fake_hardware, fixture_info, run_impl, short_tempdir
+from tests.helpers import FIXTURES, LINUX, fake_hardware, fixture_info, run_impl, short_tempdir
 
 OLD, OTHER = "22222222", "33333333"
 
@@ -81,6 +81,7 @@ class PythonStubsTests(StubsTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashStubsTests(StubsTests, unittest.TestCase):
     IMPL = "bash"
 

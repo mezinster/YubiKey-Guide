@@ -51,6 +51,7 @@ nix flake update --commit-lock-file
 - `generateKeys.sh` and `resetCard.sh` are bash (`#!/usr/bin/env bash`); `switchKeys.sh` is `#!/bin/sh`. Only `resetCard.sh` sends raw APDUs via `gpg-connect-agent`.
 - `nix/flake.nix` pins `nixos-26.05` (`system.stateVersion` stays "25.05" intentionally) and builds an air-gapped XFCE ISO for x86_64 and aarch64. It embeds `README.md`, `config/gpg.conf` and `config/gpg-agent.conf` — editing those changes the ISO.
 - `recovery/` holds two implementations of the same tool (`ykrecover/` Python + Tkinter, `recoverCard.sh` bash). They must print byte-identical `--dry-run` plans (`recovery/tests/golden/`); change Python first, regenerate with `UPDATE_GOLDEN=1`, then make bash match.
+- The Python recovery tool also builds for Windows (`recovery/packaging/`, PyInstaller; CI job `windows`, release workflow on `v*` tags). Platform differences live only in `recovery/ykrecover/osdeps.py`; call `osdeps.run()` instead of `subprocess` so tools resolve to Gpg4win/bundled ykman on Windows.
 
 ## Repo Workflow
 

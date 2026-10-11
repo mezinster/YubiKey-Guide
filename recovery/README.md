@@ -9,11 +9,17 @@ Two equivalent tools:
 
 On the LiveCD built from `nix/` both are installed, and "YubiKey Recovery" is on the desktop.
 
+The Python tool runs on Linux and Windows; the bash script is Linux-only. On other systems both exit with an error.
+
+**Windows:** install [Gpg4win](https://gpg4win.org), then download `ykrecover-windows-x64.zip` from the repository's Releases page (or the `windows` CI job's artifacts) and run `ykrecover-gui.exe`, or `ykrecover.exe --cli …` in a terminal. ykman is bundled. Windows has no memory-backed temporary folder, so the tool warns that key copies touch the disk while it runs; to avoid that, choose a RAM disk or an encrypted volume as the work folder (`--workdir DIR`, or "Work folder" in the wizard). If a run ends abnormally (the console window closed, the process ended in Task Manager, a crash), its temporary folders (`ykr-*` in the work folder) can stay behind, not overwritten: the next run warns about any older than 10 minutes, and you should delete them securely. Run the hardware checklist on Windows too: card access works differently there. To build locally, run `recovery/packaging/build-windows.ps1` on Windows.
+
+Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecover`. Running `ykrecover/gui.py` directly fails with "attempted relative import".
+
 > [!WARNING]
 > Every card you write is **reset**: all OpenPGP keys and PINs on it are erased. The tool asks you to type `RESET <serial>` for each card.
 
 > [!IMPORTANT]
-> Run this on an air-gapped system. Your backup is copied into temporary GnuPG homes under `$XDG_RUNTIME_DIR` (or `/tmp` when that path is unset or too long), which are deleted when the tool exits. They are memory-backed only when that folder is on tmpfs, as on the LiveCD; otherwise the tool prints a warning, and key material may reach the disk.
+> Run this on an air-gapped system. Your backup is copied into temporary GnuPG homes under `$XDG_RUNTIME_DIR` (or `/tmp` when that path is unset or too long), which are deleted when the tool exits. They are memory-backed only when that folder is on tmpfs, as on the LiveCD; otherwise the tool prints a warning, and key material may reach the disk. On Windows the default is `%LOCALAPPDATA%\Temp\ykrecover`, which is on disk: the files are overwritten before deletion, but choose a RAM disk or encrypted volume with `--workdir` to keep key material off the disk.
 
 ## Modes
 
@@ -40,6 +46,8 @@ recoverCard.sh --backup /mnt/backup --mode rotate --revoke-old --dry-run
 `--out` is required for every run except `--dry-run`, `clone` included: the public key (`public-KEYID-DATE.asc`) and the SSH public key (`ssh-KEYID.pub`) are written there, and for `renew` and `rotate` the new backup too. It must be outside the backup folder and must not already hold `secret-*.key` files.
 
 A backup made with the main guide often holds both the exported key files (`secret-*-Certify.key`, `secret-*-Subkeys.key`) and a copy of the GnuPG home. The tool then stops and asks you to choose with `--source`. Pass `--source export`: the exports were made before `keytocard` and hold the secret subkeys, while a GnuPG home copied after `keytocard` holds only card stubs, which the tool refuses for `clone` and `renew`.
+
+`--workdir DIR`: where temporary GnuPG homes go (must exist; on Linux at most 60 characters)
 
 Run `recoverCard.sh --help` for every option. The defaults are:
 
@@ -82,13 +90,13 @@ If you renewed or rotated, also publish the new public key wherever you publishe
 
    With touch on (the default), the tool prints "Touch the YubiKey when it blinks" before the test signature and before the decryption: touch the card each time, or the step times out and the card fails.
 
-The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted and runs stopped by Ctrl-C, SIGTERM or SIGHUP, so a partially written card is never left with unknown PINs. The GUI shows them as soon as card writing finishes. Write them down then.
+The PINs of every card whose PINs were changed are shown once, at the end, including cards that failed or were aborted and runs stopped by Ctrl-C, SIGTERM, SIGHUP or (on Windows) Ctrl-Break, so a partially written card is never left with unknown PINs. The GUI shows them as soon as card writing finishes. Write them down then.
 
 Both tools run with umask 077, so everything written to `--out` is readable only by its owner.
 
 Before every card session (each scripted `gpg --change-pin`, `--edit-card` or `--edit-key` run) and every ykman command, `gpgconf --kill all` clears cached passphrases and card sessions, so prompts always arrive in the expected order.
 
-The Admin PIN is passed to `ykman` with `-a`, as in the main guide. On a multi-user machine other users could briefly see it in the process list; on the intended single-user air-gapped system that risk does not apply.
+The Admin PIN is passed to `ykman` with `-a`, as in the main guide. On a multi-user machine other users could briefly see it in the process list; on the intended single-user air-gapped system that risk does not apply. On Windows, which is usually an everyday and possibly managed machine, process-creation auditing or endpoint security software can record command lines, including the Admin PIN: on a managed or audited machine, change the Admin PIN afterwards (`ykman openpgp access change-admin-pin`).
 
 ## Development
 

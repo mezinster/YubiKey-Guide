@@ -1,0 +1,49 @@
+name: release-windows
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install Gpg4win
+        run: |
+          choco install gpg4win -y --no-progress
+          foreach ($dir in "${env:ProgramFiles(x86)}\GnuPG\bin", "$env:ProgramFiles\GnuPG\bin") {
+            if (Test-Path $dir) { $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          }
+
+      - name: install build requirements
+        run: python -m pip install -r recovery/packaging/requirements-windows.txt
+
+      - name: recovery tests
+        working-directory: recovery
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: build executables
+        run: recovery/packaging/build-windows.ps1
+
+      - name: smoke test
+        run: python recovery/packaging/smoke_test.py recovery/packaging/dist/ykrecover.exe
+
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG --title $env:TAG --notes "Windows build of the YubiKey recovery tool."
+          }
+          gh release upload $env:TAG recovery/packaging/dist/ykrecover-windows-x64.zip --clobber

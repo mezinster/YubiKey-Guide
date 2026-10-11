@@ -5,14 +5,100 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.helpers import LINUX
+
 try:
     import tkinter as tk
 except ImportError:  # python3-tk not installed
     tk = None
 
 
-@unittest.skipIf(tk is None or not os.environ.get("DISPLAY"), "needs tkinter and a display")
+@unittest.skipIf(tk is None or (LINUX and not os.environ.get("DISPLAY")), "needs tkinter and a display")
 class GuiSmokeTests(unittest.TestCase):
+    def test_work_folder_is_applied_before_loading(self):
+        from pathlib import Path
+        from ykrecover import osdeps
+        from ykrecover.gui import App
+        from tests.helpers import FIXTURES, PASSPHRASE, short_tempdir
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        app.alert = lambda text: None
+        self.addCleanup(lambda: app.session and app.session.cleanup())
+        self.addCleanup(osdeps.set_workdir, None)
+        workdir = short_tempdir(self, "wd")
+        app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
+        app.v["workdir"].set(str(workdir))
+        app.v["passphrase"].set(PASSPHRASE)
+        app.show(1)
+        root.update()
+        self.assertTrue(app.leave_backup())
+        self.assertEqual(Path(app.session.staging.path).parent, workdir)
+        self.assertIn(str(workdir), app.workdir_note.cget("text"))
+
+    def test_note_for_a_chosen_disk_work_folder(self):
+        import tempfile
+        from ykrecover import osdeps
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        app.show(1)
+        folder = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, folder)
+        with mock.patch.object(osdeps, "memory_backed", lambda path: False):
+            app.v["workdir"].set(folder)
+            self.assertEqual(app.workdir_note.cget("text"),
+                             f"Work folder {Path(folder)} is not a RAM disk; make sure it is an encrypted volume.")
+            app.v["workdir"].set("")
+            self.assertIn("which is on disk", app.workdir_note.cget("text"))
+
+    def test_note_ignores_a_stale_override_when_the_field_is_empty(self):
+        from pathlib import Path
+        from ykrecover import osdeps
+        from ykrecover.gui import App
+        from tests.helpers import short_tempdir
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        self.addCleanup(osdeps.set_workdir, None)
+        app = App(root)
+        app.show(1)
+        osdeps.set_workdir(short_tempdir(self, "stale"))
+        app.v["workdir"].set("")
+        app.update_workdir_note()
+        self.assertIn(str(osdeps.default_work_base()), app.workdir_note.cget("text"))
+        self.assertNotIn("stale", app.workdir_note.cget("text"))
+
+    def test_invalid_work_folder_alerts_without_staging(self):
+        from ykrecover.backup import Candidate
+        from ykrecover.gui import App
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        alerts = []
+        app.alert = alerts.append
+        app.show(1)
+        app.candidates = [Candidate("export", Path("/backup"), ())]
+        app.cand_list.insert("end", "export: /backup")
+        app.cand_list.selection_set(0)
+        app.v["workdir"].set("/nonexistent/work/folder")
+        self.assertFalse(app.leave_backup())
+        self.assertEqual(len(alerts), 1)
+        self.assertIsNone(app.session)
+
+    def test_poll_stops_after_terminate_and_survives_a_failing_one(self):
+        app = self.app_with_pins()
+        app.request_terminate(signal.SIGTERM, None)
+        with mock.patch("ykrecover.gui.messagebox.showinfo"):
+            app.poll()
+        self.assertIsNone(app.poll_id)
+        app = self.app_with_pins()
+        app.request_terminate(signal.SIGTERM, None)
+        with mock.patch.object(app, "terminate", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                app.poll()
+        self.assertIsNotNone(app.poll_id)
+
     def test_wizard_builds_and_closes(self):
         from ykrecover.gui import App
         root = tk.Tk()
@@ -55,7 +141,23 @@ class GuiSmokeTests(unittest.TestCase):
         app.show(7)
         self.assertFalse(hasattr(app, "pin_btn"))
         summary = next(w for w in app.body.winfo_children() if isinstance(w, tk.Text)).get("1.0", "end")
-        self.assertIn("update-stubs --import <public key file> --remove-serial <old serial> --cards 2", summary)
+        from ykrecover.migrate import update_stubs_command
+        self.assertIn(f"{update_stubs_command()} --import <public key file> --remove-serial <old serial> --cards 2",
+                      summary)
+
+    def test_callback_errors_are_logged_and_shown(self):
+        import io
+        from contextlib import redirect_stderr
+        app = self.app_with_pins()
+        try:
+            raise ValueError("boom")
+        except ValueError as err:
+            error = err
+        with mock.patch("ykrecover.gui.messagebox.showerror") as shown, redirect_stderr(io.StringIO()) as err:
+            app.report_error(ValueError, error, error.__traceback__)
+        self.assertIn("ValueError: boom", shown.call_args.args[1])
+        self.assertIn("error: ValueError: boom", app.logbox.get("1.0", "end"))
+        self.assertIn("Traceback", err.getvalue())
 
     def test_close_shows_pins_never_shown(self):
         app = self.app_with_pins()

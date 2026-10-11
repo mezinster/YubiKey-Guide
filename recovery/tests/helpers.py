@@ -9,12 +9,15 @@ import tempfile
 import time
 from pathlib import Path
 
+from ykrecover import RecoveryError, osdeps
+
 RECOVERY = Path(__file__).resolve().parents[1]
 FIXTURES = RECOVERY / "tests" / "fixtures"
 GOLDEN = RECOVERY / "tests" / "golden"
 FAKEBIN = RECOVERY / "tests" / "fakebin"
 PASSPHRASE = "test-certify-pass"
-REAL_GPG = shutil.which("gpg")
+LINUX = sys.platform.startswith("linux")
+REAL_GPG = osdeps.tool("gpg")[0] if osdeps.is_windows() else shutil.which("gpg")
 
 
 def fixture_info(profile: str) -> dict:
@@ -23,24 +26,29 @@ def fixture_info(profile: str) -> dict:
 
 
 def _runtime_base() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR", "")
-    if base and os.path.isdir(base) and len(base) <= 60:
-        return Path(base)
-    return Path("/tmp")
+    return osdeps.default_work_base()
 
 
 def short_tempdir(test, label: str) -> Path:
     """A temp dir short enough for gpg-agent sockets; agents inside it are killed on cleanup."""
     path = Path(tempfile.mkdtemp(prefix=f"ykt-{label}-", dir=_runtime_base()))
 
+    def is_gnupg_home(p):
+        return (p / "pubring.kbx").exists() or (p / "private-keys-v1.d").exists() or any(p.glob("S.gpg-agent*"))
+
     def cleanup():
         for home in [path, *(p for p in path.rglob("*") if p.is_dir())]:
-            subprocess.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(home)},
-                           capture_output=True, check=False)
+            if is_gnupg_home(home):
+                try:
+                    osdeps.run(["gpgconf", "--kill", "all"], env={**os.environ, "GNUPGHOME": str(home)})
+                except RecoveryError:
+                    pass
         for p in [path, *path.rglob("*")]:
-            if p.is_dir():
-                p.chmod(0o700)
-        shutil.rmtree(path, ignore_errors=True)
+            try:
+                p.chmod(0o700 if p.is_dir() else 0o600)
+            except OSError:
+                pass
+        osdeps.secure_delete(path)
 
     test.addCleanup(cleanup)
     return path
@@ -92,6 +100,16 @@ def read_until(stream, text: str, timeout: float) -> str:
     return seen.decode(errors="replace")
 
 
+def _fake_bin(test) -> Path:
+    """The fakes are Python scripts; Windows can only run them through .cmd shims."""
+    if os.name != "nt":
+        return FAKEBIN
+    shims = short_tempdir(test, "bin")
+    for name in ("gpg", "ykman", "gpg-connect-agent"):
+        (shims / f"{name}.cmd").write_bytes(f'@"{sys.executable}" "{FAKEBIN / name}" %*\r\n'.encode())
+    return shims
+
+
 def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> dict:
     """Env overrides that put fake ykman/gpg card operations first on PATH (see fakebin/ykman)."""
     state = short_tempdir(test, "hw")
@@ -101,7 +119,7 @@ def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> d
     if list_script is not None:
         (state / "list_script").write_text("".join(f"{s}\n" for s in list_script))
     return {
-        "PATH": f"{FAKEBIN}:{os.environ['PATH']}",
+        "PATH": f"{_fake_bin(test)}{os.pathsep}{os.environ['PATH']}",
         "FAKE_HW_DIR": str(state),
         "REAL_GPG": REAL_GPG,
         "FAKE_CERTIFY_PASS": PASSPHRASE,

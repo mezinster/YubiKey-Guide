@@ -16,7 +16,7 @@ readonly CARD_GPG=(gpg --batch --command-fd 0 --pinentry-mode loopback)
 
 BACKUP="" MODE=clone CARDS=1 OUT="" EXPIRE=2y ALGO="" REVOKE_OLD=0 PINS=generate SAME_PINS=0
 RETRIES=5,5,5 TOUCH=on TOUCH_SIG="" TOUCH_ENC="" TOUCH_AUT="" NAME="" LOGIN="" URL=""
-SOURCE="" KEY="" DRY_RUN=0 YES=0
+SOURCE="" KEY="" WORKDIR="" DRY_RUN=0 YES=0
 RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS=""
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
 KEY_FP="" KEY_ID="" HAS_SECRET=0
@@ -41,7 +41,7 @@ usage: recoverCard.sh --backup DIR [--mode clone|renew|rotate] [--cards N] [--ou
          [--expire SPEC] [--algo rsa4096|ed25519] [--revoke-old] [--pins generate|enter]
          [--same-pins] [--retries U,R,A] [--touch POLICY] [--touch-sig|--touch-enc|--touch-aut POLICY]
          [--name NAME] [--login LOGIN] [--url URL] [--source export|subkeys-only|gnupghome]
-         [--key FPR] [--dry-run] [--yes]
+         [--key FPR] [--workdir DIR] [--dry-run] [--yes]
        recoverCard.sh update-stubs [--import FILE] [--remove-serial SERIAL ...] [--cards N]
 EOF
 }
@@ -88,7 +88,7 @@ parse_args() {
   while (( $# )); do
     case $1 in
       --backup | --mode | --cards | --out | --expire | --algo | --pins | --retries | --touch | \
-        --touch-sig | --touch-enc | --touch-aut | --name | --login | --url | --source | --key)
+        --touch-sig | --touch-enc | --touch-aut | --name | --login | --url | --source | --key | --workdir)
         (( $# >= 2 )) || bad_usage
         case $1 in
           --backup) BACKUP=$2 ;;
@@ -108,6 +108,7 @@ parse_args() {
           --url) URL=$2 ;;
           --source) one_of "$2" "export subkeys-only gnupghome" || bad_usage; SOURCE=$2 ;;
           --key) KEY=$2 ;;
+          --workdir) WORKDIR=$2 ;;
         esac
         shift ;;
       --revoke-old) REVOKE_OLD=1 ;;
@@ -134,6 +135,12 @@ validate_options() {
   check_field --name "$NAME" 39
   check_field --login "$LOGIN" 254
   check_field --url "$URL" 254
+  if [[ -n $WORKDIR ]]; then
+    [[ -d $WORKDIR ]] || die "$EXIT_USAGE" "--workdir must be an existing folder: $WORKDIR"
+    WORKDIR=$(realpath -- "$WORKDIR")
+    (( ${#WORKDIR} <= 60 )) ||
+      die "$EXIT_USAGE" "--workdir path is too long for gpg-agent sockets (at most 60 characters): $WORKDIR"
+  fi
   [[ $CARDS =~ ^[0-9]{1,4}$ ]] || die "$EXIT_USAGE" "--cards must be 1 or more"
   CARDS=$((10#$CARDS))
   (( CARDS >= 1 )) || die "$EXIT_USAGE" "--cards must be 1 or more"
@@ -157,7 +164,9 @@ validate_options() {
 
 runtime_base() {
   local base=${XDG_RUNTIME_DIR:-}
-  if [[ -n $base && -d $base && ${#base} -le 60 ]]; then printf '%s' "$base"; else printf '/tmp'; fi
+  if [[ -n $WORKDIR ]]; then printf '%s' "$WORKDIR"
+  elif [[ -n $base && -d $base && ${#base} -le 60 ]]; then printf '%s' "$base"
+  else printf '/tmp'; fi
 }
 
 preflight() {
@@ -175,7 +184,7 @@ preflight() {
     fi
   done
   if [[ $(stat -f -c %T "$(runtime_base)") != tmpfs ]]; then
-    warn "$(runtime_base) is not tmpfs; key material may touch disk"
+    warn "temporary key copies are on disk at $(runtime_base); use --workdir with a RAM disk or encrypted volume to avoid that"
   fi
 }
 

@@ -6,7 +6,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import EXIT_INTERRUPT, EXIT_USAGE, Aborted
+from . import EXIT_INTERRUPT, EXIT_USAGE, TERMINATION_SIGNALS, Aborted, osdeps
 from .card import TOUCH_POLICIES
 from .migrate import Options, run
 
@@ -102,6 +102,7 @@ def migrate_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", default="")
     p.add_argument("--source", choices=("export", "subkeys-only", "gnupghome"), default="")
     p.add_argument("--key", default="")
+    p.add_argument("--workdir", type=Path)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--yes", action="store_true")
     return p
@@ -127,9 +128,18 @@ def _interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
+def _safe_output() -> None:
+    """Never crash on a character the output encoding lacks (a redirected Windows console uses cp1252)."""
+    options = {"errors": "replace", **({"encoding": "utf-8"} if osdeps.is_windows() else {})}
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(**options)
+
+
 def main(argv: list) -> int:
-    """SIGTERM and SIGHUP end the run like Ctrl-C: cleanup runs and the PINs are shown."""
-    previous = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    """SIGTERM, SIGHUP and SIGBREAK end the run like Ctrl-C: cleanup runs and the PINs are shown."""
+    _safe_output()
+    previous = {sig: signal.signal(sig, _interrupt) for sig in TERMINATION_SIGNALS}
     try:
         return _main(argv)
     except KeyboardInterrupt:  # a second signal during cleanup; atexit still removes the homes
@@ -154,5 +164,5 @@ def _main(argv: list) -> int:
     opts = Options(backup=args.backup, mode=args.mode, cards=args.cards, out=args.out, expire=args.expire,
                    algo=args.algo, revoke_old=args.revoke_old, pins=args.pins, same_pins=args.same_pins,
                    retries=args.retries, touch=touch, name=args.name, login=args.login, url=args.url,
-                   source=args.source, key=args.key, dry_run=args.dry_run, yes=args.yes)
+                   source=args.source, key=args.key, workdir=args.workdir, dry_run=args.dry_run, yes=args.yes)
     return run(opts, CliUI())

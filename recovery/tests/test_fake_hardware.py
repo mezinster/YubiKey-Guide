@@ -5,8 +5,8 @@ import stat
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until, run_impl,
-                           short_tempdir, spawn_impl)
+from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until,
+                           run_impl, short_tempdir, spawn_impl)
 
 S1, S2 = "11111111", "22222222"
 
@@ -138,6 +138,7 @@ class FakeHardwareTests:
         self.assertEqual(tool_homes() - before, set())
         self.assertIn("Card 11111111: Admin PIN", result.stderr)
 
+    @unittest.skipUnless(LINUX, "POSIX signals and select() on pipes")
     def test_termination_signal_at_a_prompt_cleans_up(self):
         for sig in (signal.SIGTERM, signal.SIGHUP):
             with self.subTest(signal=sig.name):
@@ -154,6 +155,7 @@ class FakeHardwareTests:
                 self.assertEqual(proc.wait(timeout=15), 130)
                 self.assertEqual(tool_homes() - before, set())
 
+    @unittest.skipUnless(LINUX, "POSIX signals and select() on pipes")
     def test_termination_signal_after_a_written_card_shows_pins(self):
         before = tool_homes()
         env = fake_hardware(self, [S1, S2])
@@ -202,6 +204,7 @@ class FakeHardwareTests:
         self.assertTrue((out / f"secret-{info['KEY_ID']}-Certify.key").is_file())
         self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
 
+    @unittest.skipUnless(LINUX, "POSIX file modes")
     def test_outputs_are_owner_only(self):
         info = fixture_info("ed25519")
         previous = os.umask(0o022)  # gpg writes these files with the process umask
@@ -222,11 +225,22 @@ class FakeHardwareTests:
         self.assertTrue(all(fprs))
         self.assertFalse(set(fprs) & {info["FPR_S"], info["FPR_E"], info["FPR_A"]})
 
+    def test_workdir_hosts_the_temporary_homes(self):
+        workdir = short_tempdir(self, "wd")
+        result, _, _, state = self.migrate("ed25519", ["--workdir", str(workdir)],
+                                           f"{PASSPHRASE}\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        homes = (state / "homes.log").read_text().split()
+        self.assertTrue(homes)
+        self.assertTrue(all(Path(h).resolve().parent == workdir.resolve() for h in homes), homes)
+        self.assertEqual(list(workdir.glob("ykr-*")), [])
+
 
 class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "python"
 
 
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "bash"
 
