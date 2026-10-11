@@ -140,7 +140,7 @@ class GuiSmokeTests(unittest.TestCase):
         app.session = SimpleNamespace(opts=SimpleNamespace(out="/out", cards=2), results=[])
         app.show(7)
         self.assertFalse(hasattr(app, "pin_btn"))
-        summary = next(w for w in app.body.winfo_children() if isinstance(w, tk.Text)).get("1.0", "end")
+        summary = app.summary.get("1.0", "end")
         from ykrecover.migrate import update_stubs_command
         self.assertIn(f"{update_stubs_command()} --import <public key file> --remove-serial <old serial> --cards 2",
                       summary)

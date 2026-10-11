@@ -10,6 +10,7 @@ import sys
 import threading
 import traceback
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -25,6 +26,58 @@ MODE_HELP = ("clone: write the backed-up subkeys as they are.\n"
              "renew: extend their expiry first (needs the Certify key).\n"
              "rotate: create new subkeys (needs the Certify key). Choose this if the old cards may be "
              "lost or compromised.")
+# Window size in units of the default font, so it grows with Windows display scaling (125%, 150%).
+WINDOW_EMS = (84, 30)  # width in "0" widths, height in line heights
+# Short names for the card table; the log keeps the full commands. Matched as whole words, in order.
+STEP_LABELS = (
+    ("openpgp reset", "reset OpenPGP"), ("set-retries", "set PIN retries"), ("--change-pin", "change PIN"),
+    ("--edit-card", "set cardholder data"), ("--edit-key", "move subkey to card"), ("set-touch", "set touch policy"),
+    ("--card-status", "check card keys"), ("--detach-sign", "test signing"), ("--verify", "verify signature"),
+    ("--encrypt", "test encryption"), ("--decrypt", "test decryption"), ("--export", "export public key"),
+    ("--import", "import public key"), ("--kill", "restart GnuPG"),
+)
+
+
+def short_status(status: str) -> str:
+    """'<serial>: <command>' as '<serial>: <step name>'; other statuses stay as they are."""
+    serial, sep, command = status.partition(": ")
+    if not sep:
+        return status
+    padded = f" {command} "
+    for needle, label in STEP_LABELS:
+        if f" {needle} " in padded:
+            return f"{serial}: {label}"
+    return f"{serial}: {' '.join(command.split()[:2])}"
+
+
+def scrolled_text(parent, height, wrap="word", width=1):
+    """A Text with scrollbars (horizontal too when lines do not wrap) in its own frame: (frame, text).
+
+    width=1 lets the layout, not the 80-character default, decide the width.
+    """
+    frame = ttk.Frame(parent)
+    text = tk.Text(frame, width=width, height=height, wrap=wrap)
+    yscroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+    text.configure(yscrollcommand=yscroll.set)
+    text.grid(row=0, column=0, sticky="nsew")
+    yscroll.grid(row=0, column=1, sticky="ns")
+    if wrap == "none":
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
+        text.configure(xscrollcommand=xscroll.set)
+        xscroll.grid(row=1, column=0, sticky="ew")
+    frame.rowconfigure(0, weight=1)
+    frame.columnconfigure(0, weight=1)
+    # Wrapped lines start under the text, not at the margin.
+    indent = tkfont.Font(root=text, font=text.cget("font")).measure("0") * 4
+    text.tag_configure("hang", lmargin2=indent)
+    return frame, text
+
+
+def set_text(text, content):
+    text.configure(state="normal")
+    text.delete("1.0", "end")
+    text.insert("end", content, ("hang",))
+    text.configure(state="disabled")
 
 
 class _Collector:
@@ -94,7 +147,11 @@ class TkUI:
         return {True: "retry", False: "skip", None: "abort"}[answer]
 
     def progress(self, index, status):
-        self.app.post(lambda: self.app.set_card(index, status))
+        def task():
+            self.app.log(f"card {index}: {status}")
+            self.app.set_card(index, short_status(status))
+
+        self.app.post(task)
 
     def show_pins(self, pins):
         self.app.post(lambda: self.app.keep_pins(pins))
@@ -104,7 +161,19 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title(TITLE)
-        root.minsize(760, 560)
+        font = tkfont.nametofont("TkDefaultFont", root=root)
+        self.em = font.measure("0")
+        width = min(self.em * WINDOW_EMS[0], root.winfo_screenwidth() - 40)
+        height = min(font.metrics("linespace") * WINDOW_EMS[1], root.winfo_screenheight() - 80)
+        root.minsize(width, height)
+        root.geometry(f"{width}x{height}")
+        root.option_add("*Dialog.msg.wrapLength", "6i")  # Tk's own message boxes wrap long lines
+        # Treeview rows have a fixed pixel height that does not follow display scaling.
+        ttk.Style(root).configure("Treeview", rowheight=font.metrics("linespace") + 4)
+        self.heading_font = font.copy()
+        self.heading_font.configure(size=14, weight="bold")
+        self.wrap = width - 32  # wraplength of page text: the body width less its padding
+        self.wrapped = []
         self.alert = lambda text: messagebox.showerror(TITLE, text, parent=self.root)
         self.tasks = queue.Queue()
         self.ui = TkUI(self)
@@ -125,10 +194,11 @@ class App:
             "dec": tk.StringVar(value="on"), "aut": tk.StringVar(value="on"), "name": tk.StringVar(),
             "login": tk.StringVar(), "url": tk.StringVar(), "out": tk.StringVar(),
         }
+        nav = ttk.Frame(root, padding=(12, 0, 12, 12))
+        nav.pack(side="bottom", fill="x")  # first, so a short window clips the page, never Back/Next
         self.body = ttk.Frame(root, padding=12)
         self.body.pack(fill="both", expand=True)
-        nav = ttk.Frame(root, padding=(12, 0, 12, 12))
-        nav.pack(fill="x")
+        self.body.bind("<Configure>", self.rewrap)
         self.back_btn = ttk.Button(nav, text="Back", command=lambda: self.show(self.page - 1))
         self.back_btn.pack(side="left")
         self.next_btn = ttk.Button(nav, text="Next", command=self.next)
@@ -188,7 +258,9 @@ class App:
         for child in self.body.winfo_children():
             child.destroy()
         self.page = page
-        self.back_btn.state(["!disabled"] if 0 < page < 6 else ["disabled"])
+        self.wrapped = []
+        before_start = page == 6 and self.worker is None
+        self.back_btn.state(["!disabled"] if 0 < page < 6 or before_start else ["disabled"])
         self.next_btn.state(["!disabled"] if page < 6 else ["disabled"])
         self.pages[page][0]()
 
@@ -197,10 +269,22 @@ class App:
         if leave is None or leave():
             self.show(self.page + 1)
 
+    def rewrap(self, event):
+        self.wrap = max(event.width - 32, self.em * 20)  # padding 12 on each side, and some slack
+        for label in self.wrapped:
+            if label.winfo_exists():
+                label.configure(wraplength=self.wrap)
+
+    def wrapped_label(self, parent=None, **options):
+        """A label whose text wraps at the current page width."""
+        label = ttk.Label(parent or self.body, wraplength=self.wrap, justify="left", **options)
+        self.wrapped.append(label)
+        return label
+
     def heading(self, text, detail=""):
-        ttk.Label(self.body, text=text, font=("TkDefaultFont", 14, "bold")).pack(anchor="w")
+        ttk.Label(self.body, text=text, font=self.heading_font).pack(anchor="w")
         if detail:
-            ttk.Label(self.body, text=detail, wraplength=700, justify="left").pack(anchor="w", pady=(4, 12))
+            self.wrapped_label(text=detail).pack(anchor="w", fill="x", pady=(4, 12))
 
     def row(self, label, make):
         frame = ttk.Frame(self.body)
@@ -211,14 +295,14 @@ class App:
         return widget
 
     def readonly_text(self, content, height):
-        text = tk.Text(self.body, height=height, wrap="none")
-        text.insert("end", content)
-        text.config(state="disabled")
-        text.pack(fill="both", expand=True)
+        frame, text = scrolled_text(self.body, height)
+        set_text(text, content)
+        frame.pack(fill="both", expand=True)
+        return text
 
     def log(self, text):
         if self.logbox is not None and self.logbox.winfo_exists():
-            self.logbox.insert("end", text.rstrip("\n") + "\n")
+            self.logbox.insert("end", text.rstrip("\n") + "\n", ("hang",))
             self.logbox.see("end")
 
     def set_card(self, index, status):
@@ -238,7 +322,7 @@ class App:
         except RecoveryError as err:
             lines = [str(err)]
             self.next_btn.state(["disabled"])
-        self.readonly_text("\n".join(lines), 8)
+        self.readonly_text("\n".join(lines), 6)
 
     def build_backup(self):
         self.heading("2. Backup", "Choose the folder holding your backup, for example the mounted encrypted "
@@ -248,8 +332,18 @@ class App:
         ttk.Entry(frame, textvariable=self.v["folder"]).pack(side="left", fill="x", expand=True)
         ttk.Button(frame, text="Browse…", command=self.browse_backup).pack(side="left", padx=4)
         ttk.Button(frame, text="Detect", command=self.refresh_candidates).pack(side="left")
-        self.cand_list = tk.Listbox(self.body, height=6, exportselection=False)
-        self.cand_list.pack(fill="x", pady=8)
+        frame = ttk.Frame(self.body)
+        frame.pack(fill="x", pady=(8, 0))
+        self.cand_list = tk.Listbox(frame, width=1, height=4, exportselection=False)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.cand_list.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.cand_list.xview)
+        self.cand_list.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.cand_list.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.columnconfigure(0, weight=1)
+        self.cand_error = self.wrapped_label()
+        self.cand_error.pack(anchor="w", fill="x", pady=(0, 8))
         self.refresh_candidates()
         self.row("Certify key passphrase", lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
         frame = ttk.Frame(self.body)
@@ -259,8 +353,8 @@ class App:
         ttk.Button(frame, text="Browse…", command=lambda: self.v["workdir"].set(
             filedialog.askdirectory(parent=self.root, mustexist=True) or self.v["workdir"].get())).pack(
             side="left", padx=4)
-        self.workdir_note = ttk.Label(self.body, wraplength=700, justify="left")
-        self.workdir_note.pack(anchor="w")
+        self.workdir_note = self.wrapped_label()
+        self.workdir_note.pack(anchor="w", fill="x")
         self.update_workdir_note()
 
     def update_workdir_note(self):
@@ -292,6 +386,7 @@ class App:
 
     def refresh_candidates(self):
         self.cand_list.delete(0, "end")
+        self.cand_error.configure(text="")
         self.candidates = []
         folder = self.v["folder"].get()
         if not folder:
@@ -299,7 +394,7 @@ class App:
         try:
             self.candidates = backup_mod.detect(Path(folder))
         except RecoveryError as err:
-            self.cand_list.insert("end", str(err))
+            self.cand_error.configure(text=str(err))
             return
         for c in self.candidates:
             self.cand_list.insert("end", f"{c.kind}: {c.path}")
@@ -354,7 +449,7 @@ class App:
 
     def build_key(self):
         self.heading("3. Confirm key", "The subkeys marked <- card will be written to every new card.")
-        self.readonly_text(self.session.describe(), 14)
+        self.readonly_text(self.session.describe(), 8)
 
     def build_mode(self):
         self.heading("4. Mode", MODE_HELP)
@@ -388,8 +483,8 @@ class App:
         pins.pack(fill="x", pady=2)
         ttk.Label(pins, text="PINs", width=26).pack(side="left")
         ttk.Radiobutton(pins, text="generate", value="generate", variable=self.v["pins"]).pack(side="left")
-        ttk.Radiobutton(pins, text="enter", value="enter", variable=self.v["pins"]).pack(side="left")
-        ttk.Checkbutton(pins, text="same PINs on every card", variable=self.v["same"]).pack(side="left", padx=12)
+        ttk.Radiobutton(pins, text="enter", value="enter", variable=self.v["pins"]).pack(side="left", padx=(8, 0))
+        self.row("", lambda f: ttk.Checkbutton(f, text="same PINs on every card", variable=self.v["same"]))
         self.row("Retries (user,reset,admin)", lambda f: ttk.Entry(f, textvariable=self.v["retries"]))
         for ref, label in (("sig", "Touch: sign"), ("dec", "Touch: decrypt"), ("aut", "Touch: authenticate")):
             self.row(label, lambda f, ref=ref: ttk.Combobox(f, textvariable=self.v[ref], values=TOUCH_POLICIES,
@@ -429,20 +524,28 @@ class App:
 
     def build_cards(self):
         self.heading("7. Write cards", "Press Start. You will be asked to insert each card and confirm its reset.")
-        self.table = ttk.Treeview(self.body, columns=("status",), height=6)
+        self.start_btn = ttk.Button(self.body, text="Start", command=self.start)
+        self.start_btn.pack(side="bottom", anchor="e")  # before the log, which takes the remaining height
+        frame = ttk.Frame(self.body)
+        frame.pack(fill="x")
+        cards = self.session.opts.cards
+        self.table = ttk.Treeview(frame, columns=("status",), height=min(max(cards, 2), 4))
         self.table.heading("#0", text="Card")
         self.table.heading("status", text="Status")
-        self.table.column("status", width=560)
-        self.table.pack(fill="x")
-        for i in range(1, self.session.opts.cards + 1):
+        self.table.column("#0", width=self.em * 8, stretch=False)
+        self.table.column("status", width=self.em * 20, stretch=True)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=scroll.set)
+        self.table.pack(side="left", fill="x", expand=True)
+        scroll.pack(side="left", fill="y")
+        for i in range(1, cards + 1):
             self.table.insert("", "end", iid=str(i), text=f"card {i}", values=("waiting",))
-        self.logbox = tk.Text(self.body, height=12, wrap="word")
-        self.logbox.pack(fill="both", expand=True, pady=8)
-        self.start_btn = ttk.Button(self.body, text="Start", command=self.start)
-        self.start_btn.pack(anchor="e")
+        frame, self.logbox = scrolled_text(self.body, 6)
+        frame.pack(fill="both", expand=True, pady=8)
 
     def start(self):
         self.start_btn.state(["disabled"])
+        self.back_btn.state(["disabled"])
         self.worker = threading.Thread(target=self.work, daemon=True)
         self.worker.start()
 
@@ -470,17 +573,22 @@ class App:
     def build_summary(self):
         self.heading("8. Summary")
         o = self.session.opts
-        lines = [f"card {r.index}  {r.serial or '-'}  {r.status}  {r.detail}" for r in self.session.results]
-        lines += ["", f"Files are in {o.out}.", "On your daily machine run:",
+        lines = []
+        for r in self.session.results:
+            lines.append(f"card {r.index}  {r.serial or '-'}  {r.status}")
+            if r.detail:
+                lines.append(f"    {r.detail}")
+        # The command stays one line, so it can be copied; the text widget wraps it for display.
+        lines += ["", f"Files are in {o.out}.", "", "On your daily machine run:",
                   f"  {update_stubs_command()} --import <public key file> --remove-serial <old serial> "
                   f"--cards {o.cards}"]
-        self.readonly_text("\n".join(lines), 12)
         if self.pins:
             self.pin_btn = ttk.Button(self.body, text="Show PINs (once)", command=self.reveal_pins)
-            self.pin_btn.pack(anchor="e", pady=8)
+            self.pin_btn.pack(side="bottom", anchor="e", pady=8)
         else:
             note = "The PINs were shown when card writing finished." if self.pins_shown else "No card was written."
-            ttk.Label(self.body, text=note).pack(anchor="e", pady=8)
+            ttk.Label(self.body, text=note).pack(side="bottom", anchor="e", pady=8)
+        self.summary = self.readonly_text("\n".join(lines), 8)
 
     def reveal_pins(self):
         """Shows the kept PINs once in a modal dialog; nothing happens when there are none."""
