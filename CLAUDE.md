@@ -8,17 +8,18 @@ Documentation project: a guide to using YubiKey with GnuPG for encryption, signi
 
 ## Build Commands
 
-No build system, CI or tests — verify commands and anchors by hand.
+No build system or tests. CI (`.github/workflows/lint.yml`) runs the three checks below; run them locally after editing docs or scripts.
 
 ```bash
-# Lint scripts (shellcheck installed via `pipx install shellcheck-py`).
-# Existing upstream code has SC2155/SC2086/SC3045 warnings — only fix ones your edit introduces.
-shellcheck scripts/*.sh piv/*.sh
+# Markdown lint, incl. broken #anchor links (MD051). Config + file globs: .markdownlint-cli2.jsonc
+npx --yes markdownlint-cli2@0.23.3
 
-# Lint Markdown (Node 14 locally, so pin markdownlint-cli 0.31.1). Disabled rules match intentional
-# conventions: long prose lines, multiple top-level `#` sections, <details> HTML, bold platform labels.
-# ~18 pre-existing findings remain upstream — only fix ones your edit introduces.
-npx -p markdownlint-cli@0.31.1 markdownlint --disable MD013 MD025 MD033 MD036 MD041 -- README.md SECENV.md piv/README.md
+# Every README heading must appear in the hand-written ToC
+python3 .github/scripts/check_toc.py README.md
+
+# Scripts (shellcheck via `pipx install shellcheck-py`). CI gates on errors only; existing
+# SC2155/SC2086/SC3045 warnings are upstream — don't add new ones.
+shellcheck --severity=error scripts/*.sh piv/*.sh
 
 # Build NixOS Live ISO
 nix build --experimental-features "nix-command flakes" nix#nixosConfigurations.yubikeyLive.x86_64-linux.config.system.build.isoImage
@@ -49,4 +50,5 @@ nix flake update --commit-lock-file
 
 ## Repo Workflow
 
+- `.gitignore` is `.*` — new dotfiles/dirs are silently ignored unless whitelisted with a `!` line (as done for `.github/` and `.markdownlint-cli2.jsonc`).
 - Fork of `drduh/YubiKey-Guide`. Local `master` syncs from upstream `main` via merge commits; only `origin` (mezinster fork) is configured as a remote.
