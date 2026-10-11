@@ -487,6 +487,26 @@ class GuiBehaviourTests(unittest.TestCase):
         self.assertTrue(pins.winfo_exists())  # only "I wrote them down" closes it
         pins.destroy()
 
+    def test_key_chooser_works_from_the_keyboard(self):
+        from ykrecover.gui import ChoiceDialog
+        app = self.app()
+        app.root.update()
+        dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second", "third"])
+        seen = []
+
+        def keys(dialog):
+            dialog.update()
+            seen.append(dialog.focus_get() is dialog.listbox)
+            dialog.listbox.event_generate("<Down>")
+            dialog.listbox.event_generate("<Return>")
+
+        when_dialog_up(app.root, keys)
+        self.assertEqual(dialog.run(), 1)
+        self.assertEqual(seen, [True])
+        dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second"])
+        when_dialog_up(app.root, lambda d: d.listbox.event_generate("<Return>"))
+        self.assertEqual(dialog.run(), 0)  # the first row is chosen without touching the list
+
     def test_settings_are_validated_on_their_page(self):
         app = self.app()
         app.show(4)

@@ -111,6 +111,7 @@ class Modal(tk.Toplevel):
         self.transient(parent)
         self.parent = parent
         self.value = close_value
+        self.focus_widget = self  # what run() gives the keyboard focus
         self.em = tkfont.nametofont("TkDefaultFont", root=self).measure("0")
         self.max_width = int(self.winfo_screenwidth() * 0.8)  # for the header and the body
         outer = ttk.Frame(self, padding=12)
@@ -150,7 +151,7 @@ class Modal(tk.Toplevel):
         self.deiconify()
         self.wait_visibility()
         self.grab_set()
-        self.focus_set()
+        self.focus_widget.focus_set()
         self.wait_window()
         return self.value
 
@@ -198,7 +199,10 @@ class ChoiceDialog(Modal):
         for item in items:
             self.listbox.insert("end", item)
         self.listbox.selection_set(0)
+        self.listbox.activate(0)
+        self.focus_widget = self.listbox  # arrow keys move the selection, Return chooses
         self.listbox.bind("<Double-Button-1>", lambda event: self.done("ok"))
+        self.bind("<Return>", lambda event: self.done("ok"))
 
     def done(self, value):
         chosen = self.listbox.curselection() if value == "ok" else ()
