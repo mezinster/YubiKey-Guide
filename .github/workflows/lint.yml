@@ -74,6 +74,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "gpg --version failed" }
           & "$dest\bin\gpgconf.exe" --list-dirs
           "$dest\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: prepare script (dry run, Windows PowerShell 5.1)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File recovery/packaging/prepare-windows.ps1 -WhatIf
+
       - name: install build requirements
         run: python -m pip install -r recovery/packaging/requirements-windows.txt
 

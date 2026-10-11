@@ -6,3 +6,4 @@ __pycache__/
 recovery/packaging/build/
 recovery/packaging/dist/
 recovery/packaging/.venv/
+recovery/packaging/logs/
