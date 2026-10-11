@@ -1,5 +1,7 @@
 import os
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 try:
     import tkinter as tk
@@ -22,6 +24,41 @@ class GuiSmokeTests(unittest.TestCase):
         app.show(1)
         root.update()
         self.assertFalse(app.leave_backup())  # nothing detected → stays on the page
+
+    def app_with_pins(self):
+        from ykrecover.gui import App
+        root = tk.Tk()
+
+        def destroy():
+            try:
+                root.destroy()
+            except tk.TclError:  # the app already closed it
+                pass
+
+        self.addCleanup(destroy)
+        app = App(root)
+        app.logbox = tk.Text(root)
+        app.keep_pins([("11111111", "12345678", "123456")])
+        return app
+
+    def test_pins_shown_when_work_finishes(self):
+        app = self.app_with_pins()
+        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+            app.finished(0)
+            app.reveal_pins()  # once only
+        self.assertEqual(shown.call_count, 1)
+        self.assertIn("Admin PIN 12345678", shown.call_args.args[1])
+        self.assertEqual(app.pins, [])
+        app.session = SimpleNamespace(opts=SimpleNamespace(out="/out", cards=2), results=[])
+        app.show(7)
+        self.assertFalse(hasattr(app, "pin_btn"))
+
+    def test_close_shows_pins_never_shown(self):
+        app = self.app_with_pins()
+        with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:
+            app.close()
+        self.assertEqual(shown.call_count, 1)
+        self.assertIn("User PIN 123456", shown.call_args.args[1])
 
     def test_tkui_marshals_calls(self):
         from ykrecover.gui import App

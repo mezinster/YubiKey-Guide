@@ -108,7 +108,8 @@ class App:
         self.session = None
         self.candidates = []
         self.failures = 0
-        self.pins = []
+        self.pins = []  # kept PINs not yet shown
+        self.pins_shown = False
         self.worker = None
         self.table = None
         self.logbox = None
@@ -407,6 +408,7 @@ class App:
     def finished(self, code):
         self.log(f"finished with exit code {code}")
         self.next_btn.state(["!disabled"])
+        self.reveal_pins()  # right away, so closing the window cannot lose them
 
     def build_summary(self):
         self.heading("8. Summary")
@@ -415,14 +417,24 @@ class App:
         lines += ["", f"Files are in {o.out}.", "On your daily machine run:",
                   "  yubikey-recovery --cli update-stubs --import <public key file> --remove-serial <old serial>"]
         self.readonly_text("\n".join(lines), 12)
-        self.pin_btn = ttk.Button(self.body, text="Show PINs (once)", command=self.reveal_pins)
-        self.pin_btn.pack(anchor="e", pady=8)
+        if self.pins:
+            self.pin_btn = ttk.Button(self.body, text="Show PINs (once)", command=self.reveal_pins)
+            self.pin_btn.pack(anchor="e", pady=8)
+        else:
+            note = "The PINs were shown when card writing finished." if self.pins_shown else "No card was written."
+            ttk.Label(self.body, text=note).pack(anchor="e", pady=8)
 
     def reveal_pins(self):
-        text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in self.pins) or "No card was written."
-        messagebox.showinfo("PINs", text, parent=self.root)
+        """Shows the kept PINs once in a modal dialog; nothing happens when there are none."""
+        if not self.pins:
+            return
+        text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in self.pins)
+        messagebox.showinfo("PINs", text + "\n\nWrite them down now. They are not shown again.", parent=self.root)
         self.pins = []
-        self.pin_btn.state(["disabled"])
+        self.pins_shown = True
+        btn = getattr(self, "pin_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.state(["disabled"])
 
     def close(self):
         busy = self.worker is not None and self.worker.is_alive()
@@ -430,6 +442,7 @@ class App:
             messagebox.showinfo(TITLE, "Card writing is in progress. Finish it, or choose Cancel at the next "
                                        "card prompt to abort; PINs are shown afterwards.", parent=self.root)
             return
+        self.reveal_pins()
         if self.session:
             self.session.cleanup()
         self.root.destroy()
