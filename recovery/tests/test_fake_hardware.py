@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import unittest
 from pathlib import Path
 
@@ -114,6 +116,14 @@ class FakeHardwareTests:
         self.assertIn("copy the new backup before writing cards", result.stderr)
         self.assertTrue((out / f"secret-{info['KEY_ID']}-Certify.key").is_file())
         self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
+
+    def test_new_backup_is_owner_only(self):
+        info = fixture_info("expired")
+        stdin = f"{PASSPHRASE}\ny\ny\n\nRESET {S1}\n"
+        result, out, _, _ = self.migrate("expired", ["--mode", "renew"], stdin)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mode = stat.S_IMODE(os.stat(out / f"secret-{info['KEY_ID']}-Certify.key").st_mode)
+        self.assertEqual(mode & 0o077, 0)
 
     def test_rotate_writes_new_subkeys(self):
         info = fixture_info("rsa4096")

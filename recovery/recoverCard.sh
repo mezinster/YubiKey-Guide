@@ -5,6 +5,7 @@
 
 set -o errtrace -o nounset -o pipefail -o errexit
 set +x
+umask 077
 export LC_ALL=C
 
 readonly EXIT_OK=0 EXIT_USAGE=1 EXIT_BACKUP=2 EXIT_CARD=3 EXIT_INTERRUPT=130
@@ -170,11 +171,12 @@ preflight() {
 
 # --- throwaway GnuPG homes
 
-new_home() { # new_home LABEL VAR
+new_home() { # new_home LABEL VAR; returns 1 on any failure
   local dir
-  dir=$(mktemp -d "$(runtime_base)/ykr-$1-XXXXXXXX")
-  chmod 700 "$dir"
+  dir=$(mktemp -d "$(runtime_base)/ykr-$1-XXXXXXXX") || return 1
+  [[ -n $dir && -d $dir ]] || return 1
   HOMES_CREATED+=("$dir")
+  chmod 700 "$dir" || return 1
   printf -v "$2" '%s' "$dir"
 }
 
@@ -182,12 +184,13 @@ kill_agents() { GNUPGHOME=$1 gpgconf --kill all >/dev/null 2>&1 || true; }
 
 destroy_home() { kill_agents "$1"; rm -rf -- "$1"; }
 
-clone_home() { # clone_home SRC LABEL VAR
+clone_home() { # clone_home SRC LABEL VAR; returns 1 on any failure
   local dst
   kill_agents "$1"
-  new_home "$2" "$3"
+  new_home "$2" "$3" || return 1
   dst=${!3}
-  cp -a -- "$1/." "$dst/"
+  [[ -n $dst && -d $dst ]] || return 1
+  cp -a -- "$1/." "$dst/" || return 1
   rm -f -- "$dst"/S.* "$dst"/*.lock "$dst"/.#* "$dst"/random_seed
 }
 
@@ -496,11 +499,13 @@ verify_steps() { # verify_steps INDEX
   step "$phase" "$v" roundtrip "${pin[@]}" --output "$v/test.out" --decrypt "$v/test.gpg" || return 1
 }
 
-finish_steps() {
+finish_steps() { # tries both exports; warns per failure (live run)
+  local rc=0
   step finish '<STAGING>' '' gpg --batch --yes --armor --output "<OUT>/public-$KEY_ID-<DATE>.asc" \
-    --export "$KEY_FP" || return 1
+    --export "$KEY_FP" || { rc=1; warn "export failed: $CURRENT_STEP"; }
   step finish '<STAGING>' '' gpg --batch --yes --output "<OUT>/ssh-$KEY_ID.pub" --export-ssh-key \
-    "${TARGET[a]}!" || return 1
+    "${TARGET[a]}!" || { rc=1; warn "export failed: $CURRENT_STEP"; }
+  return "$rc"
 }
 
 dry_run() {
@@ -706,9 +711,13 @@ read_choice() { # read_choice VAR → retry | skip | abort
 
 write_card() { # write_card INDEX → status; runs with errexit suspended, so every step checks itself
   local i=$1 rc=0
-  clone_home "$STAGING" card CARDHOME || return 1
-  new_home verify VERIFYHOME || return 1
-  printf '%s\n' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >"$VERIFYHOME/test.txt"
+  CURRENT_STEP="prepare card home"
+  : >"$WORK/step.err"
+  if ! { clone_home "$STAGING" card CARDHOME && new_home verify VERIFYHOME &&
+    printf '%s\n' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >"$VERIFYHOME/test.txt"; } 2>>"$WORK/step.err"; then
+    printf 'could not prepare temporary GnuPG homes\n' >>"$WORK/step.err"
+    return 1
+  fi
   split_name "$NAME"
   TOKENS["<SERIAL$i>"]=${SERIALS[$i]}
   TOKENS['<ADMIN_PIN>']=${ADMIN_PINS[$i]}
@@ -764,14 +773,14 @@ reveal_pins() { # prints once, on every exit path (called from cleanup)
   PINS_SHOWN=1
   for ((i = 1; i <= CARDS; i++)); do
     if [[ -n ${PINS_SET[$i]:-} ]]; then
-      printf 'Card %s: Admin PIN %s  User PIN %s\n' "${SERIALS[$i]}" "${ADMIN_PINS[$i]}" "${USER_PINS[$i]}" >&2
+      printf 'Card %s: Admin PIN %s  User PIN %s\n' "${SERIALS[$i]}" "${ADMIN_PINS[$i]}" "${USER_PINS[$i]}" >&2 || true
     fi
   done
 }
 
 finish() {
   local i all_ok=1 public
-  finish_steps || warn "export failed: $CURRENT_STEP"
+  finish_steps || true
   info "Summary:"
   for ((i = 1; i <= CARDS; i++)); do
     info "card $i ${SERIALS[$i]:--} ${STATUS[$i]:-pending} ${DETAIL[$i]:-}"

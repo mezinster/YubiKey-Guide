@@ -4,6 +4,7 @@ The CLI (run) and the GUI drive the same Session methods.
 """
 
 import datetime
+import os
 import secrets
 import shutil
 import subprocess
@@ -198,6 +199,13 @@ class Session:
 
     def execute(self) -> int:
         """Everything after the passphrase is unlocked and the key confirmed."""
+        previous = os.umask(0o077)  # new backups and temporary files are owner-only
+        try:
+            return self._execute()
+        finally:
+            os.umask(previous)
+
+    def _execute(self) -> int:
         o = self.opts
         o.out.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.apply_mode()
