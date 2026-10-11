@@ -11,7 +11,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from . import EXIT_CARD, EXIT_INTERRUPT, Aborted, RecoveryError
+from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
 from .migrate import Options, Session
@@ -474,7 +474,7 @@ class App:
 def main() -> int:
     root = tk.Tk()
     app = App(root)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig in TERMINATION_SIGNALS:
         signal.signal(sig, app.request_terminate)
     root.mainloop()
     return 0

@@ -1,10 +1,20 @@
 """Migrate GnuPG key backups onto new YubiKeys. See recovery/README.md."""
 
+import signal
+
 EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_BACKUP = 2
 EXIT_CARD = 3
 EXIT_INTERRUPT = 130
+
+
+def termination_signals(module=signal) -> tuple:
+    """Signals that end a run like Ctrl-C. SIGHUP does not exist on Windows."""
+    return tuple(getattr(module, name) for name in ("SIGTERM", "SIGHUP") if hasattr(module, name))
+
+
+TERMINATION_SIGNALS = termination_signals()
 
 
 class RecoveryError(Exception):

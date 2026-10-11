@@ -6,7 +6,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import EXIT_INTERRUPT, EXIT_USAGE, Aborted
+from . import EXIT_INTERRUPT, EXIT_USAGE, TERMINATION_SIGNALS, Aborted
 from .card import TOUCH_POLICIES
 from .migrate import Options, run
 
@@ -129,7 +129,7 @@ def _interrupt(signum, frame):
 
 def main(argv: list) -> int:
     """SIGTERM and SIGHUP end the run like Ctrl-C: cleanup runs and the PINs are shown."""
-    previous = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    previous = {sig: signal.signal(sig, _interrupt) for sig in TERMINATION_SIGNALS}
     try:
         return _main(argv)
     except KeyboardInterrupt:  # a second signal during cleanup; atexit still removes the homes

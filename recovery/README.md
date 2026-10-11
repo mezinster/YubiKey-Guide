@@ -9,6 +9,10 @@ Two equivalent tools:
 
 On the LiveCD built from `nix/` both are installed, and "YubiKey Recovery" is on the desktop.
 
+Both tools run on Linux only (the LiveCD, or another Linux system with `gpg` and `ykman`). On Windows or macOS they exit with an error. Boot the LiveCD instead, or use a Linux VM with the YubiKey passed through to it.
+
+Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecover`. Running `ykrecover/gui.py` directly fails with "attempted relative import".
+
 > [!WARNING]
 > Every card you write is **reset**: all OpenPGP keys and PINs on it are erased. The tool asks you to type `RESET <serial>` for each card.
 
