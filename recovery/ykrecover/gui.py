@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError, osdeps
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
-from .migrate import Options, Session, update_stubs_command
+from .migrate import Options, Session, update_stubs_command, valid_metadata, valid_retries
 
 TITLE = "YubiKey recovery"
 METADATA_WARNING = ("OpenPGP card metadata (name, login, URL) can be read by anyone holding the card. "
@@ -28,6 +28,14 @@ MODE_HELP = ("clone: write the backed-up subkeys as they are.\n"
              "lost or compromised.")
 # Window size in units of the default font, so it grows with Windows display scaling (125%, 150%).
 WINDOW_EMS = (84, 30)  # width in "0" widths, height in line heights
+# Core errors name CLI flags; the wizard names its fields instead. Checked in order.
+GUI_WORDS = (
+    ("cannot create the --out folder", "cannot create the output folder"),
+    ("--algo and --revoke-old need --mode rotate", "a new algorithm and revoking old subkeys need mode rotate"),
+    ("--out", "the output folder"), ("--workdir", "the work folder"), ("--mode ", "mode "),
+    ("--cards", "the number of cards"), ("--name", "the cardholder name"), ("--login", "the login"),
+    ("--url", "the public key URL"),
+)
 # Short names for the card table; the log keeps the full commands. Matched as whole words, in order.
 STEP_LABELS = (
     ("openpgp reset", "reset OpenPGP"), ("set-retries", "set PIN retries"), ("--change-pin", "change PIN"),
@@ -36,6 +44,14 @@ STEP_LABELS = (
     ("--encrypt", "test encryption"), ("--decrypt", "test decryption"), ("--export", "export public key"),
     ("--import", "import public key"), ("--kill", "restart GnuPG"),
 )
+
+
+def gui_wording(message) -> str:
+    """A core error message with the CLI flags replaced by the wizard's field names."""
+    text = str(message)
+    for flag, words in GUI_WORDS:
+        text = text.replace(flag, words)
+    return text[:1].upper() + text[1:]
 
 
 def short_status(status: str) -> str:
@@ -519,7 +535,7 @@ class App:
         try:
             self.candidates = backup_mod.detect(Path(folder))
         except RecoveryError as err:
-            self.cand_error.configure(text=str(err))
+            self.cand_error.configure(text=gui_wording(err))
             return
         for c in self.candidates:
             self.cand_list.insert("end", f"{c.kind}: {c.path}")
@@ -541,13 +557,16 @@ class App:
             return True  # already loaded and unlocked (the user went Back): keep it
         new = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
         try:
-            new.validate_workdir()
+            new.validate_workdir(apply=False)
         except RecoveryError as err:
-            self.alert(str(err))
+            self.alert(gui_wording(err))
             return False
         if self.session:
             self.session.cleanup()
         self.session = new
+        new.validate_workdir()  # adopted: temporary homes now go to its work folder
+        if workdir is not None:
+            self.warn_leftovers()
         while True:
             try:
                 self.session.load()
@@ -558,7 +577,7 @@ class App:
                     return False
                 self.session.opts.key = err.bundles[chosen].key_fp
             except RecoveryError as err:
-                self.alert(str(err))
+                self.alert(gui_wording(err))
                 return False
         if not self.session.unlock(self.v["passphrase"].get()):
             self.failures += 1
@@ -570,6 +589,13 @@ class App:
             return False
         self.v["passphrase"].set("")
         return True
+
+    def warn_leftovers(self):
+        """Preflight checked the default work folder; a chosen one may hold leftovers of its own."""
+        warnings = self.session.leftover_warnings()
+        if warnings:
+            TextDialog(self.root, "Work folder", "Earlier runs left temporary folders in the work folder. "
+                       "They may hold key material.", "\n".join(warnings), (("OK", None),), lines=6).run()
 
     def choose_key(self, bundles):
         return ChoiceDialog(self.root, TITLE, "This backup holds several keys. Choose the one to write to the cards.",
@@ -601,7 +627,7 @@ class App:
             self.session.validate_bundle()
             return True
         except RecoveryError as err:
-            self.alert(str(err))
+            self.alert(gui_wording(err))
             return False
 
     def build_settings(self):
@@ -624,11 +650,23 @@ class App:
     def leave_settings(self):
         o = self.session.opts
         cards = self.v["cards"].get().strip()
-        o.cards = int(cards) if cards.isdigit() else 0
+        retries = tuple(part.strip() for part in self.v["retries"].get().split(","))
+        name, login, url = (self.v[k].get().strip() for k in ("name", "login", "url"))
+        problems = []
+        if not cards.isdigit() or int(cards) < 1:
+            problems.append("Number of cards must be a whole number, 1 or more.")
+        if not valid_retries(retries):
+            problems.append("Retries must be three numbers from 1 to 99, such as 5,5,5.")
+        for label, value, limit in (("Cardholder name", name, 39), ("Login", login, 254), ("Public key URL", url, 254)):
+            if not valid_metadata(value, limit):
+                problems.append(f"{label} must be at most {limit} plain ASCII characters, without '<'.")
+        if problems:
+            self.alert("\n".join(problems))
+            return False
+        o.cards, o.retries = int(cards), retries
         o.pins, o.same_pins = self.v["pins"].get(), self.v["same"].get()
-        o.retries = tuple(self.v["retries"].get().split(","))
         o.touch = {ref: self.v[ref].get() for ref in ("sig", "dec", "aut")}
-        o.name, o.login, o.url = (self.v[k].get().strip() for k in ("name", "login", "url"))
+        o.name, o.login, o.url = name, login, url
         return True
 
     def build_output(self):
@@ -642,12 +680,16 @@ class App:
 
     def leave_output(self):
         o = self.session.opts
-        o.out = Path(self.v["out"].get()) if self.v["out"].get().strip() else None
+        text = self.v["out"].get().strip()
+        if not text:
+            self.alert("Choose an output folder.")
+            return False
+        o.out = Path(text)
         try:
             self.session.validate_options()
             return True
         except RecoveryError as err:
-            self.alert(str(err))
+            self.alert(gui_wording(err))
             return False
 
     def build_cards(self):

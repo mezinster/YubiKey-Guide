@@ -21,6 +21,16 @@ def update_stubs_command() -> str:
     return "ykrecover.exe --cli update-stubs" if osdeps.is_windows() else "yubikey-recovery --cli update-stubs"
 
 
+def valid_metadata(value: str, limit: int) -> bool:
+    """Card metadata (name, login, URL): printable ASCII without '<', at most limit characters."""
+    return len(value) <= limit and all(" " <= c <= "~" and c != "<" for c in value)
+
+
+def valid_retries(retries) -> bool:
+    """Three retry counters (user, reset, admin), each 1 to 99."""
+    return len(retries) == 3 and all(r.isdigit() and 1 <= int(r) <= 99 for r in retries)
+
+
 LEFTOVER_AGE = 600  # seconds: a ykr-* folder older than this is not from a run starting now
 
 
@@ -78,7 +88,8 @@ class Session:
         if not home.destroy():
             self.ui.warn(f"could not remove the temporary folder {home.path}; delete it manually")
 
-    def validate_workdir(self) -> None:
+    def validate_workdir(self, apply: bool = True) -> None:
+        """Checks --workdir; apply=False only checks, so a session not yet in use leaves the global alone."""
         workdir = self.opts.workdir
         if workdir is not None:
             workdir = Path(workdir).resolve()
@@ -87,12 +98,13 @@ class Session:
             if not osdeps.is_windows() and len(str(workdir)) > osdeps.MAX_BASE_LEN:
                 raise RecoveryError(f"--workdir path is too long for gpg-agent sockets "
                                     f"(at most {osdeps.MAX_BASE_LEN} characters): {workdir}", EXIT_USAGE)
-        osdeps.set_workdir(workdir)
+        if apply:
+            osdeps.set_workdir(workdir)
 
     def validate_options(self) -> None:
         o = self.opts
         for flag, value, limit in (("--name", o.name, 39), ("--login", o.login, 254), ("--url", o.url, 254)):
-            if len(value) > limit or not all(" " <= c <= "~" and c != "<" for c in value):
+            if not valid_metadata(value, limit):
                 raise RecoveryError(f"{flag} must be at most {limit} printable ASCII characters without '<'",
                                     EXIT_USAGE)
         self.validate_workdir()
@@ -106,7 +118,7 @@ class Session:
             raise RecoveryError("--algo and --revoke-old need --mode rotate", EXIT_USAGE)
         if o.source and o.source not in backup.KINDS:
             raise RecoveryError(f"unknown source {o.source}", EXIT_USAGE)
-        if len(o.retries) != 3 or not all(r.isdigit() and 1 <= int(r) <= 99 for r in o.retries):
+        if not valid_retries(o.retries):
             raise RecoveryError("retries must be three numbers from 1 to 99", EXIT_USAGE)
         if any(p not in card.TOUCH_POLICIES for p in o.touch.values()):
             raise RecoveryError("unknown touch policy", EXIT_USAGE)
@@ -140,9 +152,13 @@ class Session:
             else:
                 self.ui.warn(f"temporary key copies are on disk at {base}; "
                              "use --workdir with a RAM disk or encrypted volume to avoid that")
-        for leftover in self._leftovers(base):
-            self.ui.warn(f"left over from an earlier run: {leftover}; it may hold key material — "
-                         "delete it securely")
+        for warning in self.leftover_warnings():
+            self.ui.warn(warning)
+
+    def leftover_warnings(self) -> list:
+        """Warnings for ykr-* folders an earlier run left in the current work base."""
+        return [f"left over from an earlier run: {leftover}; it may hold key material — delete it securely"
+                for leftover in self._leftovers(osdeps.work_base())]
 
     def _warn_mixed_gnupg(self) -> None:
         """Two GnuPG installs (Gpg4win and another on PATH) can disagree about the agent and its sockets."""
