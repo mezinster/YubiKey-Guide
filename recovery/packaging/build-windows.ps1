@@ -3,11 +3,20 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-python -m venv .venv
-.\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\python -m pip install -r requirements-windows.txt
-.\.venv\Scripts\python -m PyInstaller --noconfirm --clean --distpath dist --workpath build ykrecover.spec
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+function Invoke-Checked {
+    param([scriptblock]$Command, [string]$What)
+    & $Command
+    if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
+}
+
+# Always start from a fresh venv and empty dist\ so only the pinned versions are built and shipped.
+if (Test-Path .venv) { Remove-Item -Recurse -Force .venv }
+if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+
+Invoke-Checked { python -m venv .venv } "python -m venv"
+Invoke-Checked { .\.venv\Scripts\python -m pip install --upgrade pip } "pip upgrade"
+Invoke-Checked { .\.venv\Scripts\python -m pip install -r requirements-windows.txt } "pip install -r requirements-windows.txt"
+Invoke-Checked { .\.venv\Scripts\python -m PyInstaller --noconfirm --clean --distpath dist --workpath build ykrecover.spec } "PyInstaller"
 
 Copy-Item README-windows.txt dist\ -Force
 Copy-Item ..\..\LICENSE dist\LICENSE -Force
