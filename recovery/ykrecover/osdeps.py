@@ -37,7 +37,9 @@ def _which(name: str):
     extensions = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
     candidates = []
     for ext in extensions:
-        candidates += [name + ext, name + ext.lower()]
+        candidates.append(name + ext)
+        if os.name != "nt" and ext.lower() != ext:  # case-sensitive filesystem (tests on Linux)
+            candidates.append(name + ext.lower())
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry or entry == "." or not os.path.isabs(entry):
@@ -64,7 +66,11 @@ def tool(name: str) -> list:
         raise RecoveryError(f"{name} not found: install Gpg4win (https://gpg4win.org)", EXIT_USAGE)
     if name == "ykman":
         if getattr(sys, "frozen", False):
-            return [str(Path(sys.executable).with_name("ykrecover.exe")), "--ykman"]
+            bundled = Path(sys.executable).with_name("ykrecover.exe")
+            if not bundled.is_file():
+                raise RecoveryError("ykrecover.exe must be next to ykrecover-gui.exe: extract the whole zip",
+                                    EXIT_USAGE)
+            return [str(bundled), "--ykman"]
         return [sys.executable, "-c", YKMAN_SHIM]
     raise RecoveryError(f"{name} not found", EXIT_USAGE)
 

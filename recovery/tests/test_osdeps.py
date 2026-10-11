@@ -50,11 +50,29 @@ class ToolTests(unittest.TestCase):
 
     def test_windows_ykman_is_bundled(self):
         win(self)
+        app = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(app, ignore_errors=True))
+        (app / "ykrecover.exe").write_text("")
         with mock.patch.object(osdeps, "_which", return_value=None):
             with mock.patch.object(osdeps.sys, "frozen", True, create=True), \
-                    mock.patch.object(osdeps.sys, "executable", "/app/ykrecover-gui.exe"):
-                self.assertEqual(osdeps.tool("ykman"), ["/app/ykrecover.exe", "--ykman"])
+                    mock.patch.object(osdeps.sys, "executable", str(app / "ykrecover-gui.exe")):
+                self.assertEqual(osdeps.tool("ykman"), [str(app / "ykrecover.exe"), "--ykman"])
+                self.assertTrue(osdeps.available("ykman"))
             self.assertEqual(osdeps.tool("ykman"), [sys.executable, "-c", osdeps.YKMAN_SHIM])
+
+    def test_frozen_gui_without_console_exe_fails_preflight(self):
+        win(self)
+        app = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(app, ignore_errors=True))
+        with mock.patch.object(osdeps, "_which", return_value=None), \
+                mock.patch.object(osdeps.sys, "frozen", True, create=True), \
+                mock.patch.object(osdeps.sys, "executable", str(app / "ykrecover-gui.exe")):
+            with self.assertRaises(RecoveryError) as ctx:
+                osdeps.tool("ykman")
+            self.assertEqual(ctx.exception.code, EXIT_USAGE)
+            self.assertEqual(str(ctx.exception),
+                             "ykrecover.exe must be next to ykrecover-gui.exe: extract the whole zip")
+            self.assertFalse(osdeps.available("ykman"))
 
     def test_planted_exe_in_cwd_is_ignored(self):
         win(self)
@@ -76,7 +94,9 @@ class ToolTests(unittest.TestCase):
         (d / "gpg.cmd").write_text("")
         with mock.patch.dict(os.environ, {"PATH": "relative" + os.pathsep + str(d),
                                           "PATHEXT": ".COM;.EXE;.BAT;.CMD"}):
-            self.assertEqual(osdeps.tool("gpg"), [str(d / "gpg.cmd")])
+            found = osdeps.tool("gpg")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(os.path.normcase(found[0]), os.path.normcase(str(d / "gpg.cmd")))
 
     def test_windows_unknown_tool_raises(self):
         win(self)
