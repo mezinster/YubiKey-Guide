@@ -1,3 +1,4 @@
 .*
 !.github/
 !.markdownlint-cli2.jsonc
+__pycache__/
