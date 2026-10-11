@@ -99,7 +99,7 @@ Tool resolution happens only when a command is executed: `Home.run`, and the dir
 
 ## Testing
 
-- **Fakes on Windows:** `helpers.fake_hardware` writes `<name>.cmd` wrappers into a temp bin folder. Each wrapper runs `"<python>" "<fakebin>\<name>" %*`. The helper puts that folder first on PATH. On Windows the fakes set `YKRECOVER_FAKE_GPG4WIN` (or simply PATH) so that `tool()` finds the wrappers; `tool()` checks `shutil.which` first, so PATH is enough. The fake `gpg` is invoked through `REAL_GPG`, which points at Gpg4win's `gpg.exe`.
+- **Fakes on Windows:** `helpers.fake_hardware` writes `<name>.cmd` wrappers into a temp bin folder. Each wrapper runs `"<python>" "<fakebin>\<name>" %*`. The helper puts that folder first on PATH. `tool()` checks `shutil.which` first, so PATH alone is how the fakes are found. The fake `gpg` reaches the real one through `REAL_GPG`, which points at Gpg4win's `gpg.exe`.
 - **Skipped on Windows (`skipUnless(sys.platform.startswith("linux"))`):** the bash test classes and the signal tests (no SIGHUP; SIGTERM terminates without handlers).
 - **New `tests/test_osdeps.py`:**
   - `tool()` resolution on both platforms, with the environment and `sys.platform` patched and a fake GnuPG folder in a temp dir;
