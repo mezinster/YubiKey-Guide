@@ -6,7 +6,9 @@ which owns all widgets and dialogs.
 
 import queue
 import signal
+import sys
 import threading
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -503,6 +505,16 @@ class App:
             self.session.cleanup()
         self.root.destroy()
 
+    def report_error(self, kind, value, tb):
+        """Tk callback errors: the windowed executable has no console, so log them and show a dialog."""
+        if sys.stderr is not None:
+            traceback.print_exception(kind, value, tb)
+        try:
+            self.log(f"error: {kind.__name__}: {value}")
+            messagebox.showerror(TITLE, f"Unexpected error: {kind.__name__}: {value}", parent=self.root)
+        except tk.TclError:  # the window is already gone
+            pass
+
     def request_terminate(self, signum, frame):
         """SIGTERM/SIGHUP/SIGBREAK handler: only sets a flag, which poll() acts on inside the Tk loop."""
         self.terminate_requested = True
@@ -520,6 +532,7 @@ class App:
 def main() -> int:
     root = tk.Tk()
     app = App(root)
+    root.report_callback_exception = app.report_error
     for sig in TERMINATION_SIGNALS:
         signal.signal(sig, app.request_terminate)
     root.mainloop()

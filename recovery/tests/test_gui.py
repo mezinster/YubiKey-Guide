@@ -145,6 +145,20 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn(f"{update_stubs_command()} --import <public key file> --remove-serial <old serial> --cards 2",
                       summary)
 
+    def test_callback_errors_are_logged_and_shown(self):
+        import io
+        from contextlib import redirect_stderr
+        app = self.app_with_pins()
+        try:
+            raise ValueError("boom")
+        except ValueError as err:
+            error = err
+        with mock.patch("ykrecover.gui.messagebox.showerror") as shown, redirect_stderr(io.StringIO()) as err:
+            app.report_error(ValueError, error, error.__traceback__)
+        self.assertIn("ValueError: boom", shown.call_args.args[1])
+        self.assertIn("error: ValueError: boom", app.logbox.get("1.0", "end"))
+        self.assertIn("Traceback", err.getvalue())
+
     def test_close_shows_pins_never_shown(self):
         app = self.app_with_pins()
         with mock.patch("ykrecover.gui.messagebox.showinfo") as shown:

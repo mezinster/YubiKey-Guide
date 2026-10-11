@@ -13,8 +13,26 @@ def run_ykman(args: list) -> int:
     return ykman_main()
 
 
+CONSOLE_ONLY = "use ykrecover.exe for the command line"
+
+
+def console_only_message() -> None:
+    """ykrecover-gui.exe has no console: say so in a dialog instead of printing to nowhere."""
+    import tkinter as tk
+    from tkinter import messagebox
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        messagebox.showerror("YubiKey recovery", CONSOLE_ONLY, parent=root)
+    finally:
+        root.destroy()
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args[:1] in (["--cli"], ["--ykman"]) and getattr(sys, "frozen", False) and sys.stdout is None:
+        console_only_message()
+        return 1
     if args[:1] == ["--ykman"]:
         return run_ykman(args[1:])
     from . import osdeps
