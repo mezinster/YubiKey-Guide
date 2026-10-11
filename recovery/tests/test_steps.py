@@ -109,7 +109,10 @@ class CardTests(unittest.TestCase):
         steps = card.card_steps(2, FP, self.TARGETS, settings)
         text = format_plan(steps)
         self.assertIn("ykman --device <SERIAL2> openpgp reset -f", text)
-        self.assertIn("set-retries 3 3 3 -f -a <ADMIN_PIN>", text)
+        self.assertIn("set-retries 3 3 3 -f -a <DEFAULT_ADMIN_PIN>", text)
+        argvs = [" ".join(s.argv) for s in steps]
+        first_pin = next(i for i, a in enumerate(argvs) if "--change-pin" in a)
+        self.assertLess(next(i for i, a in enumerate(argvs) if "set-retries" in a), first_pin)
         self.assertIn("set-touch sig cached -f -a <ADMIN_PIN>", text)
         self.assertIn("set-touch aut off -f -a <ADMIN_PIN>", text)
         holder = next(s for s in steps if "--edit-card" in s.argv)

@@ -794,7 +794,10 @@ class CardTests(unittest.TestCase):
         steps = card.card_steps(2, FP, self.TARGETS, settings)
         text = format_plan(steps)
         self.assertIn("ykman --device <SERIAL2> openpgp reset -f", text)
-        self.assertIn("set-retries 3 3 3 -f -a <ADMIN_PIN>", text)
+        self.assertIn("set-retries 3 3 3 -f -a <DEFAULT_ADMIN_PIN>", text)
+        argvs = [" ".join(s.argv) for s in steps]
+        first_pin = next(i for i, a in enumerate(argvs) if "--change-pin" in a)
+        self.assertLess(next(i for i, a in enumerate(argvs) if "set-retries" in a), first_pin)
         self.assertIn("set-touch sig cached -f -a <ADMIN_PIN>", text)
         self.assertIn("set-touch aut off -f -a <ADMIN_PIN>", text)
         holder = next(s for s in steps if "--edit-card" in s.argv)
@@ -1026,12 +1029,13 @@ def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings) -
         holder += ["url", "<URL>"]
     steps = [
         kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "reset", "-f")),
+        # Retries first: changing the retry counters may reset the PINs to defaults.
+        kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "access", "set-retries",
+                                     *settings.retries, "-f", "-a", "<DEFAULT_ADMIN_PIN>")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--change-pin"),
                    ("3", "<DEFAULT_ADMIN_PIN>", "<ADMIN_PIN>", "<ADMIN_PIN>", "q")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--change-pin"),
                    ("1", "<DEFAULT_USER_PIN>", "<USER_PIN>", "<USER_PIN>", "q")),
-        kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "access", "set-retries",
-                                     *settings.retries, "-f", "-a", "<ADMIN_PIN>")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-card"), (*holder, "quit")),
     ]
     for usage, slot, _ in SLOTS:
@@ -3434,15 +3438,16 @@ card_steps() { # card_steps INDEX
   if [[ -n $URL ]]; then holder+=(url '<URL>'); fi
   kill_step "$phase" "$h" || return 1
   step "$phase" "$h" '' ykman --device "$serial" openpgp reset -f || return 1
+  # Retries first: changing the retry counters may reset the PINs to defaults.
+  kill_step "$phase" "$h" || return 1
+  step "$phase" "$h" '' ykman --device "$serial" openpgp access set-retries "${RETRY[@]}" -f -a '<DEFAULT_ADMIN_PIN>' ||
+    return 1
   kill_step "$phase" "$h" || return 1
   STEP_STDIN=(3 '<DEFAULT_ADMIN_PIN>' '<ADMIN_PIN>' '<ADMIN_PIN>' q)
   step "$phase" "$h" '' "${CARD_GPG[@]}" --change-pin || return 1
   kill_step "$phase" "$h" || return 1
   STEP_STDIN=(1 '<DEFAULT_USER_PIN>' '<USER_PIN>' '<USER_PIN>' q)
   step "$phase" "$h" '' "${CARD_GPG[@]}" --change-pin || return 1
-  kill_step "$phase" "$h" || return 1
-  step "$phase" "$h" '' ykman --device "$serial" openpgp access set-retries "${RETRY[@]}" -f -a '<ADMIN_PIN>' ||
-    return 1
   kill_step "$phase" "$h" || return 1
   STEP_STDIN=("${holder[@]}" quit)
   step "$phase" "$h" '' "${CARD_GPG[@]}" --edit-card || return 1

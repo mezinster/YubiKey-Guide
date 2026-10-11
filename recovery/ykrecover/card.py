@@ -47,12 +47,13 @@ def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings) -
         holder += ["url", "<URL>"]
     steps = [
         kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "reset", "-f")),
+        # Retries first: changing the retry counters may reset the PINs to defaults.
+        kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "access", "set-retries",
+                                     *settings.retries, "-f", "-a", "<DEFAULT_ADMIN_PIN>")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--change-pin"),
                    ("3", "<DEFAULT_ADMIN_PIN>", "<ADMIN_PIN>", "<ADMIN_PIN>", "q")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--change-pin"),
                    ("1", "<DEFAULT_USER_PIN>", "<USER_PIN>", "<USER_PIN>", "q")),
-        kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "access", "set-retries",
-                                     *settings.retries, "-f", "-a", "<ADMIN_PIN>")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-card"), (*holder, "quit")),
     ]
     for usage, slot, _ in SLOTS:
