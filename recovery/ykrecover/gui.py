@@ -237,7 +237,11 @@ class TkUI:
         return value
 
     def confirm(self, prompt):
-        return bool(self._ask(lambda: messagebox.askyesno(TITLE, prompt, parent=self.app.root)))
+        answer = self._ask(lambda: messagebox.askyesnocancel(TITLE, f"{prompt}\n\nCancel stops the run.",
+                                                             parent=self.app.root))
+        if answer is None:
+            raise Aborted()
+        return answer
 
     def confirm_reset(self, serial):
         typed = self._ask(lambda: simpledialog.askstring(
