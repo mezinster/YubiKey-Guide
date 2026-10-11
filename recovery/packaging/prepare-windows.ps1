@@ -109,7 +109,11 @@ function New-AdminOnlyFolder {
             (New-Object System.Security.Principal.SecurityIdentifier $sid), "FullControl",
             "ContainerInherit,ObjectInherit", "None", "Allow")))
     }
-    [void][System.IO.Directory]::CreateDirectory($path, $acl)
+    if ($PSVersionTable.PSEdition -eq "Core") {   # PowerShell 7 (.NET) moved the overload
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($acl, $path)
+    } else {
+        [void][System.IO.Directory]::CreateDirectory($path, $acl)
+    }
     return $path
 }
 
