@@ -1,4 +1,5 @@
-# Builds dist\ykrecover-windows-x64.zip: ykrecover.exe, ykrecover-gui.exe, README-windows.txt, LICENSE.
+# Builds dist\ykrecover-windows-x64.zip: one folder, ykrecover-windows-x64\, holding ykrecover.exe,
+# ykrecover-gui.exe, the _internal folder they share, README-windows.txt and LICENSE.
 # Run from any folder on Windows, for example from cmd:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File recovery\packaging\build-windows.ps1
 #
@@ -58,8 +59,12 @@ Invoke-Checked { .\.venv\Scripts\python -m pip install --only-binary=pyscard -r 
     "pip install -r requirements-windows.txt"
 Invoke-Checked { .\.venv\Scripts\python -m PyInstaller --noconfirm --clean --distpath dist --workpath build ykrecover.spec } "PyInstaller"
 
-Copy-Item README-windows.txt dist\ -Force
-Copy-Item ..\..\LICENSE dist\LICENSE -Force
-Compress-Archive -Force -DestinationPath dist\ykrecover-windows-x64.zip -Path `
-    dist\ykrecover.exe, dist\ykrecover-gui.exe, dist\README-windows.txt, dist\LICENSE
+$app = "dist\ykrecover-windows-x64"
+foreach ($file in "ykrecover.exe", "ykrecover-gui.exe", "_internal") {
+    if (-not (Test-Path (Join-Path $app $file))) { throw "PyInstaller did not create $app\$file" }
+}
+Copy-Item README-windows.txt $app -Force
+Copy-Item ..\..\LICENSE (Join-Path $app "LICENSE") -Force
+# The folder itself goes into the zip, so extracting it gives one ykrecover-windows-x64 folder.
+Compress-Archive -Force -DestinationPath dist\ykrecover-windows-x64.zip -Path $app
 Write-Host "Built $PSScriptRoot\dist\ykrecover-windows-x64.zip"

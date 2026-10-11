@@ -31,12 +31,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install GnuPG
-        run: sudo apt-get update && sudo apt-get install -y gnupg scdaemon
+      - name: install GnuPG, Tk and a virtual display
+        run: sudo apt-get update && sudo apt-get install -y gnupg scdaemon python3-tk xvfb
 
-      - name: recovery tests (Python and bash)
+      - name: recovery tests (Python, bash and the GUI)
         working-directory: recovery
-        run: python3 -m unittest discover -s tests -t . -v
+        env:
+          YKRECOVER_REQUIRE_GUI: "1"  # fail, rather than skip, when the GUI tests cannot run
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python3 -m unittest discover -s tests -t . -v
 
   windows:
     runs-on: windows-latest
@@ -49,36 +51,14 @@ jobs:
           python-version: "3.12"
 
       - name: install GnuPG
-        # Official GnuPG for Windows, pinned by version and SHA-256 (signature verified against the GnuPG
-        # release key 6DAA6E64A76D2840571B4902528897B826403ADA when the pin was set). The silent installer
-        # hangs on headless runners, so unpack its bin\ folder with the preinstalled 7-Zip instead; GnuPG on
-        # Windows finds its helper programs relative to gpg.exe.
+        # Pinned official GnuPG for Windows, unpacked where Gpg4win installs it (see the script).
         timeout-minutes: 10
-        env:
-          GNUPG_URL: https://gnupg.org/ftp/gcrypt/binary/gnupg-w32-2.5.24_20260923.exe
-          GNUPG_SHA256: EA6F9DEE2CCCD83287432625B8B399173805ADD81D27067FCAF019C0C4DA1AD8
-        run: |
-          $installer = Join-Path $env:RUNNER_TEMP "gnupg-w32.exe"
-          $dest = Join-Path $env:RUNNER_TEMP "gnupg"
-          Write-Host "Downloading $env:GNUPG_URL"
-          Invoke-WebRequest -Uri $env:GNUPG_URL -OutFile $installer
-          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash
-          if ($hash -ne $env:GNUPG_SHA256) { throw "GnuPG installer hash mismatch: $hash" }
-          & "$env:ProgramFiles\7-Zip\7z.exe" x $installer "-o$dest" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "7-Zip could not unpack the GnuPG installer ($LASTEXITCODE)" }
-          Remove-Item "$dest\bin\*.tmp" -ErrorAction SilentlyContinue
-          foreach ($tool in "gpg", "gpgconf", "gpg-connect-agent", "gpg-agent", "scdaemon") {
-            if (-not (Test-Path "$dest\bin\$tool.exe")) { throw "$tool.exe missing from the GnuPG installer" }
-          }
-          & "$dest\bin\gpg.exe" --version | Select-Object -First 2
-          if ($LASTEXITCODE -ne 0) { throw "gpg --version failed" }
-          & "$dest\bin\gpgconf.exe" --list-dirs
-          "$dest\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        run: .github/scripts/install-gnupg-windows.ps1
+
       - name: prepare script (dry run, Windows PowerShell 5.1)
         run: |
-          # Put GnuPG where Gpg4win installs it, so the dry run exercises the "already installed" detection.
-          New-Item -ItemType Directory -Force "$env:ProgramFiles\GnuPG" | Out-Null
-          Copy-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "gnupg\bin") "$env:ProgramFiles\GnuPG\"
+          # GnuPG is under Program Files (see "install GnuPG"), so the dry run exercises the "already
+          # installed" detection.
           $out = powershell -NoProfile -ExecutionPolicy Bypass -File recovery/packaging/prepare-windows.ps1 -WhatIf
           $code = $LASTEXITCODE
           $out
@@ -98,7 +78,7 @@ jobs:
         run: recovery/packaging/build-windows.ps1
 
       - name: smoke test
-        run: python recovery/packaging/smoke_test.py recovery/packaging/dist/ykrecover.exe
+        run: python recovery/packaging/smoke_test.py recovery/packaging/dist/ykrecover-windows-x64/ykrecover.exe
 
       - uses: actions/upload-artifact@v4
         with:

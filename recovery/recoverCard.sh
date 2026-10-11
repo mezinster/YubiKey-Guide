@@ -201,7 +201,11 @@ new_home() { # new_home LABEL VAR; returns 1 on any failure
 
 kill_agents() { GNUPGHOME=$1 gpgconf --kill all >/dev/null 2>&1 || true; }
 
-destroy_home() { kill_agents "$1"; rm -rf -- "$1"; }
+destroy_home() { # an empty path would make gpgconf kill the agent of the user's default home
+  [[ -n $1 ]] || return 0
+  kill_agents "$1"
+  rm -rf -- "$1"
+}
 
 clone_home() { # clone_home SRC LABEL VAR; returns 1 on any failure
   local dst
@@ -885,8 +889,19 @@ run_live() {
 
 # --- update-stubs: the only part that touches the user's own GNUPGHOME
 
+user_gnupg_home() { # user_gnupg_home VAR: the daily keyring as gpgconf reports it (percent-escaped), like Python
+  local listed=""
+  listed=$(gpgconf --list-dirs homedir 2>/dev/null) || listed=""
+  if [[ -n $listed ]]; then
+    listed=${listed//\\/\\\\}
+    printf -v "$1" '%b' "${listed//%/\\x}"
+  else
+    printf -v "$1" '%s' "${GNUPGHOME:-$HOME/.gnupg}"
+  fi
+}
+
 update_stubs() {
-  local import="" cards=1 home=${GNUPGHOME:-$HOME/.gnupg} serial padded f dest i answer t rc=$EXIT_OK
+  local import="" cards=1 home serial padded f dest i answer t rc=$EXIT_OK
   local learned err learn_rc=0
   local -a serials=() stubs=() moved=() left=()
   while (( $# )); do
@@ -906,8 +921,9 @@ update_stubs() {
     [[ $serial =~ ^[0-9]+$ ]] || die "$EXIT_USAGE" "--remove-serial must be all digits: $serial"
   done
   for t in gpg gpg-connect-agent; do command -v "$t" >/dev/null || die "$EXIT_USAGE" "missing tools: $t"; done
+  user_gnupg_home home
   if [[ -n $import ]]; then
-    gpg --batch --import "$import" 2>/dev/null || die "$EXIT_USAGE" "import failed: $import"
+    err=$(gpg --batch --import "$import" 2>&1 >/dev/null) || die "$EXIT_USAGE" "import failed: $err"
   fi
   for serial in "${serials[@]}"; do
     padded=$(printf '%8s' "$serial" | tr ' ' 0)

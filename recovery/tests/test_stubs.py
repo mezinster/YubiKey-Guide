@@ -73,6 +73,14 @@ class StubsTests:
         result = self.run_stubs(["--import", str(public)], "\n")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_import_failure_shows_the_gpg_error(self):
+        bogus = self.home / "not-a-key.asc"
+        bogus.write_text("not a key\n")
+        result = self.run_stubs(["--import", str(bogus)], "\n")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("import failed: gpg: ", result.stderr)
+        self.assertIn("no valid OpenPGP data found", result.stderr)
+
     def test_eof_aborts(self):
         self.assertEqual(self.run_stubs([], "").returncode, 130)
 

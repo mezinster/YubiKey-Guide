@@ -111,7 +111,9 @@ def _fake_bin(test) -> Path:
 
 
 def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> dict:
-    """Env overrides that put fake ykman/gpg card operations first on PATH (see fakebin/ykman)."""
+    """Env overrides that put fake ykman/gpg card operations first on PATH (see fakebin/ykman).
+
+    On Windows the fakes are .cmd shims, which osdeps refuses unless YKRECOVER_TEST_ALLOW_SCRIPTS=1."""
     state = short_tempdir(test, "hw")
     (state / "cards").write_text("".join(f"{s}\n" for s in serials))
     if fail_at:
@@ -123,4 +125,5 @@ def fake_hardware(test, serials: list, fail_at: str = "", list_script=None) -> d
         "FAKE_HW_DIR": str(state),
         "REAL_GPG": REAL_GPG,
         "FAKE_CERTIFY_PASS": PASSPHRASE,
+        "YKRECOVER_TEST_ALLOW_SCRIPTS": "1",  # let osdeps run the .cmd shims on Windows (test-only)
     }

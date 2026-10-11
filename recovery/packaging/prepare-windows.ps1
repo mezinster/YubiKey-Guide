@@ -13,7 +13,8 @@ Run Prepare-Windows.bat (double-click), or:
 Started without administrator rights, the script elevates only the installation step (one UAC prompt) and
 runs -Build afterwards as the normal user. The elevated step never runs a program from a folder that a
 non-administrator can change: Chocolatey is called by its full path, and only Python and GnuPG under
-Program Files are accepted and put on the machine PATH.
+Program Files are accepted and put on the machine PATH. Chocolatey itself is installed from a pinned package
+whose SHA-256 is checked, unpacked into a folder only administrators can change.
 
 -WhatIf only reports what would change and does not need administrator rights.
 A log is written to logs\prepare_<date>.log next to this script.
@@ -29,7 +30,11 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-# Pinned Chocolatey packages (newest releases at least 14 days old on 2026-10-11).
+# Pinned Chocolatey and packages (newest releases at least 14 days old on 2026-10-11). The Chocolatey
+# package's SHA-256 matches the SHA-512 the community repository lists for it.
+$ChocolateyVersion = "2.7.4"
+$ChocolateyUrl = "https://community.chocolatey.org/api/v2/package/chocolatey/$ChocolateyVersion"
+$ChocolateySha256 = "AEC2DBD6CE91B7378EB4A0C21524E748D30332EA856E898404999F77328BD504"
 $PythonPackage = "python313"
 $PythonVersion = "3.13.15"
 $PythonDir = Join-Path $env:ProgramFiles "Python313"   # only administrators can change Program Files
@@ -92,16 +97,37 @@ function Get-FirstLine {
     return @{ Code = $code; Line = $first }
 }
 
+function New-AdminOnlyFolder {
+    # A new folder under ProgramData that only Administrators and SYSTEM can change. The ACL is set when the
+    # folder is created, so a non-administrator never gets a chance to put files into it.
+    $path = Join-Path $env:ProgramData ("ykrecover-{0}" -f [guid]::NewGuid())
+    if (Test-Path $path) { throw "$path already exists" }
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in "S-1-5-32-544", "S-1-5-18") {   # Administrators, SYSTEM
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            (New-Object System.Security.Principal.SecurityIdentifier $sid), "FullControl",
+            "ContainerInherit,ObjectInherit", "None", "Allow")))
+    }
+    if ($PSVersionTable.PSEdition -eq "Core") {   # PowerShell 7 (.NET) moved the overload
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($acl, $path)
+    } else {
+        [void][System.IO.Directory]::CreateDirectory($path, $acl)
+    }
+    return $path
+}
+
 function Install-Chocolatey {
     $choco = Get-ChocoExe
     if ($choco) {
         $version = (Get-FirstLine $choco @("--version")).Line
         Write-Log "Chocolatey $version is installed ($choco)"
         if ([version]($version -replace '[^0-9.].*$', '') -lt [version]"2.0.0") {
-            if ($WhatIf) { Write-Log "Would upgrade Chocolatey to 2.x" }
+            if ($WhatIf) { Write-Log "Would upgrade Chocolatey to $ChocolateyVersion" }
             else {
-                Write-Log "Upgrading Chocolatey to 2.x"
-                if ((Invoke-Native $choco @("upgrade", "chocolatey", "-y", "--no-progress")) -ne 0) {
+                Write-Log "Upgrading Chocolatey to $ChocolateyVersion"
+                $arguments = @("upgrade", "chocolatey", "--version", $ChocolateyVersion, "-y", "--no-progress")
+                if ((Invoke-Native $choco $arguments) -ne 0) {
                     throw "Chocolatey upgrade failed (see $LogPath)"
                 }
             }
@@ -109,13 +135,32 @@ function Install-Chocolatey {
         Repair-ChocolateySource $choco
         return $choco
     }
-    if ($WhatIf) { Write-Log "Would install Chocolatey from https://community.chocolatey.org"; return $null }
-    Write-Log "Installing Chocolatey (official installer from https://community.chocolatey.org/install.ps1)"
-    Set-ExecutionPolicy Bypass -Scope Process -Force
+    if ($WhatIf) {
+        Write-Log "Would install Chocolatey $ChocolateyVersion from $ChocolateyUrl (SHA-256 $ChocolateySha256)"
+        return $null
+    }
+    # Chocolatey's documented offline install: run tools\chocolateyInstall.ps1 from the extracted package.
+    Write-Log "Installing Chocolatey $ChocolateyVersion from $ChocolateyUrl"
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
-    $installer = (New-Object Net.WebClient).DownloadString("https://community.chocolatey.org/install.ps1")
-    # Chocolatey's installer is not written for strict mode: run it in its own scope with strict mode off.
-    & { Set-StrictMode -Off; Invoke-Expression $installer }
+    $work = New-AdminOnlyFolder
+    try {
+        $package = Join-Path $work "chocolatey.$ChocolateyVersion.nupkg"
+        (New-Object Net.WebClient).DownloadFile($ChocolateyUrl, $package)
+        $hash = (Get-FileHash $package -Algorithm SHA256).Hash
+        if ($hash -ne $ChocolateySha256) { throw "Chocolatey package hash mismatch: $hash (expected $ChocolateySha256)" }
+        Write-Log "Chocolatey package verified (SHA-256 $hash)"
+        $extracted = Join-Path $work "package"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($package, $extracted)
+        $installer = Join-Path $extracted "tools\chocolateyInstall.ps1"
+        if (-not (Test-Path $installer)) { throw "tools\chocolateyInstall.ps1 missing from the Chocolatey package" }
+        # Chocolatey's installer is not written for strict mode: run it in its own scope with strict mode off.
+        & { Set-StrictMode -Off; & $installer } | ForEach-Object {
+            Write-Host "  $_"; Add-Content -Path $LogPath -Value "  $_" -Encoding UTF8
+        }
+    } finally {
+        Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    }
     Update-SessionEnvironment
     $choco = Get-ChocoExe
     if (-not $choco) { throw "Chocolatey installation failed (see $LogPath)" }

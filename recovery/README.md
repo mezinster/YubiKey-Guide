@@ -27,8 +27,8 @@ Run the Python tool as a package from the `recovery` folder: `python3 -m ykrecov
 
 1. Install GnuPG: [Gpg4win](https://gpg4win.org), or run `Prepare-Windows.bat` as described below.
 2. Download `ykrecover-windows-x64.zip` from the repository's [Releases](https://github.com/mezinster/YubiKey-Guide/releases) page (or the latest `windows` CI run's artifacts).
-3. Extract the **whole** zip into a folder. `ykrecover-gui.exe` needs `ykrecover.exe` next to it, so don't run it from inside the zip.
-4. Double-click `ykrecover-gui.exe` for the wizard, or run `ykrecover.exe --cli --help` in cmd, PowerShell or Windows Terminal (Git Bash echoes the passphrase).
+3. Extract the **whole** zip. It holds one folder, `ykrecover-windows-x64`, with `ykrecover.exe`, `ykrecover-gui.exe` and the `_internal` folder both need; keep them together, and don't run them from inside the zip.
+4. In that folder, double-click `ykrecover-gui.exe` for the wizard, or run `ykrecover.exe --cli --help` in cmd, PowerShell or Windows Terminal (Git Bash echoes the passphrase).
 
 The executables are not code-signed, so SmartScreen may warn ("More info", then "Run anyway").
 
@@ -38,7 +38,7 @@ You need the repository checked out on the Windows machine.
 
 1. **Prepare the machine**: in File Explorer, open `recovery\packaging` and double-click `Prepare-Windows.bat` (run it normally, *not* "Run as administrator"). It:
    - asks for administrator rights once, only for the installation step;
-   - installs Chocolatey if it is missing;
+   - installs Chocolatey if it is missing (a pinned version, checked against its SHA-256);
    - installs Python 3.13 (into `C:\Program Files\Python313`) and GnuPG through Chocolatey, unless they are already installed under Program Files (an existing Gpg4win is used as is);
    - adds them to the machine PATH and sets `YKRECOVER_PYTHON`;
    - writes a log to `recovery\packaging\logs\`.
@@ -51,7 +51,7 @@ You need the repository checked out on the Windows machine.
    ```
 
    Or do both steps at once with `Prepare-Windows.bat -Build`. The build creates a fresh virtual environment, installs the pinned build tools, and writes `recovery\packaging\dist\ykrecover-windows-x64.zip`.
-3. **Check the build** (optional): `python smoke_test.py dist\ykrecover.exe` compares a dry run with the reference plan and checks the bundled ykman.
+3. **Check the build** (optional): `python smoke_test.py dist\ykrecover-windows-x64\ykrecover.exe` compares a dry run with the reference plan and checks the bundled ykman.
 4. Use the zip as in [Use the prebuilt zip](#use-the-prebuilt-zip), steps 3–4.
 
 Notes:
@@ -64,6 +64,7 @@ Notes:
 
 - Windows has no memory-backed temporary folder, so key copies touch the disk while the tool runs, and the tool warns about it. To avoid that, choose a RAM disk or an encrypted volume as the work folder (`--workdir DIR`, or "Work folder" in the wizard).
 - If a run ends abnormally (console window closed, process ended in Task Manager, a crash), its temporary folders (`ykr-*` in the work folder) can stay behind, not overwritten. The next run warns about any older than 10 minutes; delete them securely.
+- The packaged tool always runs its bundled ykman, and takes GnuPG from the Gpg4win folder under Program Files (`GnuPG\bin`) before a `gpg.exe` on PATH. Only `.exe` files are run: a `ykman.cmd` or `gpg.bat` on PATH is ignored, so a planted script cannot receive the PINs.
 - Run the [hardware checklist](#hardware-checklist) on Windows too: card access works differently there.
 
 ## Modes

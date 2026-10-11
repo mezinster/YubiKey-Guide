@@ -6,8 +6,9 @@ https://github.com/mezinster/YubiKey-Guide/blob/master/recovery/README.md
 
 1. Install GnuPG: either Gpg4win from https://gpg4win.org, or run Prepare-Windows.bat from the
    repository's recovery\packaging folder (installs Chocolatey, GnuPG and Python 3.13 and sets PATH).
-2. Unzip this archive anywhere.
-3. Double-click ykrecover-gui.exe for the step-by-step wizard, or run
+2. Unzip this archive anywhere. It holds one folder, ykrecover-windows-x64; keep its contents together
+   (ykrecover.exe and ykrecover-gui.exe both need the _internal folder next to them).
+3. In that folder, double-click ykrecover-gui.exe for the step-by-step wizard, or run
    ykrecover.exe --cli --help
    in a terminal for the command-line version. Use cmd, PowerShell or Windows Terminal: Git Bash
    (mintty) shows the passphrase as you type it, because its input is not a real console.

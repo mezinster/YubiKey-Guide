@@ -10,13 +10,15 @@ import sys
 import threading
 import traceback
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import EXIT_CARD, EXIT_INTERRUPT, TERMINATION_SIGNALS, Aborted, RecoveryError, osdeps
 from . import backup as backup_mod
 from .card import TOUCH_POLICIES
-from .migrate import Options, Session, update_stubs_command
+from .migrate import (Options, Session, update_stubs_command, update_stubs_where, valid_metadata,
+                      valid_retries)
 
 TITLE = "YubiKey recovery"
 METADATA_WARNING = ("OpenPGP card metadata (name, login, URL) can be read by anyone holding the card. "
@@ -25,6 +27,185 @@ MODE_HELP = ("clone: write the backed-up subkeys as they are.\n"
              "renew: extend their expiry first (needs the Certify key).\n"
              "rotate: create new subkeys (needs the Certify key). Choose this if the old cards may be "
              "lost or compromised.")
+# Window size in units of the default font, so it grows with Windows display scaling (125%, 150%).
+WINDOW_EMS = (84, 32)  # width in "0" widths, height in line heights
+# Core errors name CLI flags; the wizard names its fields instead. Checked in order.
+GUI_WORDS = (
+    ("cannot create the --out folder", "cannot create the output folder"),
+    ("--algo and --revoke-old need --mode rotate", "a new algorithm and revoking old subkeys need mode rotate"),
+    ("--out", "the output folder"), ("--workdir", "the work folder"), ("--mode ", "mode "),
+    ("--cards", "the number of cards"), ("--name", "the cardholder name"), ("--login", "the login"),
+    ("--url", "the public key URL"),
+)
+# Short names for the card table; the log keeps the full commands. Matched as whole words, in order.
+STEP_LABELS = (
+    ("openpgp reset", "reset OpenPGP"), ("set-retries", "set PIN retries"), ("--change-pin", "change PIN"),
+    ("--edit-card", "set cardholder data"), ("--edit-key", "move subkey to card"), ("set-touch", "set touch policy"),
+    ("--card-status", "check card keys"), ("--detach-sign", "test signing"), ("--verify", "verify signature"),
+    ("--encrypt", "test encryption"), ("--decrypt", "test decryption"), ("--export", "export public key"),
+    ("--import", "import public key"), ("--kill", "restart GnuPG"),
+)
+
+
+def gui_wording(message) -> str:
+    """A core error message with the CLI flags replaced by the wizard's field names."""
+    text = str(message)
+    for flag, words in GUI_WORDS:
+        text = text.replace(flag, words)
+    return text[:1].upper() + text[1:]
+
+
+def short_status(status: str) -> str:
+    """'<serial>: <command>' as '<serial>: <step name>'; other statuses stay as they are."""
+    serial, sep, command = status.partition(": ")
+    if not sep:
+        return status
+    padded = f" {command} "
+    for needle, label in STEP_LABELS:
+        if f" {needle} " in padded:
+            return f"{serial}: {label}"
+    return f"{serial}: {' '.join(command.split()[:2])}"
+
+
+def scrolled_text(parent, height, wrap="word", width=1):
+    """A Text with scrollbars (horizontal too when lines do not wrap) in its own frame: (frame, text).
+
+    width=1 lets the layout, not the 80-character default, decide the width.
+    """
+    frame = ttk.Frame(parent)
+    text = tk.Text(frame, width=width, height=height, wrap=wrap)
+    yscroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+    text.configure(yscrollcommand=yscroll.set)
+    text.grid(row=0, column=0, sticky="nsew")
+    yscroll.grid(row=0, column=1, sticky="ns")
+    if wrap == "none":
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
+        text.configure(xscrollcommand=xscroll.set)
+        xscroll.grid(row=1, column=0, sticky="ew")
+    frame.rowconfigure(0, weight=1)
+    frame.columnconfigure(0, weight=1)
+    # Wrapped lines start under the text, not at the margin.
+    indent = tkfont.Font(root=text, font=text.cget("font")).measure("0") * 4
+    text.tag_configure("hang", lmargin2=indent)
+    return frame, text
+
+
+def set_text(text, content):
+    text.configure(state="normal")
+    text.delete("1.0", "end")
+    text.insert("end", content, ("hang",))
+    text.configure(state="disabled")
+
+
+class Modal(tk.Toplevel):
+    """A modal dialog: a wrapped header, a body (self.content) and a row of buttons.
+
+    Build it, then run() shows it, waits and returns the value of the button pressed. Tests build
+    without running it to measure the layout.
+    """
+
+    def __init__(self, parent, title, header, buttons, closable=True, close_value=None):
+        super().__init__(parent)
+        self.withdraw()
+        self.title(title)
+        self.transient(parent)
+        self.parent = parent
+        self.value = close_value
+        self.em = tkfont.nametofont("TkDefaultFont", root=self).measure("0")
+        self.max_width = int(self.winfo_screenwidth() * 0.8)  # for the header and the body
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+        self.bar = ttk.Frame(outer)
+        self.bar.pack(side="bottom", fill="x", pady=(12, 0))  # first, so a short window never hides it
+        for label, value in reversed(buttons):
+            ttk.Button(self.bar, text=label, command=lambda v=value: self.done(v)).pack(side="right", padx=(4, 0))
+        ttk.Label(outer, text=header, wraplength=min(self.em * 60, self.max_width), justify="left").pack(
+            anchor="w", pady=(0, 8))
+        self.content = ttk.Frame(outer)
+        self.content.pack(fill="both", expand=True)
+        self.protocol("WM_DELETE_WINDOW", (lambda: self.done(close_value)) if closable else self.bell)
+        self.bind("<Escape>", lambda event: self.done(close_value) if closable else None)
+
+    def lines_that_fit(self, wanted, font, share=0.45):
+        """Text lines to request: at most wanted, and no more than share of the screen height."""
+        line = tkfont.Font(root=self, font=font).metrics("linespace")
+        return max(3, min(wanted, int(self.winfo_screenheight() * share / line)))
+
+    def done(self, value):
+        self.value = value
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def run(self):
+        self.update_idletasks()
+        width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() - width) // 2
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() - height) // 3
+        x = max(0, min(x, self.winfo_screenwidth() - width))
+        y = max(0, min(y, self.winfo_screenheight() - height))
+        self.geometry(f"+{x}+{y}")
+        self.deiconify()
+        self.wait_visibility()
+        self.grab_set()
+        self.focus_set()
+        self.wait_window()
+        return self.value
+
+
+class TextDialog(Modal):
+    """Read-only, scrollable text (error output, PINs) with a Copy button."""
+
+    def __init__(self, parent, title, header, content, buttons, wrap="word", lines=12, closable=True,
+                 close_value=None):
+        super().__init__(parent, title, header, buttons, closable, close_value)
+        self.text_content = content
+        frame, self.text = scrolled_text(self.content, 1, wrap)
+        font = self.text.cget("font")
+        longest = max((len(line) for line in content.splitlines()), default=0)
+        chars = max(40, min(longest + 2, 72)) if wrap == "none" else 64
+        fixed = tkfont.Font(root=self, font=font).measure("0")
+        chars = min(chars, self.max_width // fixed)
+        self.text.configure(width=chars, height=self.lines_that_fit(lines, font))
+        set_text(self.text, content)
+        frame.pack(fill="both", expand=True)
+        ttk.Button(self.bar, text="Copy", command=self.copy).pack(side="left")
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.text_content)
+
+
+class ChoiceDialog(Modal):
+    """Pick one line from a list; run() returns its index, or None when cancelled."""
+
+    def __init__(self, parent, title, header, items):
+        super().__init__(parent, title, header, (("OK", "ok"), ("Cancel", None)))
+        frame = ttk.Frame(self.content)
+        frame.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(frame, width=min(60, self.max_width // self.em),
+                                  height=min(max(len(items), 3), 8), exportselection=False)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.listbox.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.listbox.xview)
+        self.listbox.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        for item in items:
+            self.listbox.insert("end", item)
+        self.listbox.selection_set(0)
+        self.listbox.bind("<Double-Button-1>", lambda event: self.done("ok"))
+
+    def done(self, value):
+        chosen = self.listbox.curselection() if value == "ok" else ()
+        if value == "ok" and not chosen:
+            self.bell()
+            return
+        super().done(chosen[0] if chosen else None)
 
 
 class _Collector:
@@ -73,7 +254,11 @@ class TkUI:
         return value
 
     def confirm(self, prompt):
-        return bool(self._ask(lambda: messagebox.askyesno(TITLE, prompt, parent=self.app.root)))
+        answer = self._ask(lambda: messagebox.askyesnocancel(TITLE, f"{prompt}\n\nCancel stops the run.",
+                                                             parent=self.app.root))
+        if answer is None:
+            raise Aborted()
+        return answer
 
     def confirm_reset(self, serial):
         typed = self._ask(lambda: simpledialog.askstring(
@@ -88,13 +273,14 @@ class TkUI:
             raise Aborted()
 
     def card_failed(self, index, serial, step, error):
-        answer = self._ask(lambda: messagebox.askyesnocancel(
-            "Card failed", f"Card {serial} failed at:\n{step}\n\n{error}\n\nYes: retry   No: skip   Cancel: abort",
-            parent=self.app.root))
-        return {True: "retry", False: "skip", None: "abort"}[answer]
+        return self._ask(lambda: self.app.failure_dialog(serial, step, error).run())
 
     def progress(self, index, status):
-        self.app.post(lambda: self.app.set_card(index, status))
+        def task():
+            self.app.log(f"card {index}: {status}")
+            self.app.set_card(index, short_status(status))
+
+        self.app.post(task)
 
     def show_pins(self, pins):
         self.app.post(lambda: self.app.keep_pins(pins))
@@ -104,7 +290,19 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title(TITLE)
-        root.minsize(760, 560)
+        font = tkfont.nametofont("TkDefaultFont", root=root)
+        self.em = font.measure("0")
+        width = min(self.em * WINDOW_EMS[0], root.winfo_screenwidth() - 40)
+        height = min(font.metrics("linespace") * WINDOW_EMS[1], root.winfo_screenheight() - 80)
+        root.minsize(width, height)
+        root.geometry(f"{width}x{height}")
+        root.option_add("*Dialog.msg.wrapLength", "6i")  # Tk's own message boxes wrap long lines
+        # Treeview rows have a fixed pixel height that does not follow display scaling.
+        ttk.Style(root).configure("Treeview", rowheight=font.metrics("linespace") + 4)
+        self.heading_font = font.copy()
+        self.heading_font.configure(size=14, weight="bold")
+        self.wrap = width - 32  # wraplength of page text: the body width less its padding
+        self.wrapped = []
         self.alert = lambda text: messagebox.showerror(TITLE, text, parent=self.root)
         self.tasks = queue.Queue()
         self.ui = TkUI(self)
@@ -125,10 +323,11 @@ class App:
             "dec": tk.StringVar(value="on"), "aut": tk.StringVar(value="on"), "name": tk.StringVar(),
             "login": tk.StringVar(), "url": tk.StringVar(), "out": tk.StringVar(),
         }
+        nav = ttk.Frame(root, padding=(12, 0, 12, 12))
+        nav.pack(side="bottom", fill="x")  # first, so a short window clips the page, never Back/Next
         self.body = ttk.Frame(root, padding=12)
         self.body.pack(fill="both", expand=True)
-        nav = ttk.Frame(root, padding=(12, 0, 12, 12))
-        nav.pack(fill="x")
+        self.body.bind("<Configure>", self.rewrap)
         self.back_btn = ttk.Button(nav, text="Back", command=lambda: self.show(self.page - 1))
         self.back_btn.pack(side="left")
         self.next_btn = ttk.Button(nav, text="Next", command=self.next)
@@ -188,19 +387,44 @@ class App:
         for child in self.body.winfo_children():
             child.destroy()
         self.page = page
-        self.back_btn.state(["!disabled"] if 0 < page < 6 else ["disabled"])
+        self.wrapped = []
+        before_start = page == 6 and self.worker is None
+        self.back_btn.state(["!disabled"] if 0 < page < 6 or before_start else ["disabled"])
         self.next_btn.state(["!disabled"] if page < 6 else ["disabled"])
         self.pages[page][0]()
+        self.fit_page()
+
+    def fit_page(self):
+        # The font-based minimum fits every page on the fonts we test; grow it if this system's fonts need more.
+        root = self.root
+        root.update_idletasks()
+        min_width, min_height = root.minsize()
+        width = min(max(min_width, root.winfo_reqwidth()), root.winfo_screenwidth() - 40)
+        height = min(max(min_height, root.winfo_reqheight()), root.winfo_screenheight() - 80)
+        if (width, height) != (min_width, min_height):
+            root.minsize(width, height)
 
     def next(self):
         leave = self.pages[self.page][1]
         if leave is None or leave():
             self.show(self.page + 1)
 
+    def rewrap(self, event):
+        self.wrap = max(event.width - 32, self.em * 20)  # padding 12 on each side, and some slack
+        for label in self.wrapped:
+            if label.winfo_exists():
+                label.configure(wraplength=self.wrap)
+
+    def wrapped_label(self, parent=None, **options):
+        """A label whose text wraps at the current page width."""
+        label = ttk.Label(parent or self.body, wraplength=self.wrap, justify="left", **options)
+        self.wrapped.append(label)
+        return label
+
     def heading(self, text, detail=""):
-        ttk.Label(self.body, text=text, font=("TkDefaultFont", 14, "bold")).pack(anchor="w")
+        ttk.Label(self.body, text=text, font=self.heading_font).pack(anchor="w")
         if detail:
-            ttk.Label(self.body, text=detail, wraplength=700, justify="left").pack(anchor="w", pady=(4, 12))
+            self.wrapped_label(text=detail).pack(anchor="w", fill="x", pady=(4, 12))
 
     def row(self, label, make):
         frame = ttk.Frame(self.body)
@@ -211,14 +435,14 @@ class App:
         return widget
 
     def readonly_text(self, content, height):
-        text = tk.Text(self.body, height=height, wrap="none")
-        text.insert("end", content)
-        text.config(state="disabled")
-        text.pack(fill="both", expand=True)
+        frame, text = scrolled_text(self.body, height)
+        set_text(text, content)
+        frame.pack(fill="both", expand=True)
+        return text
 
     def log(self, text):
         if self.logbox is not None and self.logbox.winfo_exists():
-            self.logbox.insert("end", text.rstrip("\n") + "\n")
+            self.logbox.insert("end", text.rstrip("\n") + "\n", ("hang",))
             self.logbox.see("end")
 
     def set_card(self, index, status):
@@ -227,6 +451,21 @@ class App:
 
     def keep_pins(self, pins):
         self.pins = list(pins)
+
+    def failure_dialog(self, serial, step, error):
+        """Retry, skip or abort a failed card; shows only the error output under a one-line header.
+
+        Closing the window aborts, as Cancel did in the message box this replaces."""
+        output = error[len(step):] if error.startswith(step) else error  # StepError text starts with the step
+        return TextDialog(self.root, "Card failed", f"Card {serial} failed at: {step}\n"
+                          "Retry after fixing the problem, skip this card, or abort the run.",
+                          output.strip() or "(no error output)",
+                          (("Retry", "retry"), ("Skip", "skip"), ("Abort", "abort")), close_value="abort")
+
+    def pins_dialog(self, pins):
+        text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in pins)
+        return TextDialog(self.root, "PINs", "Write these PINs down now. They are not shown again.", text,
+                          (("I wrote them down", True),), wrap="none", lines=len(pins), closable=False)
 
     # pages
     def build_preflight(self):
@@ -238,7 +477,7 @@ class App:
         except RecoveryError as err:
             lines = [str(err)]
             self.next_btn.state(["disabled"])
-        self.readonly_text("\n".join(lines), 8)
+        self.readonly_text("\n".join(lines), 6)
 
     def build_backup(self):
         self.heading("2. Backup", "Choose the folder holding your backup, for example the mounted encrypted "
@@ -248,8 +487,18 @@ class App:
         ttk.Entry(frame, textvariable=self.v["folder"]).pack(side="left", fill="x", expand=True)
         ttk.Button(frame, text="Browse…", command=self.browse_backup).pack(side="left", padx=4)
         ttk.Button(frame, text="Detect", command=self.refresh_candidates).pack(side="left")
-        self.cand_list = tk.Listbox(self.body, height=6, exportselection=False)
-        self.cand_list.pack(fill="x", pady=8)
+        frame = ttk.Frame(self.body)
+        frame.pack(fill="x", pady=(8, 0))
+        self.cand_list = tk.Listbox(frame, width=1, height=4, exportselection=False)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.cand_list.yview)
+        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.cand_list.xview)
+        self.cand_list.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.cand_list.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        frame.columnconfigure(0, weight=1)
+        self.cand_error = self.wrapped_label()
+        self.cand_error.pack(anchor="w", fill="x", pady=(0, 8))
         self.refresh_candidates()
         self.row("Certify key passphrase", lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
         frame = ttk.Frame(self.body)
@@ -259,8 +508,8 @@ class App:
         ttk.Button(frame, text="Browse…", command=lambda: self.v["workdir"].set(
             filedialog.askdirectory(parent=self.root, mustexist=True) or self.v["workdir"].get())).pack(
             side="left", padx=4)
-        self.workdir_note = ttk.Label(self.body, wraplength=700, justify="left")
-        self.workdir_note.pack(anchor="w")
+        self.workdir_note = self.wrapped_label()
+        self.workdir_note.pack(anchor="w", fill="x")
         self.update_workdir_note()
 
     def update_workdir_note(self):
@@ -292,6 +541,7 @@ class App:
 
     def refresh_candidates(self):
         self.cand_list.delete(0, "end")
+        self.cand_error.configure(text="")
         self.candidates = []
         folder = self.v["folder"].get()
         if not folder:
@@ -299,7 +549,7 @@ class App:
         try:
             self.candidates = backup_mod.detect(Path(folder))
         except RecoveryError as err:
-            self.cand_list.insert("end", str(err))
+            self.cand_error.configure(text=gui_wording(err))
             return
         for c in self.candidates:
             self.cand_list.insert("end", f"{c.kind}: {c.path}")
@@ -321,25 +571,27 @@ class App:
             return True  # already loaded and unlocked (the user went Back): keep it
         new = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
         try:
-            new.validate_workdir()
+            new.validate_workdir(apply=False)
         except RecoveryError as err:
-            self.alert(str(err))
+            self.alert(gui_wording(err))
             return False
         if self.session:
             self.session.cleanup()
         self.session = new
+        new.validate_workdir()  # adopted: temporary homes now go to its work folder
+        if workdir is not None:
+            self.warn_leftovers()
         while True:
             try:
                 self.session.load()
                 break
             except backup_mod.AmbiguousKey as err:
-                key = simpledialog.askstring(TITLE, "Several keys found:\n" + "\n".join(b.key_fp for b in err.bundles)
-                                             + "\n\nEnter the fingerprint to use:", parent=self.root)
-                if not key:
+                chosen = self.choose_key(err.bundles)
+                if chosen is None:
                     return False
-                self.session.opts.key = key
+                self.session.opts.key = err.bundles[chosen].key_fp
             except RecoveryError as err:
-                self.alert(str(err))
+                self.alert(gui_wording(err))
                 return False
         if not self.session.unlock(self.v["passphrase"].get()):
             self.failures += 1
@@ -352,9 +604,20 @@ class App:
         self.v["passphrase"].set("")
         return True
 
+    def warn_leftovers(self):
+        """Preflight checked the default work folder; a chosen one may hold leftovers of its own."""
+        warnings = self.session.leftover_warnings()
+        if warnings:
+            TextDialog(self.root, "Work folder", "Earlier runs left temporary folders in the work folder. "
+                       "They may hold key material.", "\n".join(warnings), (("OK", None),), lines=6).run()
+
+    def choose_key(self, bundles):
+        return ChoiceDialog(self.root, TITLE, "This backup holds several keys. Choose the one to write to the cards.",
+                            [f"{b.key_fp}  {', '.join(b.uids)}" for b in bundles]).run()
+
     def build_key(self):
         self.heading("3. Confirm key", "The subkeys marked <- card will be written to every new card.")
-        self.readonly_text(self.session.describe(), 14)
+        self.readonly_text(self.session.describe(), 8)
 
     def build_mode(self):
         self.heading("4. Mode", MODE_HELP)
@@ -378,7 +641,7 @@ class App:
             self.session.validate_bundle()
             return True
         except RecoveryError as err:
-            self.alert(str(err))
+            self.alert(gui_wording(err))
             return False
 
     def build_settings(self):
@@ -388,8 +651,8 @@ class App:
         pins.pack(fill="x", pady=2)
         ttk.Label(pins, text="PINs", width=26).pack(side="left")
         ttk.Radiobutton(pins, text="generate", value="generate", variable=self.v["pins"]).pack(side="left")
-        ttk.Radiobutton(pins, text="enter", value="enter", variable=self.v["pins"]).pack(side="left")
-        ttk.Checkbutton(pins, text="same PINs on every card", variable=self.v["same"]).pack(side="left", padx=12)
+        ttk.Radiobutton(pins, text="enter", value="enter", variable=self.v["pins"]).pack(side="left", padx=(8, 0))
+        self.row("", lambda f: ttk.Checkbutton(f, text="same PINs on every card", variable=self.v["same"]))
         self.row("Retries (user,reset,admin)", lambda f: ttk.Entry(f, textvariable=self.v["retries"]))
         for ref, label in (("sig", "Touch: sign"), ("dec", "Touch: decrypt"), ("aut", "Touch: authenticate")):
             self.row(label, lambda f, ref=ref: ttk.Combobox(f, textvariable=self.v[ref], values=TOUCH_POLICIES,
@@ -401,11 +664,23 @@ class App:
     def leave_settings(self):
         o = self.session.opts
         cards = self.v["cards"].get().strip()
-        o.cards = int(cards) if cards.isdigit() else 0
+        retries = tuple(part.strip() for part in self.v["retries"].get().split(","))
+        name, login, url = (self.v[k].get().strip() for k in ("name", "login", "url"))
+        problems = []
+        if not cards.isdigit() or int(cards) < 1:
+            problems.append("Number of cards must be a whole number, 1 or more.")
+        if not valid_retries(retries):
+            problems.append("Retries must be three numbers from 1 to 99, such as 5,5,5.")
+        for label, value, limit in (("Cardholder name", name, 39), ("Login", login, 254), ("Public key URL", url, 254)):
+            if not valid_metadata(value, limit):
+                problems.append(f"{label} must be at most {limit} plain ASCII characters, without '<'.")
+        if problems:
+            self.alert("\n".join(problems))
+            return False
+        o.cards, o.retries = int(cards), retries
         o.pins, o.same_pins = self.v["pins"].get(), self.v["same"].get()
-        o.retries = tuple(self.v["retries"].get().split(","))
         o.touch = {ref: self.v[ref].get() for ref in ("sig", "dec", "aut")}
-        o.name, o.login, o.url = (self.v[k].get().strip() for k in ("name", "login", "url"))
+        o.name, o.login, o.url = name, login, url
         return True
 
     def build_output(self):
@@ -419,30 +694,42 @@ class App:
 
     def leave_output(self):
         o = self.session.opts
-        o.out = Path(self.v["out"].get()) if self.v["out"].get().strip() else None
+        text = self.v["out"].get().strip()
+        if not text:
+            self.alert("Choose an output folder.")
+            return False
+        o.out = Path(text)
         try:
             self.session.validate_options()
             return True
         except RecoveryError as err:
-            self.alert(str(err))
+            self.alert(gui_wording(err))
             return False
 
     def build_cards(self):
         self.heading("7. Write cards", "Press Start. You will be asked to insert each card and confirm its reset.")
-        self.table = ttk.Treeview(self.body, columns=("status",), height=6)
+        self.start_btn = ttk.Button(self.body, text="Start", command=self.start)
+        self.start_btn.pack(side="bottom", anchor="e")  # before the log, which takes the remaining height
+        frame = ttk.Frame(self.body)
+        frame.pack(fill="x")
+        cards = self.session.opts.cards
+        self.table = ttk.Treeview(frame, columns=("status",), height=min(max(cards, 2), 4))
         self.table.heading("#0", text="Card")
         self.table.heading("status", text="Status")
-        self.table.column("status", width=560)
-        self.table.pack(fill="x")
-        for i in range(1, self.session.opts.cards + 1):
+        self.table.column("#0", width=self.em * 8, stretch=False)
+        self.table.column("status", width=self.em * 20, stretch=True)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=scroll.set)
+        self.table.pack(side="left", fill="x", expand=True)
+        scroll.pack(side="left", fill="y")
+        for i in range(1, cards + 1):
             self.table.insert("", "end", iid=str(i), text=f"card {i}", values=("waiting",))
-        self.logbox = tk.Text(self.body, height=12, wrap="word")
-        self.logbox.pack(fill="both", expand=True, pady=8)
-        self.start_btn = ttk.Button(self.body, text="Start", command=self.start)
-        self.start_btn.pack(anchor="e")
+        frame, self.logbox = scrolled_text(self.body, 6)
+        frame.pack(fill="both", expand=True, pady=8)
 
     def start(self):
         self.start_btn.state(["disabled"])
+        self.back_btn.state(["disabled"])
         self.worker = threading.Thread(target=self.work, daemon=True)
         self.worker.start()
 
@@ -470,24 +757,30 @@ class App:
     def build_summary(self):
         self.heading("8. Summary")
         o = self.session.opts
-        lines = [f"card {r.index}  {r.serial or '-'}  {r.status}  {r.detail}" for r in self.session.results]
-        lines += ["", f"Files are in {o.out}.", "On your daily machine run:",
+        lines = []
+        for r in self.session.results:
+            lines.append(f"card {r.index}  {r.serial or '-'}  {r.status}")
+            if r.detail:
+                lines.append(f"    {r.detail}")
+        # The command stays one line, so it can be copied; the text widget wraps it for display.
+        lines += ["", f"Files are in {o.out}.", "", "On your daily machine run:",
                   f"  {update_stubs_command()} --import <public key file> --remove-serial <old serial> "
                   f"--cards {o.cards}"]
-        self.readonly_text("\n".join(lines), 12)
+        if update_stubs_where():
+            lines.append(update_stubs_where())
         if self.pins:
             self.pin_btn = ttk.Button(self.body, text="Show PINs (once)", command=self.reveal_pins)
-            self.pin_btn.pack(anchor="e", pady=8)
+            self.pin_btn.pack(side="bottom", anchor="e", pady=8)
         else:
             note = "The PINs were shown when card writing finished." if self.pins_shown else "No card was written."
-            ttk.Label(self.body, text=note).pack(anchor="e", pady=8)
+            ttk.Label(self.body, text=note).pack(side="bottom", anchor="e", pady=8)
+        self.summary = self.readonly_text("\n".join(lines), 8)
 
     def reveal_pins(self):
         """Shows the kept PINs once in a modal dialog; nothing happens when there are none."""
         if not self.pins:
             return
-        text = "\n".join(f"Card {s}: Admin PIN {a}   User PIN {u}" for s, a, u in self.pins)
-        messagebox.showinfo("PINs", text + "\n\nWrite them down now. They are not shown again.", parent=self.root)
+        self.pins_dialog(self.pins).run()
         self.pins = []
         self.pins_shown = True
         btn = getattr(self, "pin_btn", None)

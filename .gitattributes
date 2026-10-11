@@ -4,3 +4,6 @@ recovery/tests/golden/** -text
 # Scripts run by bash or as Python shebang scripts must keep LF on Windows checkouts.
 *.sh text eol=lf
 recovery/tests/fakebin/* text eol=lf
+# cmd.exe misparses labels and goto in batch files with LF endings: always check them out with CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
