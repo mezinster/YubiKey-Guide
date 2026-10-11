@@ -1987,6 +1987,8 @@ Run: `chmod +x recovery/tests/fakebin/*`
 
 ```python
 import json
+import os
+import stat
 import unittest
 from pathlib import Path
 
@@ -2102,6 +2104,17 @@ class FakeHardwareTests:
         self.assertIn("copy the new backup before writing cards", result.stderr)
         self.assertTrue((out / f"secret-{info['KEY_ID']}-Certify.key").is_file())
         self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
+
+    def test_outputs_are_owner_only(self):
+        info = fixture_info("ed25519")
+        previous = os.umask(0o022)  # gpg writes these files with the process umask
+        self.addCleanup(os.umask, previous)
+        result, out, _, _ = self.migrate("ed25519", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = list(out.glob("public-*.asc")) + [out / f"ssh-{info['KEY_ID']}.pub"]
+        self.assertEqual(len(files), 2)
+        for f in files:
+            self.assertEqual(stat.S_IMODE(os.stat(f).st_mode) & 0o077, 0, f.name)
 
     def test_rotate_writes_new_subkeys(self):
         info = fixture_info("rsa4096")
