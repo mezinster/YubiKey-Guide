@@ -119,7 +119,9 @@ class Modal(tk.Toplevel):
         self.bar = ttk.Frame(outer)
         self.bar.pack(side="bottom", fill="x", pady=(12, 0))  # first, so a short window never hides it
         for label, value in reversed(buttons):
-            ttk.Button(self.bar, text=label, command=lambda v=value: self.done(v)).pack(side="right", padx=(4, 0))
+            button = ttk.Button(self.bar, text=label, command=lambda v=value: self.done(v))
+            button.bind("<Return>", lambda event, b=button: b.invoke())  # ttk buttons only answer Space
+            button.pack(side="right", padx=(4, 0))
         ttk.Label(outer, text=header, wraplength=min(self.em * 60, self.max_width), justify="left").pack(
             anchor="w", pady=(0, 8))
         self.content = ttk.Frame(outer)
@@ -217,7 +219,7 @@ class ChoiceDialog(Modal):
         self.listbox.activate(0)
         self.focus_widget = self.listbox  # arrow keys move the selection, Return chooses
         self.listbox.bind("<Double-Button-1>", lambda event: self.done("ok"))
-        self.bind("<Return>", lambda event: self.done("ok"))
+        self.listbox.bind("<Return>", lambda event: self.done("ok"))  # not the window: Return on Cancel cancels
 
     def done(self, value):
         chosen = self.listbox.curselection() if value == "ok" else ()

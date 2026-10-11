@@ -656,6 +656,26 @@ class GuiBehaviourTests(unittest.TestCase):
         self.assertEqual(dialog.run(), 0)  # the first row is chosen without touching the list
         self.assertEqual(seen, [True, True])
 
+    def test_return_on_a_focused_button_presses_that_button(self):
+        from ykrecover.gui import ChoiceDialog
+        app = self.app()
+        app.root.update()
+        seen = []
+        for label, expected in (("Cancel", None), ("OK", 0)):
+            with self.subTest(label):
+                dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second"])
+                button = next(b for b in dialog.bar.winfo_children() if b.cget("text") == label)
+
+                def press(dialog):
+                    button.focus_force()  # as after Tab; forced, since there may be no window manager
+                    dialog.update()
+                    button.event_generate("<Return>")
+                    seen.append(dialog.winfo_exists())  # closed by the key, not by the helper's timeout
+
+                when_dialog_up(app.root, press)
+                self.assertEqual(dialog.run(), expected)
+        self.assertEqual(seen, [0, 0])
+
     def test_settings_are_validated_on_their_page(self):
         app = self.app()
         app.show(4)
