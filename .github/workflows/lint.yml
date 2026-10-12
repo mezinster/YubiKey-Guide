@@ -36,6 +36,8 @@ jobs:
           pip install -r site/requirements.txt
           python3 site/build.py
           mkdocs build --strict -f site/mkdocs.yml
+          mkdocs build --strict -f site/mkdocs.ru.yml
+          python3 site/check_ru.py
 
   recovery:
     runs-on: ubuntu-latest

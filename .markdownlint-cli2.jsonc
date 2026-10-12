@@ -8,5 +8,5 @@
     "MD041": false, // README opens with prose, no H1
     "MD028": false  // adjacent GitHub alert blocks ([!NOTE], [!TIP], ...)
   },
-  "globs": ["README.md", "SECENV.md", "piv/README.md", "recovery/README.md", "site/home.md"]
+  "globs": ["README.md", "SECENV.md", "piv/README.md", "recovery/README.md", "site/home.md", "site/ru/*.md"]
 }
