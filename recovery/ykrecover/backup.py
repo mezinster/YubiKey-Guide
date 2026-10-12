@@ -157,7 +157,7 @@ def looks_like_key_file(path: Path) -> bool:
 
 
 def walk(folder: Path) -> tuple:
-    """GnuPG 2.x homes and key files under folder (depth 3, sorted by byte order, hidden names skipped)."""
+    """GnuPG 2.x homes and key files under folder (depth 3, byte order, hidden names and random_seed skipped)."""
     homes, files = [], []
 
     def visit(current: Path, depth: int):
@@ -169,8 +169,8 @@ def walk(folder: Path) -> tuple:
         except OSError:
             return
         for entry in entries:
-            if entry.name.startswith(".") or entry.is_symlink():
-                continue
+            if entry.name.startswith(".") or entry.name == "random_seed" or entry.is_symlink():
+                continue  # random_seed is random bytes that can pass the packet-tag sniff
             if entry.is_dir():
                 if entry.name != "private-keys-v1.d" and depth < MAX_DEPTH:
                     visit(entry, depth + 1)

@@ -399,6 +399,12 @@ class WalkTests(unittest.TestCase):
         self.assertEqual(homes, [])
         self.assertEqual([p.relative_to(root).as_posix() for p in files], ["a/b/c/three.asc", "a/one.asc", "top.asc"])
 
+    def test_walk_skips_random_seed(self):
+        root = short_tempdir(self, "seed")
+        (root / "random_seed").write_bytes(bytes([0x95, 0x01, 0x00]) + b"\x00" * 597)  # passes the tag sniff
+        (root / "key.asc").write_bytes(b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n")
+        self.assertEqual(backup.walk(root), ([], [root / "key.asc"]))
+
     def test_gnupg2_home_is_a_candidate_and_its_rings_are_not_key_files(self):
         homes, files = backup.walk(FIXTURES / "ed25519" / "gnupghome")
         self.assertEqual([h.kind for h in homes], ["gnupghome"])
