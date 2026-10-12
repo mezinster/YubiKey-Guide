@@ -560,10 +560,26 @@ class GuiLayoutTests(unittest.TestCase):
         from tkinter import font as tkfont
         fonts = {name: tkfont.nametofont(name, root=app.root).metrics("linespace")
                  for name in ("TkDefaultFont", "TkFixedFont")}
-        rows = [f"{child.winfo_class()} {child.winfo_reqwidth()}x{child.winfo_reqheight()}"
+        rows = [f"{child.winfo_name()} ({child.winfo_class()}) {child.winfo_reqwidth()}x{child.winfo_reqheight()}"
                 for child in app.body.winfo_children()]
-        return f"linespace {fonts}; body {app.body.winfo_reqheight()}, nav {app.next_btn.master.winfo_reqheight()}: " \
-            + ", ".join(rows)
+        return (f"linespace {fonts}; body {app.body.winfo_reqheight()}, nav {app.next_btn.master.winfo_reqheight()}:"
+                "\n  " + "\n  ".join(rows))
+
+    def test_report_box_adds_about_one_line_to_the_backup_page(self):
+        # A scrolled text asks for at least its scrollbar's minimum height (about 50 px on Windows at 133%), whatever
+        # its line count; the report box must not, or the backup page outgrows the minimum window.
+        for scaling in SCALINGS:
+            root, app = self.app(scaling)
+            app.show(1)
+            root.update_idletasks()
+            holder = app.body.nametowidget("report")
+            with_report = app.body.winfo_reqheight()
+            holder.pack_forget()
+            root.update_idletasks()
+            with self.subTest(scaling=round(scaling, 2)):
+                self.assertEqual(holder.winfo_reqheight(), app.report_height())
+                self.assertLessEqual(with_report - app.body.winfo_reqheight(), app.report_height(), self.layout(app))
+                self.assertGreater(app.report_box.winfo_reqheight(), 0)
 
     def texts(self, widget):
         for child in widget.winfo_children():
