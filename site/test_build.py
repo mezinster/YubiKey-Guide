@@ -1,7 +1,9 @@
+import io
 import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -213,6 +215,86 @@ class TocSidebarTests(unittest.TestCase):
                 build._outside_code((out / page).read_text(encoding="utf-8"),
                                     lambda part: h1.extend(re.findall(r"(?m)^# .*", part)) or part)
                 self.assertEqual(h1, [], page)  # shell comments in code blocks do not count
+
+
+class RussianTests(unittest.TestCase):
+    def translation(self, ru_dir, name, source, body, current=True):
+        digest = build.blob_hash(build.ROOT / source) if current else "0" * 40
+        (ru_dir / name).write_text(f"---\nsource: {source}\nsource_hash: {digest}\n---\n\n{body}",
+                                   encoding="utf-8")
+
+    def test_blob_hash_matches_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f.txt"
+            path.write_bytes(b"hello\n")
+            self.assertEqual(build.blob_hash(path), "ce013625030ba8dba906f756967f9e9ca394464a")
+
+    def test_current_translation_has_no_banner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ru_dir, out = Path(tmp) / "ru", Path(tmp) / "out"
+            ru_dir.mkdir()
+            self.translation(ru_dir, "recovery.md", "recovery/README.md",
+                             "# Восстановление\n\nСм. [руководство](../README.md#updating-keys).\n\n"
+                             "> [!NOTE]\n> Текст\n\n![схема](media/schema_gpg.png)\n")
+            build.build_ru(out, None, ru_dir)
+            page = (out / "recovery.md").read_text(encoding="utf-8")
+            self.assertNotIn("Перевод устарел", page)
+            self.assertIn("](guide.md#updating-keys)", page)
+            self.assertIn('!!! note "Примечание"', page)
+            self.assertTrue((out / "media" / "schema_gpg.png").is_file())
+            self.assertFalse((out / "download.md").exists())
+
+    def test_outdated_translation_gets_banner_and_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ru_dir, out = Path(tmp) / "ru", Path(tmp) / "out"
+            ru_dir.mkdir()
+            self.translation(ru_dir, "guide.md", "README.md", "# Покупка {#purchase-yubikey}\n\nТекст\n",
+                             current=False)
+            with mock.patch.object(build, "warn") as warn:
+                build.build_ru(out, None, ru_dir)
+            page = (out / "guide.md").read_text(encoding="utf-8")
+            self.assertTrue(page.startswith("---\ntitle: Руководство\n---\n\n!!! warning \"Перевод устарел\""))
+            self.assertIn("(https://mezinster.github.io/YubiKey-Guide/guide/)", page)
+            self.assertIn("## Покупка {#purchase-yubikey}", page)
+            warn.assert_called_once_with("ru/guide.md is out of date with README.md", "site/ru/guide.md")
+
+    def test_banner_goes_after_the_first_h1(self):
+        self.assertEqual(build.insert_banner("# Title\n\nBody\n", "BANNER\n"), "# Title\n\nBANNER\n\nBody\n")
+
+    def test_missing_header_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ru_dir = Path(tmp) / "ru"
+            ru_dir.mkdir()
+            (ru_dir / "piv.md").write_text("# PIV\n", encoding="utf-8")
+            with self.assertRaises(build.TranslationError):
+                build.build_ru(Path(tmp) / "out", None, ru_dir)
+
+    def test_wrong_source_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ru_dir = Path(tmp) / "ru"
+            ru_dir.mkdir()
+            self.translation(ru_dir, "piv.md", "SECENV.md", "# PIV\n")
+            with self.assertRaises(build.TranslationError):
+                build.build_ru(Path(tmp) / "out", None, ru_dir)
+
+    def test_russian_download_page(self):
+        strings = dict(build.EN_STRINGS, title="Загрузка", prerelease="предварительный выпуск",
+                       none="Выпуски перечислены на [GitHub]({url}).")
+        page = build.render_download([release("v1", "2026-10-01", pre=True)], strings)
+        self.assertIn("# Загрузка", page)
+        self.assertIn("## v1 (предварительный выпуск)", page)
+        self.assertIn("Выпуски перечислены на [GitHub](https://github.com/mezinster/YubiKey-Guide/releases).",
+                      build.render_download(None, strings))
+
+    def test_english_download_page_is_unchanged(self):
+        page = build.render_download([release("v1", "2026-10-01", pre=True)])
+        self.assertIn("## v1 (pre-release)", page)
+
+    def test_hash_option(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            self.assertEqual(build.main(["--hash", str(build.ROOT / "README.md")]), 0)
+        self.assertEqual(out.getvalue().strip(), build.blob_hash(build.ROOT / "README.md"))
 
 
 if __name__ == "__main__":
