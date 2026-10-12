@@ -1,6 +1,6 @@
 site_name: YubiKey Guide
 site_url: https://mezinster.github.io/YubiKey-Guide/ru/
-site_description: Using a YubiKey with GnuPG for encryption, signing and SSH, and recovering it from a backup.
+site_description: Использование YubiKey с GnuPG для шифрования, подписи и SSH и восстановление ключей из резервной копии.
 repo_url: https://github.com/mezinster/YubiKey-Guide
 repo_name: mezinster/YubiKey-Guide
 edit_uri: ""
@@ -23,12 +23,12 @@ theme:
       scheme: default
       toggle:
         icon: material/brightness-7
-        name: Switch to dark mode
+        name: Включить тёмную тему
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       toggle:
         icon: material/brightness-4
-        name: Switch to light mode
+        name: Включить светлую тему
 
 markdown_extensions:
   - admonition
