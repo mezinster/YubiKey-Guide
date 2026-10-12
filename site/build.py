@@ -22,7 +22,10 @@ PAGES = {  # source, relative to the repo root -> page file in the build folder
     "piv/README.md": "piv.md",
     "recovery/README.md": "recovery.md",
 }
-TITLES = {"README.md": "Guide"}  # pages whose source has no leading H1 to take the title from
+# Pages whose source has several H1 sections. Material's page sidebar lists only the first H1's
+# children, so these get a title and every heading moves down a level.
+TITLES = {"README.md": "Guide", "SECENV.md": "Secure environment", "piv/README.md": "PIV"}
+STRIP_TOC = {"README.md"}  # sources with a hand-written table of contents
 ALERTS = {  # GitHub alert -> Material admonition type and title
     "NOTE": ("note", "Note"),
     "TIP": ("tip", "Tip"),
@@ -152,13 +155,20 @@ def reindent_lists(text: str) -> str:
     return "\n".join(out)
 
 
+def demote_headings(text: str) -> str:
+    """Moves every ATX heading outside fenced code down one level (# -> ##)."""
+    return _outside_code(text, lambda part: re.sub(r"^(#{1,5}) ", r"#\1 ", part, flags=re.M))
+
+
 def adapt(text: str, source: str) -> str:
     def change(part: str) -> str:
         part = LINK.sub(lambda m: f"]({rewrite_link(m['target'], source)}{m['title'] or ''})", part)
         return convert_alerts(part)
 
+    if source in STRIP_TOC:
+        text = strip_toc(text)
     if source in TITLES:
-        text = f"---\ntitle: {TITLES[source]}\n---\n\n" + strip_toc(text)
+        text = f"---\ntitle: {TITLES[source]}\n---\n\n" + demote_headings(text)
     return _outside_code(reindent_lists(text), change)
 
 
