@@ -111,6 +111,8 @@ A backup made with the main guide often holds both the exported key files (`secr
 - GnuPG 2.x home folders;
 - GnuPG 1.x home folders (`secring.gpg`).
 
+A GnuPG 2.1+ home migrated from 1.x that still contains `secring.gpg` shows two candidates: the home itself and the old `secring.gpg` as an export of the same key. Pick one with `--source gnupghome` or `--source export`.
+
 Card stubs and public keys are reported but never used: a stub holds no secret key. Revocation certificate files (`.rev`) are ignored. A key that exists only as stubs or a public key is listed as "not recoverable from this folder".
 
 Before anything else the tool prints a report of every file it found on stderr (plans go to stdout). This is the real output for the `flexible` test fixture; the key ID belongs to a test key:
