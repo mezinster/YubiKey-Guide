@@ -1,6 +1,7 @@
 """Detect backups and load them into a staging home. Sources are only ever read."""
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,15 @@ from .gpg import Home
 KINDS = ("export", "subkeys-only", "gnupghome")
 PUBRINGS = ("pubring.kbx", "pubring.gpg")
 LIST_SECRET = ("gpg", "--batch", "--with-colons", "--with-keygrip", "--fixed-list-mode", "--list-secret-keys")
+HOME_FILES = (*PUBRINGS, "trustdb.gpg")
+KEY_PREFIXES = (b"-----BEGIN PGP PRIVATE KEY BLOCK-----", b"-----BEGIN PGP PUBLIC KEY BLOCK-----")
+KEY_TAGS = (5, 6, 7, 14)  # secret key, public key, secret subkey, public subkey
+MAX_KEY_FILE = 1 << 20
+MAX_DEPTH = 3
+RANK = {"secret": 2, "secret-unprotected": 1}  # anything else supplies no secret
+STATE_WORDS = {"secret": "secret", "secret-unprotected": "secret (no passphrase)", "missing": "missing",
+               "card-stub": "card stub", "public": "public"}
+PACKET = re.compile(r"^:(secret|public)( sub)? key packet:")
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,14 @@ class KeyBundle:
     has_certify_secret: bool
 
 
+@dataclass(frozen=True)
+class Part:
+    main_keyid: str
+    keyid: str
+    role: str  # main | sub
+    state: str  # secret | secret-unprotected | missing | card-stub | public
+
+
 class AmbiguousKey(RecoveryError):
     def __init__(self, bundles):
         listing = "\n".join(f"  {b.key_fp} {', '.join(b.uids)}" for b in bundles)
@@ -48,11 +66,19 @@ class AmbiguousKey(RecoveryError):
         self.bundles = list(bundles)
 
 
+def _is_gnupg2_home(folder: Path) -> bool:
+    return (folder / "private-keys-v1.d").is_dir() and any((folder / n).is_file() for n in PUBRINGS)
+
+
+def _home_candidate(folder: Path) -> Candidate:
+    names = ("private-keys-v1.d", *HOME_FILES)
+    return Candidate("gnupghome", folder, tuple(folder / n for n in names if (folder / n).exists()))
+
+
 def _detect_dir(folder: Path) -> list:
     found = []
-    if (folder / "private-keys-v1.d").is_dir() and any((folder / n).is_file() for n in PUBRINGS):
-        names = ("private-keys-v1.d", *PUBRINGS, "trustdb.gpg")
-        found.append(Candidate("gnupghome", folder, tuple(folder / n for n in names if (folder / n).exists())))
+    if _is_gnupg2_home(folder):
+        found.append(_home_candidate(folder))
     certify = tuple(sorted(folder.glob("secret-*-Certify.key")))
     subkeys = tuple(sorted(folder.glob("secret-*-Subkeys.key")))
     if certify:
@@ -71,6 +97,88 @@ def detect(folder: Path) -> list:
         if sub.name != "private-keys-v1.d":
             found.extend(_detect_dir(sub))
     return found
+
+
+def parse_packets(text: str) -> list:
+    """Key parts from `gpg --list-packets` output; the secret material is never decrypted."""
+    parts, current, main = [], None, ""
+
+    def close():
+        if current and current["keyid"]:
+            state = current["state"] or "missing"
+            parts.append(Part(current["main"], current["keyid"], current["role"], state))
+
+    for line in text.splitlines():
+        if line.startswith(":"):
+            close()
+            match = PACKET.match(line)
+            current = None
+            if match:
+                secret = match.group(1) == "secret"
+                current = {"role": "sub" if match.group(2) else "main", "state": "" if secret else "public",
+                           "keyid": "", "main": main}
+            continue
+        if current is None:
+            continue
+        text_ = line.strip()
+        if "gnu-divert-to-card" in text_:
+            current["state"] = "card-stub"
+        elif current["state"]:
+            pass
+        elif "gnu-dummy" in text_:
+            current["state"] = "missing"
+        elif "S2K" in text_ or (text_.startswith("skey[") and text_.endswith("protected]")):
+            current["state"] = "secret"
+        elif text_.startswith("skey[") and text_.endswith("bits]"):
+            current["state"] = "secret-unprotected"
+        if text_.startswith("keyid:"):
+            current["keyid"] = text_.split()[1]
+            if current["role"] == "main":
+                main = current["keyid"]
+                current["main"] = main
+    close()
+    return parts
+
+
+def looks_like_key_file(path: Path) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_KEY_FILE:
+            return False
+        with path.open("rb") as f:
+            head = f.read(64)
+    except OSError:
+        return False
+    if head.removeprefix(b"\xef\xbb\xbf").lstrip().startswith(KEY_PREFIXES):
+        return True
+    if not head or not head[0] & 0x80:
+        return False
+    tag = head[0] & 0x3F if head[0] & 0x40 else (head[0] >> 2) & 0x0F
+    return tag in KEY_TAGS
+
+
+def walk(folder: Path) -> tuple:
+    """GnuPG 2.x homes and key files under folder (depth 3, sorted by byte order, hidden names skipped)."""
+    homes, files = [], []
+
+    def visit(current: Path, depth: int):
+        home = _is_gnupg2_home(current)
+        if home:
+            homes.append(_home_candidate(current))
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: os.fsencode(p.name))
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name.startswith(".") or entry.is_symlink():
+                continue
+            if entry.is_dir():
+                if entry.name != "private-keys-v1.d" and depth < MAX_DEPTH:
+                    visit(entry, depth + 1)
+            elif not (home and entry.name in HOME_FILES) and looks_like_key_file(entry):
+                files.append(entry)
+
+    visit(folder, 0)
+    return homes, files
 
 
 def choose(candidates, kind=None) -> Candidate:

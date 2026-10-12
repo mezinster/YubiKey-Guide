@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, PASSPHRASE, fixture_info
+from tests.helpers import FIXTURES, PASSPHRASE, fixture_info, short_tempdir
 from ykrecover import EXIT_BACKUP, RecoveryError, backup
 from ykrecover.gpg import Home
 
@@ -311,6 +311,103 @@ class LoadTests(unittest.TestCase):
         self.load("ed25519", "gnupghome")
         after = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in source.rglob("*")}
         self.assertEqual(before, after)
+
+
+LIST_PACKETS = """\
+# off=0 ctb=95 tag=5 hlen=3 plen=966
+:secret key packet:
+\tversion 4, algo 1, created 1600000000, expires 0
+\tpkey[0]: [2048 bits]
+\tpkey[1]: [17 bits]
+\titer+salt S2K, algo: 7, SHA1 protection, hash: 2, salt: 0011223344556677
+\tprotect count: 41943040 (244)
+\tprotect IV:  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+\tskey[2]: [v4 protected]
+\tkeyid: 0123456789ABCDEF
+:user ID packet: "Test <t@example.org>"
+:signature packet: algo 1, keyid 0123456789ABCDEF
+:secret sub key packet:
+\tversion 4, algo 1, created 1600000000, expires 0
+\tgnu-dummy, algo: 0, simple checksum, hash: 0
+\tprotect IV: 
+\tkeyid: AAAA1111BBBB2222
+:secret sub key packet:
+\tversion 4, algo 1, created 1600000400, expires 0
+\tgnu-divert-to-card, algo: 0, simple checksum, hash: 0
+\tkeyid: CCCC3333DDDD4444
+:secret sub key packet:
+\tversion 4, algo 22, created 1600000400, expires 0
+\tskey[3]: [255 bits]
+\tkeyid: EEEE5555FFFF6666
+:public sub key packet:
+\tversion 4, algo 1, created 1600000400, expires 0
+\tkeyid: 1111222233334444
+"""
+
+
+class PacketParseTests(unittest.TestCase):
+    def test_states(self):
+        parts = backup.parse_packets(LIST_PACKETS)
+        self.assertEqual([(p.main_keyid, p.keyid, p.role, p.state) for p in parts], [
+            ("0123456789ABCDEF", "0123456789ABCDEF", "main", "secret"),
+            ("0123456789ABCDEF", "AAAA1111BBBB2222", "sub", "missing"),
+            ("0123456789ABCDEF", "CCCC3333DDDD4444", "sub", "card-stub"),
+            ("0123456789ABCDEF", "EEEE5555FFFF6666", "sub", "secret-unprotected"),
+            ("0123456789ABCDEF", "1111222233334444", "sub", "public"),
+        ])
+
+    def test_no_key_packets(self):
+        self.assertEqual(backup.parse_packets(":signature packet: algo 1, keyid 0123456789ABCDEF\n"), [])
+
+
+class SniffTests(unittest.TestCase):
+    def write(self, name, data: bytes):
+        path = short_tempdir(self, "sniff") / name
+        path.write_bytes(data)
+        return path
+
+    def test_armored_private_and_public(self):
+        self.assertTrue(backup.looks_like_key_file(self.write("a.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n")))
+        self.assertTrue(backup.looks_like_key_file(self.write("b.txt", b"-----BEGIN PGP PUBLIC KEY BLOCK-----\n")))
+
+    def test_bom_and_crlf_armor_is_a_key_file(self):
+        data = b"\xef\xbb\xbf\r\n  -----BEGIN PGP PRIVATE KEY BLOCK-----\r\n\r\n"
+        self.assertTrue(backup.looks_like_key_file(self.write("windows.asc", data)))
+
+    def test_binary_packets(self):
+        self.assertTrue(backup.looks_like_key_file(self.write("new.gpg", bytes([0xC5, 0x10]) + b"\x04" * 16)))
+        self.assertTrue(backup.looks_like_key_file(self.write("old.gpg", bytes([0x95, 0x01, 0x00]))))
+        self.assertTrue(backup.looks_like_key_file(self.write("pub.gpg", bytes([0x99, 0x01, 0x00]))))
+
+    def test_other_files(self):
+        self.assertFalse(backup.looks_like_key_file(self.write("sig.asc", b"-----BEGIN PGP SIGNATURE-----\n")))
+        self.assertFalse(backup.looks_like_key_file(self.write("rev.rev", b"This is a revocation certificate\n")))
+        self.assertFalse(backup.looks_like_key_file(self.write("kbx", b"\x00\x00\x00\x20\x01")))
+        self.assertFalse(backup.looks_like_key_file(self.write("big.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----"
+                                                                           + b"x" * (1 << 20))))
+
+
+class WalkTests(unittest.TestCase):
+    def test_walk_finds_nested_files_and_skips_hidden_and_deep(self):
+        root = short_tempdir(self, "walk")
+        key = b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+        for rel in ("top.asc", "a/one.asc", "a/b/c/three.asc", "a/b/c/d/four.asc", ".hidden/x.asc", "a/notes.txt"):
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(key if rel.endswith(".asc") else b"notes")
+        homes, files = backup.walk(root)
+        self.assertEqual(homes, [])
+        self.assertEqual([p.relative_to(root).as_posix() for p in files], ["a/b/c/three.asc", "a/one.asc", "top.asc"])
+
+    def test_gnupg2_home_is_a_candidate_and_its_rings_are_not_key_files(self):
+        homes, files = backup.walk(FIXTURES / "ed25519" / "gnupghome")
+        self.assertEqual([h.kind for h in homes], ["gnupghome"])
+        self.assertEqual(files, [])
+
+    def test_gnupg1_home_contributes_its_rings_as_key_files(self):
+        homes, files = backup.walk(FIXTURES / "gnupg1")
+        self.assertEqual(homes, [])
+        self.assertEqual([p.name for p in files], ["pubring.gpg", "secring.gpg"])
 
 
 if __name__ == "__main__":
