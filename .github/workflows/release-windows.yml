@@ -52,6 +52,7 @@ jobs:
           gh release upload $env:TAG recovery/packaging/dist/ykrecover-windows-x64.zip --clobber
 
       - name: refresh the docs site download page
+        continue-on-error: true  # the release is complete; a site that cannot rebuild yet must not fail it
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run pages.yml --ref master --repo "${{ github.repository }}"

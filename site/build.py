@@ -70,6 +70,8 @@ def rewrite_link(target: str, source: str) -> str:
     anchor = "#" + anchor if anchor else ""
     if resolved in PAGES:
         return PAGES[resolved] + anchor
+    if posixpath.dirname(source) == "site" and resolved[len("site/"):] in (*PAGES.values(), "download.md"):
+        return resolved[len("site/"):] + anchor  # site/home.md already names the site pages
     if resolved.startswith("media/"):
         return resolved + anchor
     return f"{REPO_URL}/blob/master/{resolved}{anchor}"
@@ -113,6 +115,43 @@ def _outside_code(text: str, change) -> str:
     return "\n".join(parts)
 
 
+LIST_ITEM = re.compile(r"^( *)([-*+]|\d+[.)])( +)\S")
+
+
+def reindent_lists(text: str) -> str:
+    """Gives nested list content the 4-space indents Python-Markdown needs; GitHub accepts 2 or 3."""
+    out, stack, fence = [], [], None  # stack: (GitHub content indent, new content indent) per open item
+    after_text = False  # the previous line is a non-blank line that is not a list item
+    for line in text.split("\n"):
+        if not line.strip():
+            out.append(line)
+            after_text = False
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if fence is None:
+            while stack and indent < stack[-1][0]:
+                stack.pop()
+        old_base, new_base = stack[-1] if stack else (0, 0)
+        new_indent = new_base + max(0, indent - old_base) if stack else indent
+        out.append(" " * new_indent + line[indent:])
+        opener = FENCE.match(line)
+        if fence is None and opener:
+            fence = opener[1]
+        elif fence is not None:
+            if line.strip().startswith(fence):
+                fence = None
+        else:
+            item = LIST_ITEM.match(line)
+            if item:
+                stack.append((indent + len(item[2]) + len(item[3]), new_indent + 4))
+                if after_text:  # GitHub starts a list right after text; Python-Markdown needs a blank line
+                    out.insert(len(out) - 1, "")
+            after_text = not item
+            continue
+        after_text = False
+    return "\n".join(out)
+
+
 def adapt(text: str, source: str) -> str:
     def change(part: str) -> str:
         part = LINK.sub(lambda m: f"]({rewrite_link(m['target'], source)}{m['title'] or ''})", part)
@@ -120,12 +159,22 @@ def adapt(text: str, source: str) -> str:
 
     if source in TITLES:
         text = f"---\ntitle: {TITLES[source]}\n---\n\n" + strip_toc(text)
-    return _outside_code(text, change)
+    return _outside_code(reindent_lists(text), change)
 
 
 def _demote(notes: str) -> str:
     """Puts any heading of the release notes below the page's "### Release notes" heading."""
-    return re.sub(r"^(#{1,6}) ", lambda m: "#" * min(6, len(m[1]) + 3) + " ", notes, flags=re.M)
+    def change(part: str) -> str:
+        part = re.sub(r"^(?!\s*$)(.+)\n=+[ \t]*$", r"# \1", part, flags=re.M)  # setext to ATX first
+        part = re.sub(r"^(?!\s*$)(?![-*+] )(.+)\n-+[ \t]*$", r"## \1", part, flags=re.M)
+        return re.sub(r"^(#{1,6}) ", lambda m: "#" * min(6, len(m[1]) + 3) + " ", part, flags=re.M)
+
+    return _outside_code(notes, change)
+
+
+def _plain(text: str) -> str:
+    """Release text from GitHub, with HTML neutralised: MkDocs would pass raw HTML through."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def render_download(releases) -> str:
@@ -138,20 +187,20 @@ def render_download(releases) -> str:
         lines.append(f"Releases are listed on [GitHub]({REPO_URL}/releases).")
         return "\n".join(lines) + "\n"
     latest = published[0]
-    name = latest.get("name") or latest["tag_name"]
+    name = _plain(latest.get("name") or latest["tag_name"])
     lines += [f"## {name}" + (" (pre-release)" if latest.get("prerelease") else ""), "",
               f"Published {(latest.get('published_at') or '')[:10]}.", ""]
     for asset in latest.get("assets") or ():
-        lines.append(f"- [{asset['name']}]({asset['browser_download_url']}) "
+        lines.append(f"- [{_plain(asset['name'])}]({asset['browser_download_url']}) "
                      f"({asset['size'] / 1_000_000:.1f} MB)")
-    notes = (latest.get("body") or "").strip()
+    notes = _plain((latest.get("body") or "").strip())
     if notes:
         lines += ["", "### Release notes", "", _demote(notes)]
     if len(published) > 1:
         lines += ["", "## Earlier releases", "", "| Release | Date | |", "| - | - | - |"]
         for r in published[1:]:
             label = "pre-release" if r.get("prerelease") else ""
-            lines.append(f"| [{r.get('name') or r['tag_name']}]({r['html_url']}) | "
+            lines.append(f"| [{_plain(r.get('name') or r['tag_name'])}]({r['html_url']}) | "
                          f"{(r.get('published_at') or '')[:10]} | {label} |")
     lines += ["", f"All releases: [GitHub]({REPO_URL}/releases)."]
     return "\n".join(lines) + "\n"

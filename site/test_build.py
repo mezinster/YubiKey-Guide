@@ -145,5 +145,42 @@ class DownloadTests(unittest.TestCase):
             self.assertIn("## v1", (out / "download.md").read_text(encoding="utf-8"))
 
 
+class FinalReviewTests(unittest.TestCase):
+    def test_home_page_links_stay_page_links(self):
+        self.assertEqual(build.rewrite_link("guide.md", "site/home.md"), "guide.md")
+        self.assertEqual(build.rewrite_link("download.md#x", "site/home.md"), "download.md#x")
+
+    def test_nested_lists_get_four_space_indents(self):
+        text = ("- [ ] Item\n  - Sub\n\n1. **Step**: text\n   - a\n   - b\n\n   More.\n"
+                "2. **Next**:\n\n   " + "`" * 3 + "bat\n   run it\n   " + "`" * 3 + "\n")
+        self.assertEqual(build.reindent_lists(text),
+                         "- [ ] Item\n    - Sub\n\n1. **Step**: text\n    - a\n    - b\n\n    More.\n\n"
+                         "2. **Next**:\n\n    " + "`" * 3 + "bat\n    run it\n    " + "`" * 3 + "\n")
+
+    def test_item_after_a_paragraph_gets_a_blank_line(self):
+        text = "1. One\n\n   More.\n2. Two\n\nIntro:\n- a\n- b\n"
+        self.assertEqual(build.reindent_lists(text),
+                         "1. One\n\n    More.\n\n2. Two\n\nIntro:\n\n- a\n- b\n")
+
+    def test_list_like_lines_in_code_are_not_items(self):
+        fence = "`" * 3
+        text = f"{fence}\n- not a list\n  - still code\n{fence}\n"
+        self.assertEqual(build.reindent_lists(text), text)
+
+    def test_notes_setext_headings_and_code_are_safe(self):
+        fence = "`" * 3
+        page = build.render_download([release("v1", "2026-10-01",
+                                               body=f"Big\n===\n\nSmall\n---\n\n{fence}sh\n# comment\n{fence}")])
+        self.assertIn("#### Big", page)
+        self.assertIn("##### Small", page)
+        self.assertIn(f"{fence}sh\n# comment\n{fence}", page)
+        self.assertNotIn("\n===", page)
+
+    def test_release_text_cannot_inject_html(self):
+        page = build.render_download([release("<b>v1</b>", "2026-10-01", body="Hi <script>alert(1)</script>")])
+        self.assertNotIn("<script>", page)
+        self.assertIn("## &lt;b&gt;v1&lt;/b&gt;", page)  # the name; the fixture URL keeps the raw tag
+
+
 if __name__ == "__main__":
     unittest.main()
