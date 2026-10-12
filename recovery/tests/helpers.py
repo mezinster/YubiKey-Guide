@@ -103,6 +103,9 @@ def without_uid_self_sigs(data: bytes, drop_uids: bool = False) -> bytes:
     return out
 
 
+MALLORY = "Mallory Müller <m@example.org>"
+
+
 def partial_import_folder(test, shape: str) -> Path:
     """A backup file with a broken key block, made from the fixture keys at test time (partial.gpg).
 
@@ -116,6 +119,8 @@ def partial_import_folder(test, shape: str) -> Path:
     two-keys:   the ed25519 key's secret block, then the unprotected key's secret block with no user ID at all.
                 Every GnuPG exits non-zero ("no user ID") and imports the ed25519 secret key only, with or
                 without --allow-non-selfsigned-uid.
+    forged:     the ed25519 key's secret block with a second user ID (MALLORY, non-ASCII) that has no
+                signature: GnuPG skips that user ID ("no valid user IDs" on 2.5 if it were the only one).
     rejected:   only the unprotected key's secret block with no user ID at all: nothing secret comes in, with
                 or without --allow-non-selfsigned-uid."""
     home, root = short_tempdir(test, "pi"), short_tempdir(test, f"pi-{shape}")
@@ -130,7 +135,14 @@ def partial_import_folder(test, shape: str) -> Path:
     export = FIXTURES / "ed25519" / "export"
     ed25519 = dearmor((export / f"secret-{fixture_info('ed25519')['KEY_ID']}-Certify.key").read_bytes())
     public = dearmor(next(export.glob("public-*.asc")).read_bytes())
+    forged, added = b"", False
+    for tag, body in _packets().read_packets(ed25519):
+        if tag == 7 and not added:  # an unsigned user ID after the signed one
+            forged += _packets().write_packet(13, MALLORY.encode())
+            added = True
+        forged += _packets().write_packet(tag, body)
     data = {"user": without_uid_self_sigs(ed25519) + public, "bad-public": without_uid_self_sigs(public) + ed25519,
+            "forged": forged,
             "unsigned": without_uid_self_sigs(ed25519), "two-keys": ed25519 + no_uid, "rejected": no_uid}[shape]
     (root / "partial.gpg").write_bytes(data)
     return root

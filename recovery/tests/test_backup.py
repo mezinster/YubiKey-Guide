@@ -5,8 +5,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, RECOVERY, REAL_GPG, bare_first_folder, bom_crlf_folder,
-                           fixture_info, import_unprotected, partial_import_folder, repeated_key_folder,
+from tests.helpers import (FIXTURES, LINUX, MALLORY, PASSPHRASE, RECOVERY, REAL_GPG, bare_first_folder,
+                           bom_crlf_folder, fixture_info, import_unprotected, partial_import_folder, repeated_key_folder,
                            short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
 from ykrecover.gpg import Home, gpg_version
@@ -243,9 +243,8 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(all(k.secret for k in bundle.subkeys))
 
 
-def accepted_warning(path, key_id, uid="Recovery Test (ed25519) <test@example.org>"):
-    return (f"gpg took a user ID with no self-signature from {path}: "
-            f'key {key_id}: accepted non self-signed user ID "{uid}"')
+def unsigned_warning(uid, fpr):
+    return f'user ID "{uid}" of key {fpr} has no valid self-signature; it will not be published with the key'
 
 
 class PartialImportTests(unittest.TestCase):
@@ -289,7 +288,8 @@ class PartialImportTests(unittest.TestCase):
         self.assertTrue(bundle.subkeys and all(k.secret for k in bundle.subkeys))
         self.assertEqual(bundle.uids, ("Recovery Test (ed25519) <test@example.org>",))
         backup.check_user_ids(bundle)
-        self.assertEqual(warnings, [accepted_warning(path, info["KEY_ID"])])
+        self.assertEqual(bundle.unsigned_uids, ())
+        self.assertEqual(warnings, [])
         return path
 
     def test_secret_block_without_user_id_self_signature(self):
@@ -308,12 +308,22 @@ class PartialImportTests(unittest.TestCase):
         path, bundles, warnings = self.load("unsigned")
         self.assertEqual(self.real_import(path), (2, []))
         (bundle,) = bundles
-        self.assertEqual(warnings, [accepted_warning(path, info["KEY_ID"])])
+        self.assertEqual(warnings, [])
         with self.assertRaises(RecoveryError) as ctx:
             backup.check_user_ids(bundle)
         self.assertEqual((ctx.exception.code, str(ctx.exception)),
                          (EXIT_BACKUP, f"key {info['KEY_FP']} has no user ID with a valid self-signature in the "
                                        "backup; re-export the key from a keyring that holds it"))
+
+    def test_unsigned_extra_user_id_is_reported(self):
+        info = fixture_info("ed25519")
+        _, bundles, warnings = self.load("forged")
+        (bundle,) = bundles
+        self.assertEqual(warnings, [])
+        self.assertEqual(bundle.uids, ("Recovery Test (ed25519) <test@example.org>", MALLORY))
+        self.assertEqual(bundle.unsigned_uids, (MALLORY,))
+        backup.check_user_ids(bundle)
+        self.assertEqual(backup.unsigned_uid_warnings(bundle), [unsigned_warning(MALLORY, info["KEY_FP"])])
 
     def test_rejected_secret_block_is_an_import_error(self):
         root = partial_import_folder(self, "rejected")
@@ -348,8 +358,6 @@ class PartialImportTests(unittest.TestCase):
         self.assertEqual(backup.skipped_line("gpg: Total number processed: 1\n", 2), "gpg exited with status 2")
         accepted = 'gpg: key CCCC3333DDDD4444: accepted non self-signed user ID "C <c@example.org>"\n'
         self.assertEqual(backup.skipped_line(accepted + stderr, 2), "key CCCC3333DDDD4444: no valid user IDs")
-        self.assertEqual(backup.accepted_lines(accepted + stderr),
-                         ['key CCCC3333DDDD4444: accepted non self-signed user ID "C <c@example.org>"'])
 
 
 class HomeRegistryTests(unittest.TestCase):

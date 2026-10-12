@@ -4,7 +4,7 @@ import os
 import subprocess
 import unittest
 
-from tests.helpers import (FIXTURES, LINUX, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
+from tests.helpers import (FIXTURES, LINUX, MALLORY, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
                            partial_import_folder, repeated_key_folder, run_impl, short_tempdir)
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
@@ -24,8 +24,6 @@ def report(stderr: str) -> str:
     return "\n".join(lines)
 
 
-ACCEPTED = ('/{}: key {}: accepted non self-signed user ID "Recovery Test (ed25519) <test@example.org>"\n')
-# the warning starts "warning: gpg took a user ID with no self-signature from <folder>"
 
 
 def translating_locale():
@@ -108,16 +106,27 @@ class InventoryParityTests(unittest.TestCase):
                 self.assertEqual(py.returncode, 0, py.stderr)
                 self.assertNotIn("warning: gpg skipped part of", py.stderr)
                 self.assertIn(fixture_info("ed25519")["KEY_FP"], py.stdout)
-                self.assertEqual(py.stderr.count("warning: "), 1, py.stderr)
-                self.assertIn(ACCEPTED.format("partial.gpg", fixture_info("ed25519")["KEY_ID"]), py.stderr)
+                self.assertNotIn("warning: ", py.stderr)
 
     def test_key_with_no_self_signed_user_id_is_refused(self):
         py = self.assert_same_run(partial_import_folder(self, "unsigned"))
         self.assertEqual(py.returncode, 2, py.stderr)
-        self.assertIn(ACCEPTED.format("partial.gpg", fixture_info("ed25519")["KEY_ID"]), py.stderr)
+        self.assertNotIn("warning: ", py.stderr)
         self.assertTrue(py.stderr.endswith(f"\nerror: key {fixture_info('ed25519')['KEY_FP']} has no user ID "
                                            "with a valid self-signature in the backup; re-export the key from a "
                                            "keyring that holds it\n"), py.stderr)
+
+    def test_unsigned_extra_user_id_is_reported(self):
+        for env in ({}, {"LANGUAGE": "de", "LC_ALL": "en_US.utf8"}):
+            with self.subTest(env=env):
+                root = partial_import_folder(self, "forged")
+                py = run_impl("python", ["--backup", str(root), "--dry-run"], env=env)
+                sh = run_impl("bash", ["--backup", str(root), "--dry-run"], env=env)
+                self.assertEqual((sh.returncode, sh.stdout, sh.stderr), (py.returncode, py.stdout, py.stderr))
+                self.assertEqual(py.returncode, 0, py.stderr)
+                warnings = [line for line in py.stderr.splitlines() if line.startswith("warning: ")]
+                self.assertEqual(warnings, [f'warning: user ID "{MALLORY}" of key {fixture_info("ed25519")["KEY_FP"]} '
+                                            "has no valid self-signature; it will not be published with the key"])
 
     def test_rejected_secret_block_is_an_import_error(self):
         self.assert_same_import_error(partial_import_folder(self, "rejected"))

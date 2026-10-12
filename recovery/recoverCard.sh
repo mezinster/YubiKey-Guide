@@ -23,7 +23,8 @@ KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" KEY_VALIDITY="" UNPRO
 LOADED_FPRS=()
 CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
 KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
-UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
+UIDS=() UIDS_UNSIGNED=()
+SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
 declare -A TARGET=() TOKENS=()
 
 die() { # Prints an error and exits with the given code.
@@ -483,7 +484,7 @@ candidate_listing() { # candidate_listing INDEX...: "\n  <kind>: <path> (key <KE
   done
 }
 
-list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO VALIDITY" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
+list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO VALIDITY" | "uid +|- TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
   GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
     awk -F: '
       $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1
@@ -492,7 +493,7 @@ list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO VALIDITY" 
                     validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
       $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo, kvalid; insec = 0; next }
       $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
-      $1 == "uid" { print "uid", $10 }'
+      $1 == "uid" { print "uid", (($6 == "") ? "-" : "+"), $10 }'
 }
 
 load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and SUB_* arrays
@@ -512,12 +513,17 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
     die "$EXIT_BACKUP" "several keys found; choose one with --key:$listing"
   fi
   KEY_FP=${matches[0]}
-  UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
+  UIDS=() UIDS_UNSIGNED=()
+  SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
   while IFS= read -r line; do
     read -r kind a b c d e f g <<<"$line"
     case $kind in
       sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; KEY_VALIDITY=$f; fi ;;
-      uid) if [[ $current == "$KEY_FP" ]]; then UIDS+=("${line#uid }"); fi ;;
+      uid) # "uid + TEXT", or "uid - TEXT" with no valid self-signature (no creation date)
+        if [[ $current == "$KEY_FP" ]]; then
+          UIDS+=("${line#uid ? }")
+          if [[ $a == - ]]; then UIDS_UNSIGNED+=("${line#uid - }"); fi
+        fi ;;
       ssb)
         if [[ $current == "$KEY_FP" ]]; then
           SUB_FPR+=("$a"); SUB_USAGE+=("$b"); SUB_CREATED+=("$c"); SUB_EXPIRES+=("$d")
@@ -669,7 +675,6 @@ UNSIGNED_UIDS="has no user ID with a valid self-signature in the backup; re-expo
 # check_bundle). SKIP_* pick the gpg message the warning quotes, as backup.skipped_line.
 SKIP_KEY='^key [0-9A-F]{8,40}: '
 SKIP_DONE='^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*|accepted non self-signed user ID ".*")$'
-ACCEPTED='^key [0-9A-F]{8,40}: accepted non self-signed user ID ".*"$'
 SKIP_NOISE="^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$"
 
 secret_keys_imported() { # secret_keys_imported STATUS_FILE: IMPORT_RES counts secret keys imported or unchanged
@@ -680,15 +685,6 @@ secret_keys_imported() { # secret_keys_imported STATUS_FILE: IMPORT_RES counts s
   done <"$1"
   read -ra f <<<"$counts"
   (( ${#f[@]} >= 14 )) && [[ ${f[12]} =~ ^[0-9]+$ && ${f[13]} =~ ^[0-9]+$ ]] && (( 10#${f[12]} + 10#${f[13]} > 0 ))
-}
-
-warn_accepted() { # warn_accepted STDERR_FILE FILE: gpg's notes on user IDs taken with no self-signature
-  local line
-  while IFS= read -r line; do
-    [[ $line == "gpg: "* ]] || continue
-    line=${line#gpg: }
-    if [[ $line =~ $ACCEPTED ]]; then warn "gpg took a user ID with no self-signature from $2: $line"; fi
-  done <"$1"
 }
 
 skipped_line() { # skipped_line STDERR_FILE CODE: the gpg message a partial import's warning quotes
@@ -718,7 +714,6 @@ load_candidate() {
       rc=0
       GNUPGHOME=$STAGING gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$source" \
         >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
-      warn_accepted "$WORK/import.err" "$f"
       if (( rc )); then
         secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
         warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"
@@ -728,6 +723,9 @@ load_candidate() {
   fi
   load_bundle "$STAGING"
   if [[ $KEY_VALIDITY == i ]]; then die "$EXIT_BACKUP" "key $KEY_FP $UNSIGNED_UIDS"; fi
+  for f in "${UIDS_UNSIGNED[@]}"; do
+    warn "user ID \"$f\" of key $KEY_FP has no valid self-signature; it will not be published with the key"
+  done
 }
 
 usage_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf auth ;; esac; }

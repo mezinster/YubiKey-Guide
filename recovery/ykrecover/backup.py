@@ -75,6 +75,7 @@ class KeyBundle:
     expires: int = 0  # main key; 0 means never
     algo: str = ""
     validity: str = ""  # main key, colon field 2: "i" when no user ID has a valid self-signature
+    unsigned_uids: tuple = ()  # user IDs with no valid self-signature (listed with no creation date)
 
 
 @dataclass(frozen=True)
@@ -339,7 +340,7 @@ def parse_secret_keys(colons: str) -> list:
             if current is not None:
                 close_sub()
             current = {"key_fp": "", "key_id": f[4], "uids": [], "subkeys": [], "has_certify_secret": f[14] != "#",
-                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}", "validity": f[1]}
+                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}", "validity": f[1], "unsigned": []}
             bundles.append(current)
         elif f[0] == "ssb" and current is not None:
             close_sub()
@@ -354,10 +355,12 @@ def parse_secret_keys(colons: str) -> list:
             sub["keygrip"] = f[9]
         elif f[0] == "uid" and current is not None:
             current["uids"].append(f[9])
+            if not f[5]:
+                current["unsigned"].append(f[9])
     if current is not None:
         close_sub()
     return [KeyBundle(b["key_fp"], b["key_id"], tuple(b["uids"]), tuple(b["subkeys"]), b["has_certify_secret"],
-                      b["expires"], b["algo"], b["validity"]) for b in bundles]
+                      b["expires"], b["algo"], b["validity"], tuple(b["unsigned"])) for b in bundles]
 
 
 def list_bundles(home: Home) -> list:
@@ -539,6 +542,12 @@ def check_user_ids(bundle: KeyBundle) -> None:
         raise RecoveryError(UNSIGNED_UIDS.format(bundle.key_fp), EXIT_BACKUP)
 
 
+def unsigned_uid_warnings(bundle: KeyBundle) -> list:
+    """The key's other user IDs that gpg took with no valid self-signature: the public key leaves them out."""
+    return [f'user ID "{uid}" of key {bundle.key_fp} has no valid self-signature; it will not be published with the '
+            "key" for uid in bundle.unsigned_uids]
+
+
 # gpg exits non-zero when it skips any part of a file it imports (GnuPG 2.5 also for a user ID with no valid
 # self-signature), yet it may have imported the secret keys. A backup file counts as imported when gpg's IMPORT_RES
 # status line says it imported secret keys or already had them; whether those are the chosen key's, with its secret
@@ -546,7 +555,6 @@ def check_user_ids(bundle: KeyBundle) -> None:
 SKIP_KEY = re.compile(r"^key [0-9A-F]{8,40}: ")
 SKIP_DONE = re.compile(r'^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*|'
                        r'accepted non self-signed user ID ".*")$')
-ACCEPTED = re.compile(r'^key [0-9A-F]{8,40}: accepted non self-signed user ID ".*"$')
 SKIP_NOISE = re.compile(r"^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$")
 
 
@@ -558,11 +566,6 @@ def secret_keys_imported(status: str) -> bool:
     if len(fields) < 14 or not all(re.fullmatch(r"[0-9]+", f) for f in fields[12:14]):
         return False
     return int(fields[12]) + int(fields[13]) > 0
-
-
-def accepted_lines(stderr: str) -> list:
-    """gpg's notes on user IDs it took with no self-signature (--allow-non-selfsigned-uid)."""
-    return [line[5:] for line in stderr.splitlines() if line.startswith("gpg: ") and ACCEPTED.match(line[5:])]
 
 
 def skipped_line(stderr: str, code: int) -> str:
@@ -596,8 +599,6 @@ def load(candidate: Candidate, staging: Home, warn) -> list:
                 raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
             result = staging.run(["gpg", "--batch", "--allow-non-selfsigned-uid", "--status-fd", "1", "--import",
                                   "--", str(source)])
-            for line in accepted_lines(result.stderr):
-                warn(f"gpg took a user ID with no self-signature from {src}: {line}")
             if result.returncode != 0:
                 if not secret_keys_imported(result.stdout):
                     raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)

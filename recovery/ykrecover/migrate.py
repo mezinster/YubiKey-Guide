@@ -221,6 +221,7 @@ class Session:
         bundles = backup.load(candidate, self.staging, self.load_warnings.append)
         self.bundle = backup.choose_key(bundles, self.opts.key or candidate.key_id or None)
         backup.check_user_ids(self.bundle)
+        self.load_warnings.extend(backup.unsigned_uid_warnings(self.bundle))
         self.loaded_fprs = frozenset(k.fpr for k in self.bundle.subkeys)
         self.targets = modes.select_targets(self.bundle)
         return self.bundle
