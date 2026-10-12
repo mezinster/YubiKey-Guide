@@ -72,7 +72,7 @@ Release notes are inserted as Markdown and limited to their own section. Asset s
 **Triggers**
 
 - `push` to `master`, limited by `paths`: `README.md`, `SECENV.md`, `piv/README.md`, `recovery/README.md`, `media/**`, `site/**` and the workflow file itself.
-- `release` (`published`).
+- `workflow_dispatch` from `release-windows.yml`, after it has attached the zip to the release (see below).
 - `workflow_dispatch`.
 
 **Settings**
@@ -103,6 +103,8 @@ mkdocs build --strict -f site/mkdocs.yml
 ```
 
 A broken link or config fails the PR before it reaches master.
+
+**Releases.** `release-windows.yml` creates and updates releases with the job's `GITHUB_TOKEN`. Events caused by that token do not start other workflows, so a `release: published` trigger would never fire for these releases. A release-triggered run would also run on the tag, which the `github-pages` environment rejects by default. So `release-windows.yml` gets `actions: write` and a last step, `gh workflow run pages.yml --ref master`. A release created by hand in the web UI is picked up by the next push or a manual run.
 
 ## One-time setup (outside the repo; done only with the owner's approval)
 
