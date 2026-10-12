@@ -45,6 +45,14 @@ class NewFixtureShapeTests(unittest.TestCase):
         self.assertNotIn("S2K", text)
         self.assertIn("bits]", text)
 
+    def test_mixed_has_protected_main_and_bare_subkeys(self):
+        main = self.packets(FIXTURES / "mixed" / "main.asc")
+        self.assertEqual(main.count("S2K"), 1)
+        subs = self.packets(FIXTURES / "mixed" / "subs.asc")
+        self.assertEqual(subs.count("gnu-dummy"), 1)
+        self.assertNotIn("S2K", subs)
+        self.assertEqual(subs.count("secret sub key packet"), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

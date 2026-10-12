@@ -157,6 +157,20 @@ make_unprotected() {
   done_home
 }
 
+make_mixed() { # protected main key in one file, subkeys exported with no passphrase in another
+  local fp
+  fresh_home
+  rm -rf mixed
+  mkdir -p mixed
+  fp=$(gen_key "Recovery Test (mixed) <test@example.org>" ed25519 cert never "")
+  three_subs "$fp" ""
+  export_secret "$fp" "" mixed/subs.asc --armor --export-secret-subkeys
+  printf '%s\n' "$PASS" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --passwd "$fp"
+  export_secret "$fp!" "$PASS" mixed/main.asc --armor
+  write_info "$fp" mixed
+  done_home
+}
+
 make_gnupg1() { # a GnuPG 1.x home: secring.gpg is a binary transferable secret key, as GnuPG 1 stored it
   local fp
   fresh_home
@@ -194,6 +208,7 @@ build() {
     noauth) make_noauth ;;
     split) make_split ;;
     unprotected) make_unprotected ;;
+    mixed) make_mixed ;;
     gnupg1) make_gnupg1 ;;
     multikey) make_multikey ;;
     *) printf 'unknown profile: %s\n' "$1" >&2; exit 2 ;;
@@ -202,6 +217,6 @@ build() {
 
 # Usage: make_fixtures.sh [PROFILE...]; without arguments every profile is rebuilt (this changes the goldens).
 if (($# == 0)); then
-  set -- ed25519 rsa4096 expired flexible noauth split unprotected gnupg1 multikey
+  set -- ed25519 rsa4096 expired flexible noauth split unprotected mixed gnupg1 multikey
 fi
 for profile in "$@"; do build "$profile"; done
