@@ -36,6 +36,10 @@ nix fmt
 
 # Update flake inputs
 nix flake update --commit-lock-file
+
+# Docs site (GitHub Pages, MkDocs Material); generated from the Markdown files above, never edit site/.build
+python3 -m unittest discover -s site -v
+python3 site/build.py && mkdocs build --strict -f site/mkdocs.yml   # pip install -r site/requirements.txt first
 ```
 
 ## README Conventions
@@ -57,3 +61,4 @@ nix flake update --commit-lock-file
 
 - `.gitignore` is `.*` — new dotfiles/dirs are silently ignored unless whitelisted with a `!` line (as done for `.github/` and `.markdownlint-cli2.jsonc`).
 - Fork of `drduh/YubiKey-Guide`. Local `master` syncs from upstream `main` via merge commits; only `origin` (mezinster fork) is configured as a remote.
+- `site/` builds the GitHub Pages site (`.github/workflows/pages.yml`, on pushes to master, manual runs and after each release). `site/build.py` copies README.md, SECENV.md, piv/README.md and recovery/README.md into `site/.build` and adapts links and alerts there; a new top-level doc must be added to `PAGES` in build.py and to `nav` in `site/mkdocs.yml`.

@@ -1,0 +1,2 @@
+mkdocs-material==9.7.6
+mkdocs==1.6.1  # Material 9 does not support MkDocs 2.0
