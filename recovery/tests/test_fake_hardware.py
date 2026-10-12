@@ -237,10 +237,6 @@ class FakeHardwareTests:
         self.assertTrue(all(Path(h).resolve().parent == workdir.resolve() for h in homes), homes)
         self.assertEqual(list(workdir.glob("ykr-*")), [])
 
-
-class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
-    IMPL = "python"
-
     def test_clone_unprotected_key(self):
         info = fixture_info("unprotected")
         result, _, _, state = self.migrate("unprotected", [], f"y\n\nRESET {S1}\n", folder="")
@@ -252,6 +248,10 @@ class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
         self.assertEqual(len(scripts), 3)
         for script, slot in zip(scripts, ("1", "2", "3")):
             self.assertRegex(script, rf"^key [0-9A-F]{{40}}\nkeytocard\n{slot}\n\d{{8}}\n$")
+
+
+class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
+    IMPL = "python"
 
 
 @unittest.skipUnless(LINUX, "the bash implementation is Linux-only")

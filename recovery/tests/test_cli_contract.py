@@ -3,8 +3,8 @@ import shutil
 import subprocess
 import unittest
 
-from ykrecover import osdeps
-from tests.helpers import FIXTURES, LINUX, run_impl, short_tempdir
+from ykrecover import EXIT_BACKUP, osdeps
+from tests.helpers import FIXTURES, LINUX, fixture_info, run_impl, short_tempdir
 
 ED_EXPORT = str(FIXTURES / "ed25519" / "export")
 
@@ -155,6 +155,39 @@ class ContractTests:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.startswith("STEP 1 card1 <CARDHOME> gpgconf --kill all\n"))
 
+
+    def test_clone_with_expired_main_key(self):
+        result = self.cli("--backup", "tests/fixtures/flexible/asc backup", "--dry-run")
+        self.assertEqual(result.returncode, EXIT_BACKUP)
+        self.assertIn("the main key has expired; use --mode renew or --mode rotate", result.stderr)
+
+    def test_clone_without_auth_warns(self):
+        result = self.cli("--backup", "tests/fixtures/noauth/export", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("warning: no authentication subkey: that card slot stays empty; SSH will not work from this card",
+                      result.stderr)
+
+    def test_only_stubs_is_not_recoverable(self):
+        folder = short_tempdir(self, "stubs")
+        stub = FIXTURES / "flexible" / "asc backup" / "stub" / "flex.priv_stub.asc"
+        (folder / "stub.asc").write_bytes(stub.read_bytes())
+        result = self.cli("--backup", str(folder), "--dry-run")
+        self.assertEqual(result.returncode, EXIT_BACKUP)
+        self.assertIn(f"no secret keys in {folder}: only card stubs or public keys", result.stderr)
+
+    def test_empty_folder(self):
+        folder = short_tempdir(self, "empty")
+        result = self.cli("--backup", str(folder), "--dry-run")
+        self.assertIn(f"no backup found in {folder} (looked for OpenPGP key files and GnuPG homes)", result.stderr)
+
+    def test_several_keys_need_key(self):
+        result = self.cli("--backup", "tests/fixtures/multikey", "--dry-run")
+        self.assertEqual(result.returncode, EXIT_BACKUP)
+        self.assertIn("several backups found; narrow --backup or pass --source or --key:", result.stderr)
+        info = fixture_info("multikey")
+        ok = self.cli("--backup", "tests/fixtures/multikey", "--key", info["KEY2_FP"], "--dry-run")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn(info["KEY2_FP"], ok.stdout)
 
 class PythonContractTests(ContractTests, unittest.TestCase):
     IMPL = "python"

@@ -6,7 +6,7 @@ from tests.helpers import FIXTURES, LINUX, repeated_key_folder, run_impl, short_
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
-           "tests/fixtures/mixed", "tests/fixtures/flexible/", "tests/fixtures"]
+           "tests/fixtures/mixed", "tests/fixtures/noauth/export", "tests/fixtures/flexible/", "tests/fixtures"]
 
 
 def report(stderr: str) -> str:

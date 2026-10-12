@@ -19,7 +19,8 @@ RETRIES=5,5,5 TOUCH=on TOUCH_SIG="" TOUCH_ENC="" TOUCH_AUT="" NAME="" LOGIN="" U
 SOURCE="" KEY="" WORKDIR="" DRY_RUN=0 YES=0
 RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS=""
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
-KEY_FP="" KEY_ID="" HAS_SECRET=0
+KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" UNPROTECTED=0 NOW=0
+LOADED_FPRS=()
 CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
 KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0
 UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
@@ -470,13 +471,14 @@ candidate_listing() { # candidate_listing INDEX...: "\n  <kind>: <path> (key <KE
   done
 }
 
-list_keys() { # list_keys HOME → "sec FPR KEYID SECRET" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
+list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
   GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
     awk -F: '
-      $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1; next }
+      $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1
+                    kexp = $7 + 0; kalgo = ($17 != "") ? $17 : "rsa" $3; next }
       $1 == "ssb" { insub = 1; insec = 0; usage = $12; created = $6 + 0; expires = $7 + 0
                     validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
-      $1 == "fpr" && insec { print "sec", $10, kid, secret; insec = 0; next }
+      $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo; insec = 0; next }
       $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
       $1 == "uid" { print "uid", $10 }'
 }
@@ -502,7 +504,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   while IFS= read -r line; do
     read -r kind a b c d e f g <<<"$line"
     case $kind in
-      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; fi ;;
+      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; fi ;;
       uid) if [[ $current == "$KEY_FP" ]]; then UIDS+=("${line#uid }"); fi ;;
       ssb)
         if [[ $current == "$KEY_FP" ]]; then
@@ -532,7 +534,7 @@ load_candidate() {
 
 usage_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf auth ;; esac; }
 
-select_targets() { # the newest non-revoked subkey for each usage
+select_targets() { # the newest non-revoked subkey for each usage; empty when the key has none
   local u i best created
   for u in s e a; do
     best="" created=-1
@@ -540,26 +542,60 @@ select_targets() { # the newest non-revoked subkey for each usage
       [[ ${SUB_USAGE[i]} == *"$u"* && ${SUB_VALIDITY[i]} != r ]] || continue
       if (( SUB_CREATED[i] > created )); then created=${SUB_CREATED[i]}; best=${SUB_FPR[i]}; fi
     done
-    [[ -n $best ]] || die "$EXIT_BACKUP" "key $KEY_FP has no $(usage_word "$u") subkey"
     TARGET[$u]=$best
   done
 }
 
-unique_targets() { # unique_targets ARRAY_NAME: target fingerprints in s, e, a order without repeats
+unique_targets() { # unique_targets ARRAY_NAME: non-empty target fingerprints in s, e, a order without repeats
   local -n _list=$1
   local u
   _list=()
   for u in s e a; do
+    [[ -n ${TARGET[$u]} ]] || continue
     if [[ " ${_list[*]} " != *" ${TARGET[$u]} "* ]]; then _list+=("${TARGET[$u]}"); fi
   done
 }
 
+missing_slots() { # the usages without a target, in s e a order
+  local u
+  for u in s e a; do
+    if [[ -z ${TARGET[$u]} ]]; then printf '%s\n' "$u"; fi
+  done
+}
+
+slot_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf authentication ;; esac; }
+
+expire_at() { # expire_at EXPIRE NOW → epoch, or nothing for never / an unknown form (as modes.expire_at)
+  local t=${1,,} n unit
+  t=${t#"${t%%[![:space:]]*}"}
+  t=${t%"${t##*[![:space:]]}"}
+  if [[ $t =~ ^([0-9]+)([dwmy]?)$ ]] && (( 10#${BASH_REMATCH[1]} > 0 )); then
+    n=$((10#${BASH_REMATCH[1]}))
+    case ${BASH_REMATCH[2]} in '' | d) unit=86400 ;; w) unit=604800 ;; m) unit=2592000 ;; y) unit=31536000 ;; esac
+    printf '%s' $(($2 + n * unit))
+  elif [[ $t =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    date -u -d "$t" +%s 2>/dev/null || true
+  fi
+}
+
+main_needs_extending() { # main_needs_extending NOW: the main key expired, or ends before the subkeys this run writes
+  local until
+  (( KEY_EXPIRES > 0 )) || return 1
+  until=$(expire_at "$EXPIRE" "$1")
+  (( KEY_EXPIRES <= $1 )) || [[ -z $until ]] || (( KEY_EXPIRES < until ))
+}
+
+is_bare() { [[ " ${CAND_BARE[CHOSEN]} " == *" $1 "* ]]; } # is_bare KEYID: supplied with no passphrase
+
+target_is_bare() { # target_is_bare FPR: keytocard asks no passphrase; a renew/rotate subkey takes the main key's
+  if [[ " ${LOADED_FPRS[*]} " == *" $1 "* ]]; then is_bare "${1: -16}"; else is_bare "$KEY_ID"; fi
+}
+
 check_bundle() {
-  local now f i fprs=() stale=() stubs=()
+  local now=$NOW f i u extra fprs=() stale=() stubs=() gaps=()
   if [[ $MODE != clone ]] && (( ! HAS_SECRET )); then
     die "$EXIT_BACKUP" "--mode $MODE needs the Certify key, but this backup only has subkeys"
   fi
-  now=$(date +%s)
   unique_targets fprs
   if [[ $MODE != rotate ]]; then # rotate writes new subkeys; the old ones are only revoked or left
     for f in "${fprs[@]}"; do
@@ -569,6 +605,9 @@ check_bundle() {
     done
     if (( ${#stubs[@]} )); then die "$EXIT_BACKUP" "the backup holds card stubs, not secret subkeys: ${stubs[*]}"; fi
   fi
+  if [[ $MODE == clone ]] && (( KEY_EXPIRES > 0 && KEY_EXPIRES <= now )); then
+    die "$EXIT_BACKUP" "the main key has expired; use --mode renew or --mode rotate"
+  fi
   for f in "${fprs[@]}"; do
     for i in "${!SUB_FPR[@]}"; do
       if [[ ${SUB_FPR[i]} == "$f" ]] && (( SUB_EXPIRES[i] > 0 && SUB_EXPIRES[i] <= now )); then stale+=("$f"); fi
@@ -577,6 +616,16 @@ check_bundle() {
   if (( ${#stale[@]} )) && [[ $MODE == clone ]]; then
     die "$EXIT_BACKUP" "subkeys have expired: ${stale[*]}; use --mode renew or --mode rotate"
   fi
+  [[ $MODE == clone ]] || return 0
+  mapfile -t gaps < <(missing_slots)
+  if (( ${#gaps[@]} == 3 )); then
+    die "$EXIT_BACKUP" "the key has no subkeys to put on a card; use --mode renew or --mode rotate"
+  fi
+  for u in "${gaps[@]}"; do
+    extra=""
+    if [[ $u == a ]]; then extra="; SSH will not work from this card"; fi
+    warn "no $(slot_word "$u") subkey: that card slot stays empty$extra"
+  done
 }
 
 # --- canonical steps (byte-identical to the Python plan)
@@ -620,37 +669,50 @@ algo_for() { # algo_for ALGO USAGE
   if [[ $1 == rsa4096 ]]; then printf rsa4096; elif [[ $2 == e ]]; then printf cv25519; else printf ed25519; fi
 }
 
-rotate_algo() {
-  local i
+default_algo() { # --algo, else the family of the sign subkey (else encrypt, else auth, else the main key)
+  local i ref=${TARGET[s]:-${TARGET[e]:-${TARGET[a]}}} algo=$KEY_ALGO
   if [[ -n $ALGO ]]; then printf '%s' "$ALGO"; return; fi
   for i in "${!SUB_FPR[@]}"; do
-    if [[ ${SUB_FPR[i]} == "${TARGET[s]}" ]]; then
-      if [[ ${SUB_ALGO[i]} == rsa* ]]; then printf rsa4096; else printf ed25519; fi
-      return
-    fi
+    if [[ ${SUB_FPR[i]} == "$ref" ]]; then algo=${SUB_ALGO[i]}; break; fi
   done
+  if [[ $algo == rsa* ]]; then printf rsa4096; else printf ed25519; fi
 }
 
 mode_steps() {
-  local u old algo fprs=()
+  local u old algo secret=('<CERTIFY_PASS>') fprs=() gaps=()
+  if [[ $MODE == renew || $MODE == rotate ]] && main_needs_extending "$NOW"; then
+    STEP_STDIN=('<CERTIFY_PASS>')
+    step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-set-expire "$KEY_FP" "$EXPIRE" || return 1
+  fi
   case $MODE in
     renew)
+      algo=$(default_algo)
       unique_targets fprs
-      STEP_STDIN=('<CERTIFY_PASS>')
-      step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-set-expire "$KEY_FP" "$EXPIRE" \
-        "${fprs[@]}" || return 1 ;;
+      if (( ${#fprs[@]} )); then
+        STEP_STDIN=('<CERTIFY_PASS>')
+        step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-set-expire "$KEY_FP" "$EXPIRE" \
+          "${fprs[@]}" || return 1
+      fi
+      mapfile -t gaps < <(missing_slots)
+      for u in "${gaps[@]}"; do
+        STEP_STDIN=('<CERTIFY_PASS>')
+        step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-add-key "$KEY_FP" \
+          "$(algo_for "$algo" "$u")" "$(usage_word "$u")" "$EXPIRE" || return 1
+      done ;;
     rotate)
-      algo=$(rotate_algo)
+      algo=$(default_algo)
       for u in s e a; do
         STEP_STDIN=('<CERTIFY_PASS>')
         step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-add-key "$KEY_FP" \
           "$(algo_for "$algo" "$u")" "$(usage_word "$u")" "$EXPIRE" || return 1
       done
       if (( REVOKE_OLD )); then
+        # the main key signs the revocation; with no passphrase gpg asks none
+        if is_bare "$KEY_ID"; then secret=(); fi
         unique_targets fprs
         for old in "${fprs[@]}"; do
           kill_step mode '<STAGING>' || return 1
-          STEP_STDIN=("key $old" revkey y 0 '' y '<CERTIFY_PASS>' save)
+          STEP_STDIN=("key $old" revkey y 0 '' y "${secret[@]}" save)
           step mode '<STAGING>' '' "${LOOPBACK[@]}" --command-fd 0 --edit-key "$KEY_FP" || return 1
         done
       fi ;;
@@ -675,7 +737,7 @@ touch_for() {
 }
 
 card_steps() { # card_steps INDEX
-  local phase="card$1" serial="<SERIAL$1>" h='<CARDHOME>' slot usage ref
+  local phase="card$1" serial="<SERIAL$1>" h='<CARDHOME>' slot usage ref secret=()
   local -a holder=(admin login '<LOGIN>' '<ADMIN_PIN>')
   if [[ -n $NAME ]]; then holder+=(name '<SURNAME>' '<GIVEN>'); fi
   if [[ -n $URL ]]; then holder+=(url '<URL>'); fi
@@ -696,11 +758,17 @@ card_steps() { # card_steps INDEX
   step "$phase" "$h" '' "${CARD_GPG[@]}" --edit-card || return 1
   for slot in 1 2 3; do
     case $slot in 1) usage=s ;; 2) usage=e ;; 3) usage=a ;; esac
+    [[ -n ${TARGET[$usage]} ]] || continue
+    # gpg asks no passphrase for an unprotected subkey; an extra line would be read as the Admin PIN.
+    secret=('<CERTIFY_PASS>')
+    if target_is_bare "${TARGET[$usage]}"; then secret=(); fi
     kill_step "$phase" "$h" || return 1
-    STEP_STDIN=("key ${TARGET[$usage]}" keytocard "$slot" '<CERTIFY_PASS>' '<ADMIN_PIN>' save)
+    STEP_STDIN=("key ${TARGET[$usage]}" keytocard "$slot" "${secret[@]}" '<ADMIN_PIN>' save)
     step "$phase" "$h" '' "${CARD_GPG[@]}" --edit-key "$KEY_FP" || return 1
   done
   for ref in sig dec aut; do
+    case $ref in sig) usage=s ;; dec) usage=e ;; aut) usage=a ;; esac
+    [[ -n ${TARGET[$usage]} ]] || continue
     kill_step "$phase" "$h" || return 1
     step "$phase" "$h" '' ykman --device "$serial" openpgp keys set-touch "$ref" "$(touch_for "$ref")" -f -a \
       '<ADMIN_PIN>' || return 1
@@ -713,10 +781,13 @@ verify_steps() { # verify_steps INDEX
   step "$phase" '<STAGING>' '' gpg --batch --yes --armor --output "$v/pub.asc" --export "$KEY_FP" || return 1
   step "$phase" "$v" '' gpg --batch --import "$v/pub.asc" || return 1
   step "$phase" "$v" cardstatus gpg --batch --with-colons --card-status || return 1
-  STEP_STDIN=('<USER_PIN>')
-  step "$phase" "$v" '' "${pin[@]}" --local-user "${TARGET[s]}!" --output "$v/test.sig" --detach-sign \
-    "$v/test.txt" || return 1
-  step "$phase" "$v" '' gpg --batch --verify "$v/test.sig" "$v/test.txt" || return 1
+  if [[ -n ${TARGET[s]} ]]; then
+    STEP_STDIN=('<USER_PIN>')
+    step "$phase" "$v" '' "${pin[@]}" --local-user "${TARGET[s]}!" --output "$v/test.sig" --detach-sign \
+      "$v/test.txt" || return 1
+    step "$phase" "$v" '' gpg --batch --verify "$v/test.sig" "$v/test.txt" || return 1
+  fi
+  [[ -n ${TARGET[e]} ]] || return 0
   step "$phase" "$v" '' gpg --batch --yes --trust-model always --recipient "${TARGET[e]}!" --output \
     "$v/test.gpg" --encrypt "$v/test.txt" || return 1
   kill_step "$phase" "$v" || return 1
@@ -728,6 +799,7 @@ finish_steps() { # tries both exports; warns per failure (live run)
   local rc=0
   step finish '<STAGING>' '' gpg --batch --yes --armor --output "<OUT>/public-$KEY_ID-<DATE>.asc" \
     --export "$KEY_FP" || { rc=1; warn "export failed: $CURRENT_STEP"; }
+  [[ -n ${TARGET[a]} ]] || return "$rc"
   step finish '<STAGING>' '' gpg --batch --yes --output "<OUT>/ssh-$KEY_ID.pub" --export-ssh-key \
     "${TARGET[a]}!" || { rc=1; warn "export failed: $CURRENT_STEP"; }
   return "$rc"
@@ -738,6 +810,9 @@ dry_run() {
   mode_steps
   backup_steps
   if [[ $MODE == rotate ]]; then TARGET=([s]='<NEW_FPR_S>' [e]='<NEW_FPR_E>' [a]='<NEW_FPR_A>'); fi
+  if [[ $MODE == renew ]]; then
+    TARGET[s]=${TARGET[s]:-<NEW_FPR_S>} TARGET[e]=${TARGET[e]:-<NEW_FPR_E>} TARGET[a]=${TARGET[a]:-<NEW_FPR_A>}
+  fi
   for ((i = 1; i <= CARDS; i++)); do
     card_steps "$i"
     verify_steps "$i"
@@ -764,7 +839,10 @@ main() {
     die "$EXIT_BACKUP" "no backup found in ${BACKUP%/} (looked for OpenPGP key files and GnuPG homes)"
   fi
   choose_candidate
+  UNPROTECTED=${CAND_UNPROT[CHOSEN]}
   load_candidate "$CHOSEN"
+  LOADED_FPRS=("${SUB_FPR[@]}")
+  NOW=$(date +%s)
   select_targets
   check_bundle
   if (( DRY_RUN )); then
@@ -832,7 +910,7 @@ run_check() {
 }
 
 describe_key() {
-  local i mark expires targets=" ${TARGET[s]} ${TARGET[e]} ${TARGET[a]} "
+  local i u mark expires targets=" ${TARGET[s]} ${TARGET[e]} ${TARGET[a]} "
   info "Key $KEY_FP"
   for i in "${!UIDS[@]}"; do info "  uid ${UIDS[i]}"; done
   for i in "${!SUB_FPR[@]}"; do
@@ -842,6 +920,7 @@ describe_key() {
     if (( SUB_EXPIRES[i] > 0 )); then expires=$(date -d "@${SUB_EXPIRES[i]}" +%F); fi
     info "  [${SUB_USAGE[i]^^}] ${SUB_ALGO[i]} ${SUB_FPR[i]} expires $expires$mark"
   done
+  for u in $(missing_slots); do info "  [${u^^}] none (clone leaves it empty; renew and rotate create one)"; done
 }
 
 check_passphrase() { # check_passphrase PASS → status
@@ -1063,7 +1142,13 @@ finish() {
 run_live() {
   local rc=0
   describe_key
-  unlock
+  if (( UNPROTECTED )); then
+    warn "the backup's secret keys have no passphrase"
+    CERTIFY_PASS=""
+    check_passphrase "" || die "$EXIT_BACKUP" "cannot use the backup's secret keys"
+  else
+    unlock
+  fi
   if ! (( YES )) && ! confirm "Write subkeys of $KEY_FP to $CARDS card(s)?"; then exit "$EXIT_INTERRUPT"; fi
   mkdir -p -m 700 -- "$OUT" || die "$EXIT_USAGE" "cannot create the --out folder $OUT"
   TOKENS=(['<CERTIFY_PASS>']=$CERTIFY_PASS ['<OUT>']=$OUT ['<DATE>']=$(date +%F)
@@ -1075,6 +1160,7 @@ run_live() {
     load_bundle "$STAGING"
     select_targets
     kill_agents "$STAGING"
+    if (( UNPROTECTED )); then warn "the new backup in $OUT will also have no passphrase"; fi
     until confirm "New backup written to $OUT. Saved it to offline storage?"; do
       warn "copy the new backup before writing cards"
     done
