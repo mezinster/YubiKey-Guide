@@ -79,7 +79,7 @@ source_hash: 3b18e512dba79e4c8300dd08aeb37f8e728b8dad
 
 - **Languages.** `build(out, releases)` builds both languages:
   - English into `out/` (unchanged);
-  - Russian into `out/ru/` from `site/ru/*.md`.
+  - Russian into `site/.build-ru/` (`--out-ru`) from `site/ru/*.md`. It is a separate folder, so the English MkDocs build does not pick up the Russian pages.
 - **Same adaptations as English.** Russian pages get the same treatment: link rewriting, alert conversion, list re-indentation, and heading demotion with a front-matter title for the multi-H1 pages.
   - Russian titles: «Руководство», «Безопасная среда», «PIV».
   - The rewriting maps sources to Russian pages: links that point at a source (`recovery/README.md`, an upstream `blob/.../SECENV.md`) go to the Russian page with the same file name.
@@ -99,7 +99,7 @@ source_hash: 3b18e512dba79e4c8300dd08aeb37f8e728b8dad
 A copy of the English config, with these differences:
 
 - `INHERIT` is not used. The file is standalone and duplicates the theme and extension settings, because MkDocs resolves `INHERIT` paths relative to the child file and the nav differs anyway.
-- `docs_dir: .build/ru`, `site_dir: .site/ru`.
+- `docs_dir: .build-ru`, `site_dir: .site/ru`.
 - `site_url: https://mezinster.github.io/YubiKey-Guide/ru/`.
 - `theme.language: ru`.
 - The `search` plugin with `lang: [ru, en]`.
@@ -152,7 +152,7 @@ Both configs add the same `extra.alternate`:
 - **Russian link rewriting.** Links resolve to Russian pages, and image paths work from `ru/`.
 - **Anchor parity.** Every heading id (explicit `{#…}` or slug) in each built English page exists in the built Russian page.
 - **Russian download page.** It uses the strings from `download.json`, with the same no-release fallback.
-- **Build layout.** The build writes `out/ru/*.md` and `out/ru/media`.
+- **Build layout.** The build writes `.build-ru/*.md` and `.build-ru/media`.
 - **Strict builds of both configs, locally and in CI.** Spot-check the language switcher, Russian search and an outdated-page banner. Produce the banner by building with a modified hash in a temporary copy.
 
 ## Out of scope
