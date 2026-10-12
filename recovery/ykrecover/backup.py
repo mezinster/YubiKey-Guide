@@ -307,6 +307,7 @@ def _listing(candidates) -> str:
 
 
 def choose(candidates, kind=None, key=None) -> Candidate:
+    """The candidate --source and --key pick; callers report a folder with no candidates before this."""
     found = list(candidates)
     if kind:
         candidates = [c for c in candidates if c.kind == kind]
@@ -315,9 +316,6 @@ def choose(candidates, kind=None, key=None) -> Candidate:
         candidates = [c for c in candidates if not c.key_id or want.endswith(c.key_id) or c.key_id.endswith(want)]
     if len(candidates) == 1:
         return candidates[0]
-    if not found:
-        raise RecoveryError("no backup found (expected secret-*-Certify.key, secret-*-Subkeys.key "
-                            "or a GnuPG home)", EXIT_BACKUP)
     if not candidates:
         raise RecoveryError(f"no backup matches --source or --key; found:\n{_listing(found)}", EXIT_BACKUP)
     raise RecoveryError(f"several backups found; narrow --backup or pass --source or --key:\n{_listing(candidates)}",

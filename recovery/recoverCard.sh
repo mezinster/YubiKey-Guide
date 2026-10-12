@@ -459,7 +459,7 @@ detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and IN
   sort_candidates
 }
 
-choose_candidate() { # as Python's backup.choose
+choose_candidate() { # as Python's backup.choose; main reports a folder with no candidates first
   local i matches=() want=${KEY^^} k
   want=${want// /}
   for i in "${!CAND_KIND[@]}"; do
@@ -469,8 +469,6 @@ choose_candidate() { # as Python's backup.choose
     matches+=("$i")
   done
   if (( ${#matches[@]} == 1 )); then CHOSEN=${matches[0]}; return 0; fi
-  (( ${#CAND_KIND[@]} )) ||
-    die "$EXIT_BACKUP" "no backup found (expected secret-*-Certify.key, secret-*-Subkeys.key or a GnuPG home)"
   if (( ${#matches[@]} == 0 )); then
     die "$EXIT_BACKUP" "no backup matches --source or --key; found:$(candidate_listing "${!CAND_KIND[@]}")"
   fi
