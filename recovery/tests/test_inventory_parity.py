@@ -1,9 +1,11 @@
 """The backup report (stderr) is identical in both implementations."""
 
+import os
+import subprocess
 import unittest
 
-from tests.helpers import (FIXTURES, LINUX, bare_first_folder, bom_crlf_folder, fixture_info, partial_import_folder,
-                           repeated_key_folder, run_impl, short_tempdir)
+from tests.helpers import (FIXTURES, LINUX, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
+                           partial_import_folder, repeated_key_folder, run_impl, short_tempdir)
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -20,6 +22,25 @@ def report(stderr: str) -> str:
         if inside:
             lines.append(line)
     return "\n".join(lines)
+
+
+ACCEPTED = ('/{}: key {}: accepted non self-signed user ID "Recovery Test (ed25519) <test@example.org>"\n')
+# the warning starts "warning: gpg took a user ID with no self-signature from <folder>"
+
+
+def translating_locale():
+    """A (LANGUAGE, LC_ALL) pair under which gpg prints German, or None when no translation is installed."""
+    names = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=False).stdout.split()
+    utf8 = [n for n in names if n.lower().replace("-", "").endswith(".utf8") and not n.startswith("C.")]
+    for loc in utf8[:1]:
+        env = {**os.environ, "LANGUAGE": "de", "LC_ALL": loc}
+        out = subprocess.run([REAL_GPG, "--batch", "--homedir", "/nonexistent-ykr", "--list-keys", "x"], env=env,
+                             capture_output=True, text=True, check=False).stderr
+        plain = subprocess.run([REAL_GPG, "--batch", "--homedir", "/nonexistent-ykr", "--list-keys", "x"],
+                               env={**os.environ, "LC_ALL": "C"}, capture_output=True, text=True, check=False).stderr
+        if out != plain:
+            return "de", loc
+    return None
 
 
 @unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
@@ -58,6 +79,20 @@ class InventoryParityTests(unittest.TestCase):
         self.assertIn(f"\nwarning: gpg skipped part of {root / 'partial.gpg'}: key {bad}: ", py.stderr)
         self.assertIn(ed, py.stdout)
 
+    def test_gpg_messages_are_english_in_any_locale(self):
+        found = translating_locale()
+        if found is None:
+            self.skipTest("gpg has no German translation here")
+        language, loc = found
+        root = partial_import_folder(self, "two-keys")
+        ed, bad = fixture_info("ed25519")["KEY_ID"], fixture_info("unprotected")["KEY_ID"]
+        args = ["--backup", str(root), "--dry-run", "--key", ed]
+        py = run_impl("python", args, env={"LANGUAGE": language, "LC_ALL": loc})
+        sh = run_impl("bash", args, env={"LANGUAGE": language, "LC_ALL": loc})
+        self.assertEqual((sh.returncode, sh.stdout, sh.stderr), (py.returncode, py.stdout, py.stderr))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertIn(f"\nwarning: gpg skipped part of {root / 'partial.gpg'}: key {bad}: no user ID\n", py.stderr)
+
     def test_skipped_key_is_not_loaded(self):
         root = partial_import_folder(self, "two-keys")
         bad = fixture_info("unprotected")["KEY_ID"]
@@ -73,10 +108,13 @@ class InventoryParityTests(unittest.TestCase):
                 self.assertEqual(py.returncode, 0, py.stderr)
                 self.assertNotIn("warning: gpg skipped part of", py.stderr)
                 self.assertIn(fixture_info("ed25519")["KEY_FP"], py.stdout)
+                self.assertEqual(py.stderr.count("warning: "), 1, py.stderr)
+                self.assertIn(ACCEPTED.format("partial.gpg", fixture_info("ed25519")["KEY_ID"]), py.stderr)
 
     def test_key_with_no_self_signed_user_id_is_refused(self):
         py = self.assert_same_run(partial_import_folder(self, "unsigned"))
         self.assertEqual(py.returncode, 2, py.stderr)
+        self.assertIn(ACCEPTED.format("partial.gpg", fixture_info("ed25519")["KEY_ID"]), py.stderr)
         self.assertTrue(py.stderr.endswith(f"\nerror: key {fixture_info('ed25519')['KEY_FP']} has no user ID "
                                            "with a valid self-signature in the backup; re-export the key from a "
                                            "keyring that holds it\n"), py.stderr)

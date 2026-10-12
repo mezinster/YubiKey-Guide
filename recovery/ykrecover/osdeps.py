@@ -231,6 +231,8 @@ def run(argv, input=None, env=None) -> subprocess.CompletedProcess:
     if input is None:
         flags["stdin"] = subprocess.DEVNULL
     data = input.encode("utf-8") if input is not None else None
+    if argv[0] in GNUPG_TOOLS:  # untranslated messages, which are parsed and quoted (bash runs with LC_ALL=C too)
+        env = {**(os.environ if env is None else env), "LC_ALL": "C", "LANGUAGE": "C"}
     done = subprocess.run(tool(argv[0]) + argv[1:], input=data, env=env, capture_output=True,
                           check=False, **flags)
 

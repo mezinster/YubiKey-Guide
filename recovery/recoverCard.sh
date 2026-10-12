@@ -668,7 +668,8 @@ UNSIGNED_UIDS="has no user ID with a valid self-signature in the backup; re-expo
 # for any part it skipped (as Python's backup.load; the staged keys are checked afterwards by load_bundle and
 # check_bundle). SKIP_* pick the gpg message the warning quotes, as backup.skipped_line.
 SKIP_KEY='^key [0-9A-F]{8,40}: '
-SKIP_DONE='^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*)$'
+SKIP_DONE='^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*|accepted non self-signed user ID ".*")$'
+ACCEPTED='^key [0-9A-F]{8,40}: accepted non self-signed user ID ".*"$'
 SKIP_NOISE="^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$"
 
 secret_keys_imported() { # secret_keys_imported STATUS_FILE: IMPORT_RES counts secret keys imported or unchanged
@@ -679,6 +680,15 @@ secret_keys_imported() { # secret_keys_imported STATUS_FILE: IMPORT_RES counts s
   done <"$1"
   read -ra f <<<"$counts"
   (( ${#f[@]} >= 14 )) && [[ ${f[12]} =~ ^[0-9]+$ && ${f[13]} =~ ^[0-9]+$ ]] && (( 10#${f[12]} + 10#${f[13]} > 0 ))
+}
+
+warn_accepted() { # warn_accepted STDERR_FILE FILE: gpg's notes on user IDs taken with no self-signature
+  local line
+  while IFS= read -r line; do
+    [[ $line == "gpg: "* ]] || continue
+    line=${line#gpg: }
+    if [[ $line =~ $ACCEPTED ]]; then warn "gpg took a user ID with no self-signature from $2: $line"; fi
+  done <"$1"
 }
 
 skipped_line() { # skipped_line STDERR_FILE CODE: the gpg message a partial import's warning quotes
@@ -708,6 +718,7 @@ load_candidate() {
       rc=0
       GNUPGHOME=$STAGING gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$source" \
         >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
+      warn_accepted "$WORK/import.err" "$f"
       if (( rc )); then
         secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
         warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"

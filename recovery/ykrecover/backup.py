@@ -544,7 +544,9 @@ def check_user_ids(bundle: KeyBundle) -> None:
 # status line says it imported secret keys or already had them; whether those are the chosen key's, with its secret
 # parts, is decided after the import, from the staged keys (list_bundles, choose_key, Session.validate_bundle).
 SKIP_KEY = re.compile(r"^key [0-9A-F]{8,40}: ")
-SKIP_DONE = re.compile(r'^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*)$')
+SKIP_DONE = re.compile(r'^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*|'
+                       r'accepted non self-signed user ID ".*")$')
+ACCEPTED = re.compile(r'^key [0-9A-F]{8,40}: accepted non self-signed user ID ".*"$')
 SKIP_NOISE = re.compile(r"^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$")
 
 
@@ -558,6 +560,11 @@ def secret_keys_imported(status: str) -> bool:
     return int(fields[12]) + int(fields[13]) > 0
 
 
+def accepted_lines(stderr: str) -> list:
+    """gpg's notes on user IDs it took with no self-signature (--allow-non-selfsigned-uid)."""
+    return [line[5:] for line in stderr.splitlines() if line.startswith("gpg: ") and ACCEPTED.match(line[5:])]
+
+
 def skipped_line(stderr: str, code: int) -> str:
     """The first gpg message about a key it did not take, else its first message that is not routine."""
     lines = [line[5:] for line in stderr.splitlines() if line.startswith("gpg: ")]
@@ -566,7 +573,8 @@ def skipped_line(stderr: str, code: int) -> str:
     return (keys or other or [f"gpg exited with status {code}"])[0]
 
 
-def load(candidate: Candidate, staging: Home, warn=None) -> list:
+def load(candidate: Candidate, staging: Home, warn) -> list:
+    """Imports the candidate into staging and lists its keys; warn(msg) receives what gpg took or skipped."""
     if candidate.kind == "gnupghome":
         staging.kill_agents()
         for src in candidate.files:  # read-only media keeps its mode bits; make the copies usable
@@ -588,11 +596,12 @@ def load(candidate: Candidate, staging: Home, warn=None) -> list:
                 raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
             result = staging.run(["gpg", "--batch", "--allow-non-selfsigned-uid", "--status-fd", "1", "--import",
                                   "--", str(source)])
+            for line in accepted_lines(result.stderr):
+                warn(f"gpg took a user ID with no self-signature from {src}: {line}")
             if result.returncode != 0:
                 if not secret_keys_imported(result.stdout):
                     raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
-                if warn:
-                    warn(f"gpg skipped part of {src}: {skipped_line(result.stderr, result.returncode)}")
+                warn(f"gpg skipped part of {src}: {skipped_line(result.stderr, result.returncode)}")
         repair_ecdh_imports(staging, candidate.bare)
     bundles = list_bundles(staging)
     if not bundles:

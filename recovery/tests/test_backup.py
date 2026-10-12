@@ -139,7 +139,7 @@ class InventoryTests(unittest.TestCase):
     def assert_staging_protected(self, candidate, protected):
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(candidate, staging)
+        (bundle,) = backup.load(candidate, staging, self.fail)
         self.assertEqual(backup.check_passphrase(staging, bundle, "not-the-passphrase"), not protected)
 
     def test_repeated_key_first_copy_wins(self):
@@ -171,7 +171,7 @@ class InventoryTests(unittest.TestCase):
                          "3 subkeys secret (no passphrase) (used)")
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(c, staging)
+        (bundle,) = backup.load(c, staging, self.fail)
         self.assertTrue(bundle.has_certify_secret)
         self.assertEqual((root / "bom.asc").read_bytes(), original)
         copies = [p for p in staging.path.iterdir() if p.is_file() and p.read_bytes() == original[3:]]
@@ -231,16 +231,21 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([str(f) for f in c.files], [os.path.join("-dash", "key.asc")])
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(c, staging)
+        (bundle,) = backup.load(c, staging, self.fail)
         self.assertTrue(bundle.has_certify_secret)
 
     def test_loads_split_files_into_one_key(self):
         (c,) = backup.detect(FIXTURES / "split")
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(c, staging)
+        (bundle,) = backup.load(c, staging, self.fail)
         self.assertTrue(bundle.has_certify_secret)
         self.assertTrue(all(k.secret for k in bundle.subkeys))
+
+
+def accepted_warning(path, key_id, uid="Recovery Test (ed25519) <test@example.org>"):
+    return (f"gpg took a user ID with no self-signature from {path}: "
+            f'key {key_id}: accepted non self-signed user ID "{uid}"')
 
 
 class PartialImportTests(unittest.TestCase):
@@ -284,7 +289,7 @@ class PartialImportTests(unittest.TestCase):
         self.assertTrue(bundle.subkeys and all(k.secret for k in bundle.subkeys))
         self.assertEqual(bundle.uids, ("Recovery Test (ed25519) <test@example.org>",))
         backup.check_user_ids(bundle)
-        self.assertEqual(warnings, [])
+        self.assertEqual(warnings, [accepted_warning(path, info["KEY_ID"])])
         return path
 
     def test_secret_block_without_user_id_self_signature(self):
@@ -303,7 +308,7 @@ class PartialImportTests(unittest.TestCase):
         path, bundles, warnings = self.load("unsigned")
         self.assertEqual(self.real_import(path), (2, []))
         (bundle,) = bundles
-        self.assertEqual(warnings, [])
+        self.assertEqual(warnings, [accepted_warning(path, info["KEY_ID"])])
         with self.assertRaises(RecoveryError) as ctx:
             backup.check_user_ids(bundle)
         self.assertEqual((ctx.exception.code, str(ctx.exception)),
@@ -317,7 +322,7 @@ class PartialImportTests(unittest.TestCase):
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
         with self.assertRaises(RecoveryError) as ctx:
-            backup.load(candidate, staging)
+            backup.load(candidate, staging, self.fail)
         self.assertEqual(ctx.exception.code, EXIT_BACKUP)
         self.assertTrue(str(ctx.exception).startswith(f"cannot import {root / 'partial.gpg'}: gpg: "),
                         str(ctx.exception))
@@ -341,6 +346,10 @@ class PartialImportTests(unittest.TestCase):
         self.assertEqual(backup.skipped_line(stderr, 2), "key CCCC3333DDDD4444: no valid user IDs")
         self.assertEqual(backup.skipped_line(stderr.replace("key CCCC", "kex CCCC"), 2), "WARNING: something general")
         self.assertEqual(backup.skipped_line("gpg: Total number processed: 1\n", 2), "gpg exited with status 2")
+        accepted = 'gpg: key CCCC3333DDDD4444: accepted non self-signed user ID "C <c@example.org>"\n'
+        self.assertEqual(backup.skipped_line(accepted + stderr, 2), "key CCCC3333DDDD4444: no valid user IDs")
+        self.assertEqual(backup.accepted_lines(accepted + stderr),
+                         ['key CCCC3333DDDD4444: accepted non self-signed user ID "C <c@example.org>"'])
 
 
 class HomeRegistryTests(unittest.TestCase):
@@ -556,7 +565,7 @@ class LoadTests(unittest.TestCase):
 
     def load(self, profile: str, kind: str):
         candidate = backup.choose(backup.detect(FIXTURES / profile / kind))
-        return backup.choose_key(backup.load(candidate, self.home))
+        return backup.choose_key(backup.load(candidate, self.home, self.fail))
 
     def test_export_matches_fixture(self):
         info = fixture_info("ed25519")
@@ -696,7 +705,7 @@ class EcdhRepairTests(unittest.TestCase):
         if self.bash:
             self.skipTest("backup.load is Python's")
         candidate = backup.choose(backup.detect(FIXTURES / "unprotected"))
-        bundle = backup.choose_key(backup.load(candidate, self.home))
+        bundle = backup.choose_key(backup.load(candidate, self.home, self.fail))
         self.assertEqual([k.secret for k in bundle.subkeys], [True] * 3,
                          f"gpg {'.'.join(map(str, gpg_version()))} staging listing:\n{self.listing()}\n"
                          f"key files: {sorted(self.key_files())}")
