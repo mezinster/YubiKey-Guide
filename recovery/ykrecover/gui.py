@@ -119,7 +119,9 @@ class Modal(tk.Toplevel):
         self.bar = ttk.Frame(outer)
         self.bar.pack(side="bottom", fill="x", pady=(12, 0))  # first, so a short window never hides it
         for label, value in reversed(buttons):
-            ttk.Button(self.bar, text=label, command=lambda v=value: self.done(v)).pack(side="right", padx=(4, 0))
+            button = ttk.Button(self.bar, text=label, command=lambda v=value: self.done(v))
+            button.bind("<Return>", lambda event, b=button: b.invoke())  # ttk buttons only answer Space
+            button.pack(side="right", padx=(4, 0))
         ttk.Label(outer, text=header, wraplength=min(self.em * 60, self.max_width), justify="left").pack(
             anchor="w", pady=(0, 8))
         self.content = ttk.Frame(outer)
@@ -149,7 +151,10 @@ class Modal(tk.Toplevel):
         y = max(0, min(y, self.winfo_screenheight() - height))
         self.geometry(f"+{x}+{y}")
         self.deiconify()
-        self.wait_visibility()
+        try:
+            self.wait_visibility()
+        except tk.TclError:  # destroyed before it was shown: the main window closed for a signal
+            return self.value
         self.grab_set()
         self.focus_widget.focus_set()
         self.wait_window()
@@ -163,8 +168,7 @@ class TextDialog(Modal):
                  close_value=None, clear_clipboard=False):
         super().__init__(parent, title, header, buttons, closable, close_value)
         self.text_content = content
-        self.clear_clipboard = clear_clipboard  # on close, unless something else was copied since
-        self.copied = False
+        self.clear_clipboard = clear_clipboard  # on close, if the clipboard holds any of the text
         frame, self.text = scrolled_text(self.content, 1, wrap)
         font = self.text.cget("font")
         longest = max((len(line) for line in content.splitlines()), default=0)
@@ -179,12 +183,12 @@ class TextDialog(Modal):
     def copy(self):
         self.clipboard_clear()
         self.clipboard_append(self.text_content)
-        self.copied = True
 
     def done(self, value):
-        if self.clear_clipboard and self.copied:
+        if self.clear_clipboard:
             try:
-                if self.clipboard_get() == self.text_content:
+                clip = self.clipboard_get()  # the Copy button, or a selection copied with Ctrl+C
+                if clip and clip in self.text_content:  # something copied from elsewhere stays
                     self.clipboard_clear()
             except tk.TclError:  # empty, or holds something that is not text
                 pass
@@ -214,7 +218,7 @@ class ChoiceDialog(Modal):
         self.listbox.activate(0)
         self.focus_widget = self.listbox  # arrow keys move the selection, Return chooses
         self.listbox.bind("<Double-Button-1>", lambda event: self.done("ok"))
-        self.bind("<Return>", lambda event: self.done("ok"))
+        self.listbox.bind("<Return>", lambda event: self.done("ok"))  # not the window: Return on Cancel cancels
 
     def done(self, value):
         chosen = self.listbox.curselection() if value == "ok" else ()
@@ -327,6 +331,7 @@ class App:
         self.failures = 0
         self.pins = []  # kept PINs not yet shown
         self.pins_shown = False
+        self.showing_pins = False  # the PIN dialog is up: a termination signal waits for it
         self.terminate_requested = False
         self.worker = None
         self.table = None
@@ -371,6 +376,8 @@ class App:
         reschedule = True
         try:
             if self.terminate_requested:
+                if self.showing_pins:  # quit once they are confirmed, not under the dialog
+                    return
                 self.terminate()
                 reschedule = False  # the window is destroyed: a new "after" would outlive it
                 return
@@ -599,13 +606,15 @@ class App:
         new.validate_workdir()  # adopted: temporary homes now go to its work folder
         if workdir is not None:
             self.warn_leftovers()
+            if not self.alive():  # closed for a signal under the dialog
+                return False
         while True:
             try:
                 self.session.load()
                 break
             except backup_mod.AmbiguousKey as err:
                 chosen = self.choose_key(err.bundles)
-                if chosen is None:
+                if chosen is None or not self.alive():
                     return False
                 self.session.opts.key = err.bundles[chosen].key_fp
             except RecoveryError as err:
@@ -799,14 +808,30 @@ class App:
         if not self.pins:
             return
         pins, self.pins = self.pins, []  # cleared first: a nested call cannot open a second dialog
-        self.pins_dialog(pins).run()
+        self.showing_pins = True
+        try:
+            self.pins_dialog(pins).run()
+        finally:
+            self.showing_pins = False
         self.pins_shown = True
         btn = getattr(self, "pin_btn", None)
         if btn is not None and btn.winfo_exists():
             btn.state(["disabled"])
 
+    def alive(self):
+        """Whether the main window still exists (terminate() may destroy it under a dialog)."""
+        try:
+            return bool(self.root.winfo_exists())
+        except tk.TclError:  # the Tcl interpreter is gone too
+            return False
+
+    def dialog_up(self):
+        """Whether a dialog holds the grab: one of ours, or one of Tk's own message boxes, which
+        tkinter's grab_current() cannot map to a widget (it raises KeyError for them)."""
+        return bool(str(self.root.tk.call("grab", "current", self.root._w)))
+
     def close(self):
-        if self.root.grab_current() is not None:  # a dialog is up (the WM close button bypasses its grab)
+        if self.dialog_up():  # the window manager's close button bypasses the grab
             self.root.bell()
             return
         busy = self.worker is not None and self.worker.is_alive()

@@ -41,6 +41,10 @@ $PythonDir = Join-Path $env:ProgramFiles "Python313"   # only administrators can
 $GnupgPackage = "gnupg"
 $GnupgVersion = "2.5.21"
 $ChocoTimeoutSeconds = 900   # a hanging installer fails after 15 minutes instead of blocking forever
+# This PowerShell's own executable, for the elevated copy and the build: $PSHOME of PowerShell 7 holds
+# pwsh.exe and no powershell.exe.
+$PowerShellExe = Join-Path $PSHOME "powershell.exe"
+if ($PSVersionTable.PSEdition -eq "Core") { $PowerShellExe = Join-Path $PSHOME "pwsh.exe" }
 
 if (-not $LogPath) {
     $LogPath = Join-Path $PSScriptRoot ("logs\prepare_{0:yyyy-MM-dd_HH-mm-ss}.log" -f (Get-Date))
@@ -302,7 +306,7 @@ function Invoke-ElevatedInstallation {
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Elevated -LogPath `"$LogPath`""
     Write-Log "Asking for administrator rights to install Chocolatey, Python and GnuPG"
     try {
-        $process = Start-Process -FilePath (Join-Path $PSHOME "powershell.exe") -ArgumentList $arguments `
+        $process = Start-Process -FilePath $PowerShellExe -ArgumentList $arguments `
                                  -Verb RunAs -PassThru
     } catch {
         throw "Administrator rights were not granted: $($_.Exception.Message)"
@@ -337,7 +341,7 @@ try {
         } else {
             Write-Log "Building the executables as $env:USERNAME"
             # A separate process, so the build script does not inherit this script's strict mode.
-            & (Join-Path $PSHOME "powershell.exe") -NoProfile -ExecutionPolicy Bypass `
+            & $PowerShellExe -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $PSScriptRoot "build-windows.ps1")
             if ($LASTEXITCODE -ne 0) { throw "build-windows.ps1 failed with exit code $LASTEXITCODE" }
             Write-Log "Built $(Join-Path $PSScriptRoot 'dist\ykrecover-windows-x64.zip')" "SUCCESS"

@@ -31,25 +31,50 @@ class GuiAvailable(unittest.TestCase):
         self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
 
 
-def when_dialog_up(root, action):
-    """Calls action(dialog) from the event loop once a modal dialog holds the grab."""
+def grab_holder(root):
+    """The Tcl name of the window holding the grab, or "". Asks Tcl directly: tkinter's grab_current()
+    raises KeyError for Tk's own message boxes (".__tk__messagebox" on X11)."""
+    return str(root.tk.call("grab", "current", root._w))
+
+
+def when_dialog_up(root, action, timeout=5000):
+    """Calls action(dialog) from the event loop once a dialog holds the grab. dialog is the Toplevel, or
+    the Tcl name of one of Tk's own message boxes."""
+    pending = {}
+
+    def later(ms, fn):
+        pending[fn.__name__] = root.after(ms, fn)
+
     def check():
-        dialog = root.grab_current()
-        if dialog is None:
-            root.after(20, check)
-        else:
-            root.after(3000, unblock)
-            action(dialog)
+        name = grab_holder(root)
+        if not name:
+            later(20, check)
+            return
+        pending.pop("check", None)
+        try:
+            dialog = root.nametowidget(name)
+        except KeyError:  # not created by tkinter
+            dialog = name
+        action(dialog)
 
     def unblock():  # a failing test must not hang in a dialog nobody answers
+        pending.clear()
         try:
-            for widget in root.winfo_children():
-                if isinstance(widget, tk.Toplevel):
-                    widget.destroy()
+            for name in root.tk.splitlist(root.tk.call("winfo", "children", root._w)):
+                if str(root.tk.call("winfo", "toplevel", name)) == str(name):
+                    root.tk.call("destroy", name)  # also message boxes, which winfo_children() skips
         except tk.TclError:  # the root is gone
             pass
 
-    root.after(20, check)
+    def forget(event):  # timers outlive a destroyed root and would fire in a later test's event loop
+        if event.widget is root:
+            for after_id in pending.values():
+                root.after_cancel(after_id)
+            pending.clear()
+
+    root.bind("<Destroy>", forget, add="+")
+    later(timeout, unblock)  # armed now, so a dialog that never takes the grab cannot hang either
+    later(20, check)
 
 
 @SKIP_GUI
@@ -169,6 +194,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.addCleanup(destroy)
         app = App(root)
+        app.alert = lambda text: None  # an unexpected alert fails the test instead of waiting for a click
         app.logbox = tk.Text(root)
         app.keep_pins([("11111111", "12345678", "123456")])
         return app
@@ -214,19 +240,7 @@ class GuiSmokeTests(unittest.TestCase):
         """The window manager's close button is not blocked by a grab: leave_backup() must not go on
         loading the key after the window was closed under the leftover warning."""
         from ykrecover.migrate import Session
-        from tests.helpers import FIXTURES, short_tempdir
-        from ykrecover import osdeps
-        app = self.app_with_pins()
-        app.pins = []
-        self.addCleanup(osdeps.set_workdir, None)
-        workdir = short_tempdir(self, "wd")
-        leftover = workdir / "ykr-staging-old"
-        leftover.mkdir()
-        os.utime(leftover, (1, 1))
-        app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
-        app.v["workdir"].set(str(workdir))
-        app.show(1)
-        app.root.update()
+        app = self.backup_page_with_leftovers()
         seen = []
 
         def close_then_answer(dialog):
@@ -240,6 +254,31 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(seen, [("Work folder", 1, 1)])
         load.assert_called_once()
         self.assertTrue(app.root.winfo_exists())
+
+    def test_close_is_refused_under_a_message_box(self):
+        """Tk's own message boxes (the card prompt, alerts) hold the grab under a name tkinter cannot map."""
+        from tkinter import messagebox
+        app = self.app_with_pins()
+        app.root.update()
+        if app.root.tk.call("tk", "windowingsystem") != "x11":
+            self.skipTest("native message boxes disable the window instead of taking a Tk grab")
+        errors = []
+        app.root.report_callback_exception = lambda *args: errors.append(args[1])
+        app.worker = SimpleNamespace(is_alive=lambda: True)  # card writing in progress
+        app.session = SimpleNamespace(cleanup=mock.Mock())
+        seen = []
+
+        def close_then_dismiss(name):
+            with mock.patch("ykrecover.gui.messagebox.showinfo") as notice:
+                app.root.tk.call(app.root.protocol("WM_DELETE_WINDOW"))
+            seen.append((name, notice.call_count, app.root.winfo_exists()))
+            app.root.tk.call("destroy", name)
+
+        when_dialog_up(app.root, close_then_dismiss)
+        messagebox.askokcancel("Insert card", "Insert card 1 of 2.", parent=app.root)  # as wait_for_card does
+        self.assertEqual(errors, [])
+        self.assertEqual(seen, [(".__tk__messagebox", 0, 1)])
+        app.session.cleanup.assert_not_called()
 
     def test_close_under_the_pin_dialog_does_not_nest_a_second_one(self):
         from ykrecover.gui import TextDialog
@@ -281,6 +320,74 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("Card 22222222: Admin PIN 87654321", shown.call_args.args[0].text_content)
         self.assertNotIn("11112222", shown.call_args.args[0].text_content)
         app.session.cleanup.assert_called_once()
+
+    def backup_page_with_leftovers(self):
+        """An app on the backup page whose work folder holds a leftover, so leave_backup() warns."""
+        from tests.helpers import FIXTURES, short_tempdir
+        from ykrecover import osdeps
+        app = self.app_with_pins()
+        app.pins = []
+        self.addCleanup(osdeps.set_workdir, None)
+        workdir = short_tempdir(self, "wd")
+        leftover = workdir / "ykr-staging-old"
+        leftover.mkdir()
+        os.utime(leftover, (1, 1))
+        app.v["folder"].set(str(FIXTURES / "ed25519" / "export"))
+        app.v["workdir"].set(str(workdir))
+        app.show(1)
+        app.root.update()
+        return app
+
+    def test_termination_under_a_backup_page_dialog_stops_loading(self):
+        """poll() runs inside a dialog's own event loop: a signal there destroys the window under it, and
+        leave_backup() must not go on to load and unlock the key."""
+        from ykrecover.backup import AmbiguousKey
+        from ykrecover.gui import TITLE
+        from ykrecover.migrate import Session
+        bundles = [SimpleNamespace(key_fp="A" * 40, uids=("one",)), SimpleNamespace(key_fp="B" * 40, uids=("two",))]
+        for title, load in (("Work folder", None), (TITLE, AmbiguousKey(bundles))):
+            with self.subTest(title):
+                app = self.backup_page_with_leftovers()
+                seen = []
+
+                def signal_then_answer(dialog):
+                    seen.append(dialog.title())
+                    if dialog.title() == title:
+                        app.request_terminate(signal.SIGTERM, None)  # acted on by the next poll()
+                    else:  # the leftover warning, before the key chooser
+                        dialog.done(None)
+                        when_dialog_up(app.root, signal_then_answer)
+
+                when_dialog_up(app.root, signal_then_answer)
+                with mock.patch.object(Session, "load", side_effect=load) as loaded, \
+                        mock.patch.object(Session, "unlock", return_value=True) as unlocked:
+                    self.assertFalse(app.leave_backup())
+                self.assertFalse(app.alive())
+                self.assertEqual(seen, ["Work folder"] if load is None else ["Work folder", TITLE])
+                self.assertEqual(loaded.call_count, 0 if load is None else 1)
+                unlocked.assert_not_called()
+
+    def test_a_dialog_destroyed_before_it_shows_returns_its_close_value(self):
+        from ykrecover.gui import TextDialog
+        app = self.app_with_pins()
+        dialog = TextDialog(app.root, "t", "h", "body", (("OK", 1),), close_value="closed")
+        with mock.patch.object(TextDialog, "wait_visibility", side_effect=tk.TclError("deleted")):
+            self.assertEqual(dialog.run(), "closed")  # as when terminate() destroys the root under it
+
+    def test_termination_waits_until_the_pins_are_confirmed(self):
+        app = self.app_with_pins()
+        seen = []
+
+        def signal_then_confirm(dialog):
+            app.request_terminate(signal.SIGTERM, None)
+            app.root.after(400, lambda: (seen.append((app.alive(), dialog.winfo_exists())), dialog.done(True)))
+
+        when_dialog_up(app.root, signal_then_confirm)
+        app.reveal_pins()  # as from the summary page's button: poll() keeps running under the dialog
+        self.assertEqual(seen, [(True, 1)])  # several polls went by, and the PINs stayed on screen
+        self.assertTrue(app.pins_shown)
+        app.poll()
+        self.assertFalse(app.alive())
 
     def test_back_to_backup_page_keeps_the_unlocked_session(self):
         from ykrecover.backup import Candidate
@@ -502,6 +609,17 @@ class GuiBehaviourTests(unittest.TestCase):
         pins.done(True)
         self.assertNotIn("11111111", self.clipboard(app))
 
+    def test_pins_copied_from_a_selection_leave_the_clipboard_on_confirm(self):
+        app = self.app()
+        for first, last in (("1.0", "end-1c"), ("1.25", "1.33")):  # all, and just the Admin PIN
+            with self.subTest(selection=(first, last)):
+                pins = app.pins_dialog([("12345678", "11111111", "222222")])
+                pins.text.tag_add("sel", first, last)
+                pins.text.event_generate("<<Copy>>")  # what Ctrl+C sends; the text is read-only, not unselectable
+                self.assertIn("11111111", self.clipboard(app))
+                pins.done(True)
+                self.assertEqual(self.clipboard(app), "")
+
     def test_confirming_pins_keeps_what_was_copied_since(self):
         app = self.app()
         pins = app.pins_dialog([("12345678", "11111111", "222222")])
@@ -548,6 +666,26 @@ class GuiBehaviourTests(unittest.TestCase):
         when_dialog_up(app.root, lambda d: press(d, "<Return>"))
         self.assertEqual(dialog.run(), 0)  # the first row is chosen without touching the list
         self.assertEqual(seen, [True, True])
+
+    def test_return_on_a_focused_button_presses_that_button(self):
+        from ykrecover.gui import ChoiceDialog
+        app = self.app()
+        app.root.update()
+        seen = []
+        for label, expected in (("Cancel", None), ("OK", 0)):
+            with self.subTest(label):
+                dialog = ChoiceDialog(app.root, "t", "Choose", ["first", "second"])
+                button = next(b for b in dialog.bar.winfo_children() if b.cget("text") == label)
+
+                def press(dialog):
+                    button.focus_force()  # as after Tab; forced, since there may be no window manager
+                    dialog.update()
+                    button.event_generate("<Return>")
+                    seen.append(dialog.winfo_exists())  # closed by the key, not by the helper's timeout
+
+                when_dialog_up(app.root, press)
+                self.assertEqual(dialog.run(), expected)
+        self.assertEqual(seen, [0, 0])
 
     def test_settings_are_validated_on_their_page(self):
         app = self.app()
