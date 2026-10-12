@@ -11,6 +11,7 @@ from pathlib import Path
 
 SITE = Path(__file__).resolve().parent
 sys.path.insert(0, str(SITE))
+import build  # noqa: E402
 from build import FENCE, PAGES  # noqa: E402
 
 HEADING_ID = re.compile(r'<h[2-6] id="([^"]+)"')
@@ -40,9 +41,18 @@ def html_path(site: Path, page: str) -> Path:
     return site / ("index.html" if page == "index.md" else page[:-3] + "/index.html")
 
 
-def compare(en_build: Path, ru_build: Path, en_site: Path, ru_site: Path, pages=None) -> list:
+def compare(en_build: Path, ru_build: Path, en_site: Path, ru_site: Path, pages=None,
+            ru_dir: Path = build.RU) -> list:
+    """Problems of current translations; an outdated one only warns and is not compared."""
     problems = []
+    sources = {page: source for source, page in PAGES.items()}
     for page in pages or CHECKED:
+        name = build.RU_FILES[sources[page]]
+        if (ru_dir / name).exists():
+            _, source_hash, _ = build.read_translation(ru_dir / name)
+            if source_hash != build.blob_hash(build.ROOT / sources[page]):
+                build.warn(f"ru/{name} is out of date with {sources[page]}; not compared", f"site/ru/{name}")
+                continue
         if not (ru_build / page).exists():
             problems.append(f"ru/{page}: no translation")
             continue

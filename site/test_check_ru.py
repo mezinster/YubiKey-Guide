@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import build  # noqa: E402
 import check_ru  # noqa: E402
+from unittest import mock  # noqa: E402
 
 FENCE = "`" * 3
 
@@ -25,12 +27,17 @@ class CheckRuTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(html, encoding="utf-8")
 
-    def compare_one(self, en_md, en_html, ru_md, ru_html):
+    def compare_one(self, en_md, en_html, ru_md, ru_html, stale=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            self.ru_dir = root / "ru"
+            self.ru_dir.mkdir()
+            digest = "0" * 40 if stale else build.blob_hash(build.ROOT / "piv/README.md")
+            (self.ru_dir / "piv.md").write_text(
+                f"---\nsource: piv/README.md\nsource_hash: {digest}\n---\n\n# П\n", encoding="utf-8")
             self.site(root, "b", "s", "piv.md", en_md, en_html)
             self.site(root, "br", "sr", "piv.md", ru_md, ru_html)
-            return check_ru.compare(root / "b", root / "br", root / "s", root / "sr", ["piv.md"])
+            return check_ru.compare(root / "b", root / "br", root / "s", root / "sr", ["piv.md"], self.ru_dir)
 
     def test_matching_pages_pass(self):
         md = f"## A\n\n{FENCE}\nls\n{FENCE}\n"
@@ -43,11 +50,21 @@ class CheckRuTests(unittest.TestCase):
         self.assertEqual(problems, ["ru/piv.md: heading #b is missing",
                                     "ru/piv.md: code block 1 differs from the English one"])
 
+    def test_stale_translation_only_warns(self):
+        with mock.patch.object(check_ru.build, "warn") as warn:
+            problems = self.compare_one(f"## A\n\n{FENCE}\nls\n{FENCE}\n", '<h2 id="a"><h2 id="b">',
+                                        "## А\n", '<h2 id="a">', stale=True)
+        self.assertEqual(problems, [])
+        warn.assert_called_once_with("ru/piv.md is out of date with piv/README.md; not compared",
+                                     "site/ru/piv.md")
+
     def test_missing_translation_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "br").mkdir()
-            self.assertEqual(check_ru.compare(root / "b", root / "br", root / "s", root / "sr", ["piv.md"]),
+            (root / "ru").mkdir()
+            self.assertEqual(check_ru.compare(root / "b", root / "br", root / "s", root / "sr", ["piv.md"],
+                                              root / "ru"),
                              ["ru/piv.md: no translation"])
 
 
