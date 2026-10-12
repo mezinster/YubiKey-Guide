@@ -92,27 +92,32 @@ def dearmor(text: bytes) -> bytes:
     return base64.b64decode("".join(line for line in body if line and not line.startswith(("=", "-----"))))
 
 
-def without_uid_self_sigs(data: bytes) -> bytes:
-    """A binary key export with the signatures after each user ID dropped: gpg finds no valid user ID in it."""
+def without_uid_self_sigs(data: bytes, drop_uids: bool = False) -> bytes:
+    """A binary key export with the signatures after each user ID dropped (gpg finds no valid user ID in it), or
+    with the user IDs dropped too (gpg finds none at all)."""
     packets, out, in_uid = _packets(), b"", False
     for tag, body in packets.read_packets(data):
         in_uid = tag == 13 or (in_uid and tag == 2)
-        if not (tag == 2 and in_uid):
+        if not (in_uid and (tag == 2 or drop_uids)):
             out += packets.write_packet(tag, body)
     return out
 
 
 def partial_import_folder(test, shape: str) -> Path:
-    """A backup file that gpg imports only in part (it exits non-zero), made from the fixture keys at test time.
+    """A backup file with a broken key block, made from the fixture keys at test time (partial.gpg).
 
+    Plain `gpg --import` (no --allow-non-selfsigned-uid) of each:
     user:       the ed25519 key's secret block with no user ID self-signature, then its public block. GnuPG 2.5
                 skips the user ID ("no valid user IDs"), exits non-zero and imports the main key's secret but
                 none of the subkeys'; GnuPG 2.4 stops at the secret block and imports nothing secret.
     bad-public: the same key's public block with no user ID self-signature, then its secret block. GnuPG 2.5
                 exits non-zero and imports every secret; GnuPG 2.4 does the same and exits 0.
-    two-keys:   the ed25519 key's secret block, then the unprotected key's secret block with no user ID
-                self-signature. Every GnuPG exits non-zero and imports the ed25519 secret key only.
-    rejected:   only the unprotected key's secret block with no user ID self-signature: nothing secret comes in."""
+    unsigned:   only the ed25519 key's secret block with no user ID self-signature: nothing secret comes in.
+    two-keys:   the ed25519 key's secret block, then the unprotected key's secret block with no user ID at all.
+                Every GnuPG exits non-zero ("no user ID") and imports the ed25519 secret key only, with or
+                without --allow-non-selfsigned-uid.
+    rejected:   only the unprotected key's secret block with no user ID at all: nothing secret comes in, with
+                or without --allow-non-selfsigned-uid."""
     home, root = short_tempdir(test, "pi"), short_tempdir(test, f"pi-{shape}")
     env = {**os.environ, "GNUPGHOME": str(home)}
 
@@ -120,13 +125,13 @@ def partial_import_folder(test, shape: str) -> Path:
         return subprocess.run([REAL_GPG, "--batch", *args], env=env, check=True, capture_output=True).stdout
 
     import_unprotected(home)
-    fpr = fixture_info("unprotected")["KEY_FP"]
-    broken = without_uid_self_sigs(gpg("--export-secret-keys", fpr))
+    unprotected = gpg("--export-secret-keys", fixture_info("unprotected")["KEY_FP"])
+    no_uid = without_uid_self_sigs(unprotected, drop_uids=True)
     export = FIXTURES / "ed25519" / "export"
     ed25519 = dearmor((export / f"secret-{fixture_info('ed25519')['KEY_ID']}-Certify.key").read_bytes())
     public = dearmor(next(export.glob("public-*.asc")).read_bytes())
     data = {"user": without_uid_self_sigs(ed25519) + public, "bad-public": without_uid_self_sigs(public) + ed25519,
-            "two-keys": ed25519 + broken, "rejected": broken}[shape]
+            "unsigned": without_uid_self_sigs(ed25519), "two-keys": ed25519 + no_uid, "rejected": no_uid}[shape]
     (root / "partial.gpg").write_bytes(data)
     return root
 

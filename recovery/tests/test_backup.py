@@ -275,41 +275,40 @@ class PartialImportTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1, warnings)
         self.assertTrue(warnings[0].startswith(f"gpg skipped part of {path}: key {bad}: "), warnings)
 
-    def load_user_shape(self, shape):
-        """Loads the shape as the tool does when real gpg imports a secret from it, else expects the import error."""
+    def load_whole_key(self, shape):
         info = fixture_info("ed25519")
-        root = partial_import_folder(self, shape)
-        code, imported = self.real_import(root / "partial.gpg")
-        candidate = backup.choose(backup.detect(root))
-        staging = Home.create("t")
-        self.addCleanup(staging.destroy)
-        warnings = []
-        if not imported:
-            with self.assertRaises(RecoveryError) as ctx:
-                backup.load(candidate, staging, warn=warnings.append)
-            self.assertEqual(ctx.exception.code, EXIT_BACKUP)
-            self.assertTrue(str(ctx.exception).startswith(f"cannot import {root / 'partial.gpg'}: "))
-            self.assertEqual(warnings, [])
-            return code, None
-        (bundle,) = backup.load(candidate, staging, warn=warnings.append)
+        path, bundles, warnings = self.load(shape)
+        (bundle,) = bundles
         self.assertEqual(bundle.key_fp, info["KEY_FP"])
         self.assertTrue(bundle.has_certify_secret)
-        expected = [f"gpg skipped part of {root / 'partial.gpg'}: key {info['KEY_ID']}: no valid user IDs"]
-        self.assertEqual(warnings, expected if code else [])
-        return code, bundle
+        self.assertTrue(bundle.subkeys and all(k.secret for k in bundle.subkeys))
+        self.assertEqual(bundle.uids, ("Recovery Test (ed25519) <test@example.org>",))
+        backup.check_user_ids(bundle)
+        self.assertEqual(warnings, [])
+        return path
 
     def test_secret_block_without_user_id_self_signature(self):
-        # GnuPG 2.5 (the reported Gpg4win case) exits non-zero but imports the main key's secret, though not the
-        # subkeys' (the later checks refuse them as stubs); GnuPG 2.4 stops at that block and imports nothing secret
-        code, bundle = self.load_user_shape("user")
+        # the reported Gpg4win case: plain GnuPG 2.5 imports the main key's secret but not the subkeys' and exits
+        # non-zero; GnuPG 2.4 stops at that block. With --allow-non-selfsigned-uid both take the whole key, and the
+        # public block that follows supplies the user ID's self-signature.
+        path = self.load_whole_key("user")
+        code, imported = self.real_import(path)
         self.assertNotEqual(code, 0)
-        if bundle is not None:
-            self.assertFalse(any(k.secret for k in bundle.subkeys))
 
     def test_public_block_without_user_id_self_signature(self):
-        # GnuPG 2.5 exits non-zero and imports every secret; GnuPG 2.4 exits 0
-        code, bundle = self.load_user_shape("bad-public")
-        self.assertTrue(bundle.subkeys and all(k.secret for k in bundle.subkeys))
+        self.load_whole_key("bad-public")
+
+    def test_key_with_no_self_signed_user_id_is_refused(self):
+        info = fixture_info("ed25519")
+        path, bundles, warnings = self.load("unsigned")
+        self.assertEqual(self.real_import(path), (2, []))
+        (bundle,) = bundles
+        self.assertEqual(warnings, [])
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.check_user_ids(bundle)
+        self.assertEqual((ctx.exception.code, str(ctx.exception)),
+                         (EXIT_BACKUP, f"key {info['KEY_FP']} has no user ID with a valid self-signature in the "
+                                       "backup; re-export the key from a keyring that holds it"))
 
     def test_rejected_secret_block_is_an_import_error(self):
         root = partial_import_folder(self, "rejected")

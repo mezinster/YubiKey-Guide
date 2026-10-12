@@ -74,6 +74,7 @@ class KeyBundle:
     has_certify_secret: bool
     expires: int = 0  # main key; 0 means never
     algo: str = ""
+    validity: str = ""  # main key, colon field 2: "i" when no user ID has a valid self-signature
 
 
 @dataclass(frozen=True)
@@ -338,7 +339,7 @@ def parse_secret_keys(colons: str) -> list:
             if current is not None:
                 close_sub()
             current = {"key_fp": "", "key_id": f[4], "uids": [], "subkeys": [], "has_certify_secret": f[14] != "#",
-                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}"}
+                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}", "validity": f[1]}
             bundles.append(current)
         elif f[0] == "ssb" and current is not None:
             close_sub()
@@ -356,7 +357,7 @@ def parse_secret_keys(colons: str) -> list:
     if current is not None:
         close_sub()
     return [KeyBundle(b["key_fp"], b["key_id"], tuple(b["uids"]), tuple(b["subkeys"]), b["has_certify_secret"],
-                      b["expires"], b["algo"]) for b in bundles]
+                      b["expires"], b["algo"], b["validity"]) for b in bundles]
 
 
 def list_bundles(home: Home) -> list:
@@ -524,6 +525,20 @@ def repair_ecdh_imports(home: Home, bare=()) -> None:
             raise RecoveryError(GNUPG25_DROPPED.format(" ".join(dropped)), EXIT_BACKUP)
 
 
+# Backup files are imported with --allow-non-selfsigned-uid. A secret block whose user ID lacks a valid
+# self-signature is otherwise skipped in part: GnuPG 2.4 stops at it with nothing secret imported, GnuPG 2.5 takes
+# the main key's secret but not the subkeys'. The option lets gpg take the whole block; a public block of the key
+# in the backup then adds the self-signature. A key left with no validly self-signed user ID is refused
+# (check_user_ids), as the public key written for the daily machine would not import there.
+UNSIGNED_UIDS = "key {} has no user ID with a valid self-signature in the backup; re-export the key from a keyring " \
+                "that holds it"
+
+
+def check_user_ids(bundle: KeyBundle) -> None:
+    if bundle.validity == "i":
+        raise RecoveryError(UNSIGNED_UIDS.format(bundle.key_fp), EXIT_BACKUP)
+
+
 # gpg exits non-zero when it skips any part of a file it imports (GnuPG 2.5 also for a user ID with no valid
 # self-signature), yet it may have imported the secret keys. A backup file counts as imported when gpg's IMPORT_RES
 # status line says it imported secret keys or already had them; whether those are the chosen key's, with its secret
@@ -571,7 +586,8 @@ def load(candidate: Candidate, staging: Home, warn=None) -> list:
             source = readable_copy(src, staging, f"bom-{index}.key")
             if source is None:
                 raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
-            result = staging.run(["gpg", "--batch", "--status-fd", "1", "--import", "--", str(source)])
+            result = staging.run(["gpg", "--batch", "--allow-non-selfsigned-uid", "--status-fd", "1", "--import",
+                                  "--", str(source)])
             if result.returncode != 0:
                 if not secret_keys_imported(result.stdout):
                     raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)

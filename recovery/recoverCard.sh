@@ -19,7 +19,7 @@ RETRIES=5,5,5 TOUCH=on TOUCH_SIG="" TOUCH_ENC="" TOUCH_AUT="" NAME="" LOGIN="" U
 SOURCE="" KEY="" WORKDIR="" DRY_RUN=0 YES=0
 RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS=""
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
-KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" UNPROTECTED=0 NOW=0
+KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" KEY_VALIDITY="" UNPROTECTED=0 NOW=0
 LOADED_FPRS=()
 CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
 KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
@@ -483,14 +483,14 @@ candidate_listing() { # candidate_listing INDEX...: "\n  <kind>: <path> (key <KE
   done
 }
 
-list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
+list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO VALIDITY" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
   GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
     awk -F: '
       $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1
-                    kexp = $7 + 0; kalgo = ($17 != "") ? $17 : "rsa" $3; next }
+                    kexp = $7 + 0; kalgo = ($17 != "") ? $17 : "rsa" $3; kvalid = ($2 != "") ? $2 : "-"; next }
       $1 == "ssb" { insub = 1; insec = 0; usage = $12; created = $6 + 0; expires = $7 + 0
                     validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
-      $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo; insec = 0; next }
+      $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo, kvalid; insec = 0; next }
       $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
       $1 == "uid" { print "uid", $10 }'
 }
@@ -516,7 +516,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   while IFS= read -r line; do
     read -r kind a b c d e f g <<<"$line"
     case $kind in
-      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; fi ;;
+      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; KEY_VALIDITY=$f; fi ;;
       uid) if [[ $current == "$KEY_FP" ]]; then UIDS+=("${line#uid }"); fi ;;
       ssb)
         if [[ $current == "$KEY_FP" ]]; then
@@ -660,6 +660,10 @@ repair_ecdh_imports() { # repair_ecdh_imports HOME BARE: BARE are the keyids the
   fi
 }
 
+# Backup files are imported with --allow-non-selfsigned-uid, and a key left with no validly self-signed user ID
+# is refused, as in Python's backup.load and backup.check_user_ids (whose comments explain why).
+UNSIGNED_UIDS="has no user ID with a valid self-signature in the backup; re-export the key from a keyring that holds it"
+
 # A backup file counts as imported when gpg imported or already had secret keys from it, though it exits non-zero
 # for any part it skipped (as Python's backup.load; the staged keys are checked afterwards by load_bundle and
 # check_bundle). SKIP_* pick the gpg message the warning quotes, as backup.skipped_line.
@@ -702,8 +706,8 @@ load_candidate() {
       readable_copy "$f" "$STAGING" "bom-$n.key" source || die "$EXIT_BACKUP" "cannot import $f: cannot read the file"
       n=$((n + 1))
       rc=0
-      GNUPGHOME=$STAGING gpg --batch --status-fd 1 --import -- "$source" >"$WORK/import.status" \
-        2>"$WORK/import.err" || rc=$?
+      GNUPGHOME=$STAGING gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$source" \
+        >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
       if (( rc )); then
         secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
         warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"
@@ -712,6 +716,7 @@ load_candidate() {
     repair_ecdh_imports "$STAGING" "${CAND_BARE[i]}"
   fi
   load_bundle "$STAGING"
+  if [[ $KEY_VALIDITY == i ]]; then die "$EXIT_BACKUP" "key $KEY_FP $UNSIGNED_UIDS"; fi
 }
 
 usage_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf auth ;; esac; }

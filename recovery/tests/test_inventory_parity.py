@@ -66,31 +66,20 @@ class InventoryParityTests(unittest.TestCase):
         self.assertIn("warning: gpg skipped part of", py.stderr)
         self.assertTrue(py.stderr.endswith(f"error: no key matches --key {bad}\n"), py.stderr)
 
-    def assert_same_partial_run(self, shape):
-        """Both twins agree on what real gpg let in; returns the Python run, or None when nothing secret came in."""
-        root = partial_import_folder(self, shape)
-        py = run_impl("python", ["--backup", str(root), "--dry-run"])
-        if "error: cannot import " in py.stderr:
-            self.assert_same_import_error(root)
-            return None
-        self.assert_same_run(root)
-        if "warning: gpg skipped part of" in py.stderr:
-            self.assertIn(f"\nwarning: gpg skipped part of {root / 'partial.gpg'}: key "
-                          f"{fixture_info('ed25519')['KEY_ID']}: no valid user IDs\n", py.stderr)
-        return py
-
     def test_secret_block_without_user_id_self_signature(self):
-        # GnuPG 2.5 imports the main key's secret only: clone refuses the subkeys as stubs; GnuPG 2.4 imports nothing
-        py = self.assert_same_partial_run("user")
-        if py is not None:
-            self.assertIn("warning: gpg skipped part of", py.stderr)
-            self.assertIn("\nerror: the backup holds card stubs, not secret subkeys: ", py.stderr)
-            self.assertEqual(py.returncode, 2)
+        for shape in ("user", "bad-public"):
+            with self.subTest(shape):
+                py = self.assert_same_run(partial_import_folder(self, shape))
+                self.assertEqual(py.returncode, 0, py.stderr)
+                self.assertNotIn("warning: gpg skipped part of", py.stderr)
+                self.assertIn(fixture_info("ed25519")["KEY_FP"], py.stdout)
 
-    def test_public_block_without_user_id_self_signature(self):
-        py = self.assert_same_partial_run("bad-public")
-        self.assertEqual(py.returncode, 0, py.stderr)
-        self.assertIn(fixture_info("ed25519")["KEY_FP"], py.stdout)
+    def test_key_with_no_self_signed_user_id_is_refused(self):
+        py = self.assert_same_run(partial_import_folder(self, "unsigned"))
+        self.assertEqual(py.returncode, 2, py.stderr)
+        self.assertTrue(py.stderr.endswith(f"\nerror: key {fixture_info('ed25519')['KEY_FP']} has no user ID "
+                                           "with a valid self-signature in the backup; re-export the key from a "
+                                           "keyring that holds it\n"), py.stderr)
 
     def test_rejected_secret_block_is_an_import_error(self):
         self.assert_same_import_error(partial_import_folder(self, "rejected"))
