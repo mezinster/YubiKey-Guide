@@ -77,8 +77,8 @@ Notes:
 
 Details:
 
-- `renew` and `rotate` first extend an expiring or expired main key to `--expire`. A main key that never expires is left untouched.
-- `renew` and `rotate` create a missing sign, encrypt or authentication subkey. `renew` uses the default algorithm (`rsa4096` if the main key is RSA, otherwise `ed25519`) and does not accept `--algo`; `rotate` does.
+- `renew` and `rotate` first extend the main key to `--expire` when it would expire before the new subkey expiry, including a main key that has already expired. A main key that never expires is left untouched.
+- `renew` and `rotate` create a missing sign, encrypt or authentication subkey. The default algorithm follows the existing subkeys (`rsa4096` for RSA, otherwise `ed25519`). `rotate` uses the same default unless `--algo` is given; `renew` does not accept `--algo`.
 - `clone` leaves an empty slot empty and warns about it. It writes no `ssh-*.pub` file when there is no authentication subkey.
 
 Choose `rotate` if the old cards may be lost or in someone else's hands. Add `--revoke-old` to revoke the previous subkeys.
@@ -113,10 +113,10 @@ A backup made with the main guide often holds both the exported key files (`secr
 
 Card stubs and public keys are reported but never used: a stub holds no secret key. Revocation certificate files (`.rev`) are ignored. A key that exists only as stubs or a public key is listed as "not recoverable from this folder".
 
-Before anything else the tool prints a report of every file it found on stderr (plans go to stdout). This is the real output for the `flexible` test fixture; the key ID is made up:
+Before anything else the tool prints a report of every file it found on stderr (plans go to stdout). This is the real output for the `flexible` test fixture; the key ID belongs to a test key:
 
 ```console
-$ python3 -m ykrecover --cli --backup "tests/fixtures/flexible/asc backup" --dry-run
+$ python3 -m ykrecover --cli --backup "tests/fixtures/flexible/asc backup" --mode renew --dry-run
 Backup files in tests/fixtures/flexible/asc backup:
   private/flex.priv.asc: key 5B21983A476B3572: main secret, 2 subkeys secret (used)
   pub/flex.pub.asc: key 5B21983A476B3572: main public, 2 subkeys public (ignored)
