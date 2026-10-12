@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, fixture_info, repeated_key_folder,
+from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info, repeated_key_folder,
                            short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup
 from ykrecover.gpg import Home
@@ -156,6 +156,25 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([(f.path.name, f.status) for f in inv.files],
                          [("a-bare.gpg", "not needed"), ("b-protected.gpg", "used")])
         self.assert_staging_protected(c, True)
+
+    def test_bom_armor_is_read_from_a_stripped_copy(self):
+        root = bom_crlf_folder(self)
+        original = (root / "bom.asc").read_bytes()
+        inv = backup.inventory(root)
+        (c,) = inv.candidates
+        self.assertEqual([f.name for f in c.files], ["bom.asc"])
+        self.assertEqual(backup.report(inv).splitlines()[1],
+                         f"  bom.asc: key {fixture_info('unprotected')['KEY_ID']}: main secret (no passphrase), "
+                         "3 subkeys secret (no passphrase) (used)")
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(c, staging)
+        self.assertTrue(bundle.has_certify_secret)
+        self.assertEqual((root / "bom.asc").read_bytes(), original)
+        copies = [p for p in staging.path.iterdir() if p.is_file() and p.read_bytes() == original[3:]]
+        self.assertEqual(len(copies), 1)
+        if os.name != "nt":
+            self.assertEqual(copies[0].stat().st_mode & 0o777, 0o600)
 
     def test_gnupg1_home(self):
         (c,) = backup.detect(FIXTURES / "gnupg1")

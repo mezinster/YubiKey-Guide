@@ -60,6 +60,14 @@ def bare_first_folder(test) -> Path:
     return root
 
 
+def bom_crlf_folder(test) -> Path:
+    """The unprotected fixture key as armor with a UTF-8 BOM and CRLF line ends, which gpg cannot parse as is."""
+    root = short_tempdir(test, "bom")
+    text = (FIXTURES / "unprotected" / "key.asc").read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    (root / "bom.asc").write_bytes(b"\xef\xbb\xbf" + text)
+    return root
+
+
 def _runtime_base() -> Path:
     return osdeps.default_work_base()
 

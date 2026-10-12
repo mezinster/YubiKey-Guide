@@ -205,6 +205,8 @@ class Session:
         inv = backup.inventory(Path(self.opts.backup))
         self.inventory = inv
         if not inv.candidates:
+            if any(f.status == "unreadable" for f in inv.files):
+                raise RecoveryError(f"no usable secret keys in {inv.root} (see the report above)", EXIT_BACKUP)
             if inv.files:
                 raise RecoveryError(f"no secret keys in {inv.root}: only card stubs or public keys", EXIT_BACKUP)
             raise RecoveryError(f"no backup found in {inv.root} (looked for OpenPGP key files and GnuPG homes)",

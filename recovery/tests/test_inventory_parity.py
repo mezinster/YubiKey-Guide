@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests.helpers import FIXTURES, LINUX, bare_first_folder, repeated_key_folder, run_impl, short_tempdir
+from tests.helpers import FIXTURES, LINUX, bare_first_folder, bom_crlf_folder, repeated_key_folder, run_impl, short_tempdir
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -49,6 +49,21 @@ class InventoryParityTests(unittest.TestCase):
         self.assertIn("STDIN <CERTIFY_PASS>\nSTDIN <ADMIN_PIN>", py.stdout)
         self.assertRegex(py.stderr, r"a-bare\.gpg: key \w+: .* \(not needed\)")
         self.assertRegex(py.stderr, r"b-protected\.gpg: key \w+: .* \(used\)")
+
+    def test_bom_armor_loads(self):
+        py = self.assert_same_run(bom_crlf_folder(self))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertIn("  bom.asc: key ", py.stderr)
+        self.assertIn("(used)", py.stderr)
+
+    def test_unreadable_files_and_no_candidate(self):
+        root = short_tempdir(self, "unr")
+        (root / "junk.asc").write_bytes(b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nnot base64 at all\n")
+        stub = FIXTURES / "flexible" / "asc backup" / "stub" / "flex.priv_stub.asc"
+        (root / "stub.asc").write_bytes(stub.read_bytes())
+        py = self.assert_same_run(root)
+        self.assertEqual(py.returncode, 2)
+        self.assertIn(f"error: no usable secret keys in {root} (see the report above)", py.stderr)
 
     def test_only_stubs(self):
         root = short_tempdir(self, "stubs")

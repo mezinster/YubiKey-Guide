@@ -13,6 +13,7 @@ KINDS = ("export", "subkeys-only", "gnupghome")
 PUBRINGS = ("pubring.kbx", "pubring.gpg")
 LIST_SECRET = ("gpg", "--batch", "--with-colons", "--with-keygrip", "--fixed-list-mode", "--list-secret-keys")
 HOME_FILES = (*PUBRINGS, "trustdb.gpg")
+BOM = b"\xef\xbb\xbf"
 KEY_PREFIXES = (b"-----BEGIN PGP PRIVATE KEY BLOCK-----", b"-----BEGIN PGP PUBLIC KEY BLOCK-----")
 KEY_TAGS = (5, 6, 7, 14)  # secret key, public key, secret subkey, public subkey
 MAX_KEY_FILE = 1 << 20
@@ -148,7 +149,7 @@ def looks_like_key_file(path: Path) -> bool:
             head = f.read(64)
     except OSError:
         return False
-    if head.removeprefix(b"\xef\xbb\xbf").lstrip().startswith(KEY_PREFIXES):
+    if head.removeprefix(BOM).lstrip().startswith(KEY_PREFIXES):
         return True
     if not head or not head[0] & 0x80:
         return False
@@ -181,8 +182,29 @@ def walk(folder: Path) -> tuple:
     return homes, files
 
 
+def readable_copy(path: Path, home: Home, name: str):
+    """gpg cannot parse armor that starts with a UTF-8 BOM: such a file is read from a BOM-stripped copy in home.
+
+    None when the file or the copy cannot be read or written."""
+    try:
+        with path.open("rb") as f:
+            if f.read(len(BOM)) != BOM:
+                return path
+            data = f.read()
+        copy = home.path / name
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(copy, flags, 0o600), "wb") as f:
+            f.write(data)
+    except OSError:
+        return None
+    return copy
+
+
 def classify(path: Path, scan: Home):
-    result = scan.run(["gpg", "--batch", "--list-packets", "--", str(path)])
+    source = readable_copy(path, scan, "bom.key")
+    if source is None:
+        return None
+    result = scan.run(["gpg", "--batch", "--list-packets", "--", str(source)])
     parts = parse_packets(result.stdout) if result.returncode == 0 else []
     return parts or None
 
@@ -359,8 +381,11 @@ def load(candidate: Candidate, staging: Home) -> list:
             except (OSError, shutil.Error) as err:
                 raise RecoveryError(f"cannot copy {src} into staging: {err}", EXIT_BACKUP) from err
     else:
-        for src in candidate.files:
-            result = staging.run(["gpg", "--batch", "--import", "--", str(src)])
+        for index, src in enumerate(candidate.files):
+            source = readable_copy(src, staging, f"bom-{index}.key")
+            if source is None:
+                raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
+            result = staging.run(["gpg", "--batch", "--import", "--", str(source)])
             if result.returncode != 0:
                 raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
     bundles = list_bundles(staging)

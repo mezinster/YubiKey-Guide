@@ -22,7 +22,7 @@ WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
 KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" UNPROTECTED=0 NOW=0
 LOADED_FPRS=()
 CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
-KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0
+KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
 UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
 declare -A TARGET=() TOKENS=()
 
@@ -286,9 +286,19 @@ walk_dir() { # walk_dir DIR DEPTH: GnuPG homes become candidates, key files go t
   done
 }
 
+readable_copy() { # readable_copy PATH HOME NAME VAR: gpg cannot parse armor that starts with a UTF-8 BOM,
+  # so such a file is read from a BOM-stripped copy (mode 0600) in HOME; returns 1 when it cannot be read
+  local src=$1 copy=$2/$3 bom
+  bom=$(head -c 3 -- "$src" | od -An -tx1 | tr -d ' \n') || return 1
+  if [[ $bom != efbbbf ]]; then printf -v "$4" '%s' "$src"; return 0; fi
+  (umask 077 && tail -c +4 -- "$src" >"$copy") 2>/dev/null || return 1
+  printf -v "$4" '%s' "$copy"
+}
+
 classify_file() { # classify_file PATH → lines "MAINKID KEYID ROLE STATE"; non-zero when unreadable
-  local out
-  out=$(GNUPGHOME=$WORK gpg --batch --list-packets -- "$1" 2>/dev/null) || return 1
+  local out source
+  readable_copy "$1" "$WORK" bom.key source || return 1
+  out=$(GNUPGHOME=$WORK gpg --batch --list-packets -- "$source" 2>/dev/null) || return 1
   awk '
     function close_part() {
       if (inpkt && kid != "") { if (state == "") state = "missing"; print main, kid, role, state }
@@ -434,8 +444,9 @@ detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and IN
   KEY_FILES=() INV_UNRECOVERABLE=()
   walk_dir "$root" 0
   INV_FILES_FOUND=${#KEY_FILES[@]}
+  INV_UNREADABLE=0
   for i in "${!KEY_FILES[@]}"; do
-    if ! out=$(classify_file "${KEY_FILES[i]}"); then unreadable[$i]=1; continue; fi
+    if ! out=$(classify_file "${KEY_FILES[i]}"); then unreadable[$i]=1 INV_UNREADABLE=1; continue; fi
     while read -r main kid role state; do
       parts_of[$i,$main]+="$role $state $kid"$'\n'
       if [[ -z ${seen_key[$main]+set} ]]; then seen_key[$main]=1; order+=("$main"); fi
@@ -519,7 +530,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
 }
 
 load_candidate() {
-  local i=$1 f
+  local i=$1 f n=0 source
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
     kill_agents "$STAGING"
     while IFS= read -r f; do
@@ -528,7 +539,9 @@ load_candidate() {
     chmod -R u+rwX,go-rwx "$STAGING"
   else
     while IFS= read -r f; do
-      GNUPGHOME=$STAGING gpg --batch --import -- "$f" 2>"$WORK/import.err" ||
+      readable_copy "$f" "$STAGING" "bom-$n.key" source || die "$EXIT_BACKUP" "cannot import $f: cannot read the file"
+      n=$((n + 1))
+      GNUPGHOME=$STAGING gpg --batch --import -- "$source" 2>"$WORK/import.err" ||
         die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
     done <<<"${CAND_FILES[i]}"
   fi
@@ -836,6 +849,7 @@ main() {
   detect
   if [[ -n $INV_REPORT ]]; then info "$INV_REPORT"; fi
   if (( ${#CAND_KIND[@]} == 0 )); then
+    if (( INV_UNREADABLE )); then die "$EXIT_BACKUP" "no usable secret keys in ${BACKUP%/} (see the report above)"; fi
     if (( INV_FILES_FOUND )); then
       die "$EXIT_BACKUP" "no secret keys in ${BACKUP%/}: only card stubs or public keys"
     fi
