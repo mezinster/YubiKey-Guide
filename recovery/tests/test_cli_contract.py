@@ -79,7 +79,7 @@ class ContractTests:
     def test_ambiguous_backup_needs_source(self):
         root = FIXTURES / "ed25519"
         self.assert_fails(self.cli("--backup", str(root), "--dry-run"), 2,
-                          "error: several backups found; narrow --backup or pass --source:")
+                          "error: several backups found; narrow --backup or pass --source or --key:")
         result = self.cli("--backup", str(root), "--source", "gnupghome", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -163,6 +163,10 @@ class PythonContractTests(ContractTests, unittest.TestCase):
 @unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
 class BashContractTests(ContractTests, unittest.TestCase):
     IMPL = "bash"
+
+    @unittest.expectedFailure  # bash still prints the old message; Task 8 removes this marker
+    def test_ambiguous_backup_needs_source(self):
+        super().test_ambiguous_backup_needs_source()
 
 
 if __name__ == "__main__":

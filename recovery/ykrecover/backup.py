@@ -23,11 +23,32 @@ STATE_WORDS = {"secret": "secret", "secret-unprotected": "secret (no passphrase)
 PACKET = re.compile(r"^:(secret|public)( sub)? key packet:")
 
 
+KIND_ORDER = {"gnupghome": 0, "export": 1, "subkeys-only": 2}
+
+
 @dataclass(frozen=True)
 class Candidate:
     kind: str
     path: Path
     files: tuple
+    key_id: str = ""  # main-key keyid; empty for a GnuPG home
+    unprotected: bool = False  # every secret part it supplies has no passphrase
+
+
+@dataclass(frozen=True)
+class FileReport:
+    path: Path
+    key: str
+    parts: tuple
+    status: str  # used | not needed | ignored | unreadable
+
+
+@dataclass(frozen=True)
+class Inventory:
+    root: Path
+    files: tuple
+    candidates: tuple
+    unrecoverable: tuple
 
 
 @dataclass(frozen=True)
@@ -73,30 +94,6 @@ def _is_gnupg2_home(folder: Path) -> bool:
 def _home_candidate(folder: Path) -> Candidate:
     names = ("private-keys-v1.d", *HOME_FILES)
     return Candidate("gnupghome", folder, tuple(folder / n for n in names if (folder / n).exists()))
-
-
-def _detect_dir(folder: Path) -> list:
-    found = []
-    if _is_gnupg2_home(folder):
-        found.append(_home_candidate(folder))
-    certify = tuple(sorted(folder.glob("secret-*-Certify.key")))
-    subkeys = tuple(sorted(folder.glob("secret-*-Subkeys.key")))
-    if certify:
-        found.append(Candidate("export", folder, certify))
-    elif subkeys:
-        found.append(Candidate("subkeys-only", folder, subkeys))
-    return found
-
-
-def detect(folder: Path) -> list:
-    """Backups in the folder itself and in its immediate subfolders."""
-    if not folder.is_dir():
-        raise RecoveryError(f"backup folder not found: {folder}", EXIT_BACKUP)
-    found = _detect_dir(folder)
-    for sub in sorted(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")):
-        if sub.name != "private-keys-v1.d":
-            found.extend(_detect_dir(sub))
-    return found
 
 
 def parse_packets(text: str) -> list:
@@ -181,16 +178,114 @@ def walk(folder: Path) -> tuple:
     return homes, files
 
 
-def choose(candidates, kind=None) -> Candidate:
+def classify(path: Path, scan: Home):
+    result = scan.run(["gpg", "--batch", "--list-packets", str(path)])
+    parts = parse_packets(result.stdout) if result.returncode == 0 else []
+    return parts or None
+
+
+def _select(key: str, rows: list) -> tuple:
+    """rows: (walk_index, path, parts) holding this key; returns (used paths, supplied ranks by keyid)."""
+    def order(row):
+        secret = [p for p in row[2] if RANK.get(p.state, 0)]
+        return (-len(secret), -any(p.role == "main" for p in secret), row[0])
+
+    used, supplied = [], {}
+    for _, path, parts in sorted(rows, key=order):
+        better = [p for p in parts if RANK.get(p.state, 0) > supplied.get(p.keyid, 0)]
+        if better:
+            used.append(path)
+            for p in better:
+                supplied[p.keyid] = RANK[p.state]
+    return used, supplied
+
+
+def inventory(folder: Path) -> Inventory:
+    if not folder.is_dir():
+        raise RecoveryError(f"backup folder not found: {folder}", EXIT_BACKUP)
+    homes, paths = walk(folder)
+    rows_by_key, order, unreadable = {}, [], []
+    if paths:
+        scan = Home.create("scan")
+        try:
+            for index, path in enumerate(paths):
+                parts = classify(path, scan)
+                if parts is None:
+                    unreadable.append(path)
+                    continue
+                for key in dict.fromkeys(p.main_keyid for p in parts):
+                    if key not in rows_by_key:
+                        rows_by_key[key] = []
+                        order.append(key)
+                    rows_by_key[key].append((index, path, tuple(p for p in parts if p.main_keyid == key)))
+        finally:
+            scan.destroy()
+    candidates, reports, unrecoverable, status = list(homes), [], [], {}
+    for key in order:
+        used, supplied = _select(key, rows_by_key[key])
+        for _, path, parts in rows_by_key[key]:
+            if path in used:
+                status[(path, key)] = "used"
+            else:
+                status[(path, key)] = "not needed" if any(RANK.get(p.state, 0) for p in parts) else "ignored"
+        if not used:
+            unrecoverable.append(key)
+            continue
+        kind = "export" if supplied.get(key, 0) else "subkeys-only"
+        candidates.append(Candidate(kind, used[0].parent, tuple(used), key,
+                                    all(rank == 1 for rank in supplied.values())))
+    for path in paths:
+        if path in unreadable:
+            reports.append(FileReport(path, "", (), "unreadable"))
+        for key in order:
+            for _, row_path, parts in rows_by_key[key]:
+                if row_path == path:
+                    reports.append(FileReport(path, key, parts, status[(path, key)]))
+    candidates.sort(key=lambda c: (os.fsencode(str(c.path)), KIND_ORDER[c.kind]))
+    return Inventory(folder, tuple(reports), tuple(candidates), tuple(unrecoverable))
+
+
+def _describe_parts(parts) -> str:
+    pieces = [f"main {STATE_WORDS[p.state]}" for p in parts if p.role == "main"]
+    for state in STATE_WORDS:
+        n = sum(1 for p in parts if p.role == "sub" and p.state == state)
+        if n:
+            pieces.append(f"{n} subkey{'s' if n > 1 else ''} {STATE_WORDS[state]}")
+    return ", ".join(pieces)
+
+
+def report(inv: Inventory) -> str:
+    if not inv.files:
+        return ""
+    lines = [f"Backup files in {inv.root}:"]
+    for f in inv.files:
+        rel = f.path.relative_to(inv.root).as_posix()
+        if f.status == "unreadable":
+            lines.append(f"  {rel}: not a readable key file (ignored)")
+        else:
+            lines.append(f"  {rel}: key {f.key}: {_describe_parts(f.parts)} ({f.status})")
+    lines += [f"  key {k}: not recoverable from this folder (card stubs / public key only)" for k in inv.unrecoverable]
+    return "\n".join(lines)
+
+
+def detect(folder: Path) -> list:
+    """Backups in the folder and its subfolders (depth 3), one per recoverable key or GnuPG home."""
+    return list(inventory(folder).candidates)
+
+
+def choose(candidates, kind=None, key=None) -> Candidate:
     if kind:
         candidates = [c for c in candidates if c.kind == kind]
+    if key:
+        want = key.upper().replace(" ", "")
+        candidates = [c for c in candidates if not c.key_id or want.endswith(c.key_id) or c.key_id.endswith(want)]
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
         raise RecoveryError("no backup found (expected secret-*-Certify.key, secret-*-Subkeys.key "
                             "or a GnuPG home)", EXIT_BACKUP)
-    listing = "\n".join(f"  {c.kind}: {c.path}" for c in candidates)
-    raise RecoveryError(f"several backups found; narrow --backup or pass --source:\n{listing}", EXIT_BACKUP)
+    listing = "\n".join(f"  {c.kind}: {c.path}" + (f" (key {c.key_id})" if c.key_id else "") for c in candidates)
+    raise RecoveryError(f"several backups found; narrow --backup or pass --source or --key:\n{listing}", EXIT_BACKUP)
 
 
 def parse_secret_keys(colons: str) -> list:

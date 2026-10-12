@@ -86,6 +86,8 @@ class Session:
     def __init__(self, opts: Options, ui):
         self.opts, self.ui = opts, ui
         self.staging = None
+        self.inventory = None
+        self.candidate = None
         self.bundle = None
         self.targets = {}
         self.passphrase = ""
@@ -199,11 +201,19 @@ class Session:
         return found
 
     def load(self) -> backup.KeyBundle:
-        candidate = backup.choose(backup.detect(self.opts.backup), self.opts.source or None)
+        inv = backup.inventory(Path(self.opts.backup))
+        self.inventory = inv
+        if not inv.candidates:
+            if inv.files:
+                raise RecoveryError(f"no secret keys in {inv.root}: only card stubs or public keys", EXIT_BACKUP)
+            raise RecoveryError(f"no backup found in {inv.root} (looked for OpenPGP key files and GnuPG homes)",
+                                EXIT_BACKUP)
+        candidate = backup.choose(inv.candidates, self.opts.source or None, self.opts.key or None)
+        self.candidate = candidate
         if self.staging:
             self._destroy(self.staging)
         self.staging = Home.create("staging")
-        self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or None)
+        self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or candidate.key_id or None)
         self.targets = modes.select_targets(self.bundle)
         return self.bundle
 
@@ -470,7 +480,12 @@ def run(opts: Options, ui) -> int:
     try:
         session.validate_options()
         session.preflight()
-        session.load()
+        try:
+            session.load()
+        finally:
+            text = backup.report(session.inventory) if session.inventory else ""
+            if text:
+                ui.info(text)
         session.validate_bundle()
         if opts.dry_run:
             ui.output(session.dry_run_text())

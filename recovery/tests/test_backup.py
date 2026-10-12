@@ -55,7 +55,7 @@ class DetectTests(unittest.TestCase):
 
     def test_parent_folder_needs_a_choice(self):
         found = backup.detect(FIXTURES / "ed25519")
-        self.assertEqual([c.kind for c in found], ["export", "gnupghome", "subkeys-only"])
+        self.assertEqual([c.kind for c in found], ["export", "gnupghome"])
         with self.assertRaises(RecoveryError) as ctx:
             backup.choose(found)
         self.assertEqual(ctx.exception.code, EXIT_BACKUP)
@@ -65,6 +65,79 @@ class DetectTests(unittest.TestCase):
         with self.assertRaises(RecoveryError) as ctx:
             backup.detect(Path("/nonexistent/backup"))
         self.assertEqual(ctx.exception.code, EXIT_BACKUP)
+
+
+class InventoryTests(unittest.TestCase):
+    def test_flexible_layout(self):
+        root = FIXTURES / "flexible" / "asc backup"
+        inv = backup.inventory(root)
+        kid = fixture_info("flexible")["KEY_ID"]
+        self.assertEqual([(c.kind, c.key_id, [f.name for f in c.files]) for c in inv.candidates],
+                         [("export", kid, ["flex.priv.asc"])])
+        self.assertEqual(backup.report(inv), "\n".join([
+            f"Backup files in {root}:",
+            f"  private/flex.priv.asc: key {kid}: main secret, 2 subkeys secret (used)",
+            f"  pub/flex.pub.asc: key {kid}: main public, 2 subkeys public (ignored)",
+            f"  stub/flex.priv_stub.asc: key {kid}: main card stub, 2 subkeys card stub (ignored)",
+            f"  stub/flex.sub_priv_stub.asc: key {kid}: main missing, 2 subkeys card stub (ignored)",
+            f"  subkeys/flex.sub_priv.asc: key {kid}: main missing, 2 subkeys secret (not needed)",
+        ]))
+
+    def test_guide_export_folder_is_unchanged(self):
+        inv = backup.inventory(FIXTURES / "ed25519" / "export")
+        (c,) = inv.candidates
+        self.assertEqual((c.kind, [f.name for f in c.files]), ("export", [f"secret-{fixture_info('ed25519')['KEY_ID']}-Certify.key"]))
+        self.assertEqual(c.path, FIXTURES / "ed25519" / "export")
+
+    def test_same_key_in_two_folders_is_one_candidate(self):
+        found = backup.detect(FIXTURES / "ed25519")
+        self.assertEqual([c.kind for c in found], ["export", "gnupghome"])
+
+    def test_split_files_use_both(self):
+        (c,) = backup.detect(FIXTURES / "split")
+        self.assertEqual((c.kind, [f.name for f in c.files]), ("export", ["subs-only.asc", "main-only.asc"]))
+
+    def test_unprotected_candidate(self):
+        (c,) = backup.detect(FIXTURES / "unprotected")
+        self.assertTrue(c.unprotected)
+        self.assertFalse(backup.detect(FIXTURES / "split")[0].unprotected)
+
+    def test_gnupg1_home(self):
+        (c,) = backup.detect(FIXTURES / "gnupg1")
+        self.assertEqual((c.kind, [f.name for f in c.files]), ("export", ["secring.gpg"]))
+
+    def test_multi_key_file_gives_one_candidate_per_key(self):
+        info = fixture_info("multikey")
+        found = backup.detect(FIXTURES / "multikey")
+        self.assertEqual(sorted(c.key_id for c in found), sorted([info["KEY_FP"][-16:], info["KEY2_FP"][-16:]]))
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.choose(found)
+        self.assertIn("pass --source or --key", str(ctx.exception))
+        self.assertEqual(backup.choose(found, key=info["KEY2_FP"]).key_id, info["KEY2_FP"][-16:])
+
+    def test_only_stubs_is_unrecoverable(self):
+        root = short_tempdir(self, "stubs")
+        stub = FIXTURES / "flexible" / "asc backup" / "stub" / "flex.priv_stub.asc"
+        (root / "stub.asc").write_bytes(stub.read_bytes())
+        inv = backup.inventory(root)
+        self.assertEqual(inv.candidates, ())
+        self.assertIn("not recoverable from this folder (card stubs / public key only)", backup.report(inv))
+
+    def test_unreadable_key_looking_file_is_reported(self):
+        root = short_tempdir(self, "junk")
+        (root / "junk.asc").write_bytes(b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nnot base64 at all\n")
+        (root / "key.asc").write_bytes((FIXTURES / "unprotected" / "key.asc").read_bytes())
+        inv = backup.inventory(root)
+        self.assertEqual(len(inv.candidates), 1)
+        self.assertIn("  junk.asc: not a readable key file (ignored)", backup.report(inv))
+
+    def test_loads_split_files_into_one_key(self):
+        (c,) = backup.detect(FIXTURES / "split")
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(c, staging)
+        self.assertTrue(bundle.has_certify_secret)
+        self.assertTrue(all(k.secret for k in bundle.subkeys))
 
 
 class HomeRegistryTests(unittest.TestCase):
