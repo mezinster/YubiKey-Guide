@@ -1,3 +1,4 @@
+import re
 import sys
 import tempfile
 import unittest
@@ -66,10 +67,10 @@ class AlertTests(unittest.TestCase):
 class AdaptTests(unittest.TestCase):
     def test_code_blocks_are_untouched(self):
         fence = "`" * 3  # spelled out so this file can sit inside a Markdown code block
-        text = f"[r](recovery/README.md)\n\n{fence}console\n$ echo '[r](recovery/README.md)'\n> [!NOTE]\n{fence}\n"
-        out = build.adapt(text, "SECENV.md")
+        text = f"[r](README.md)\n\n{fence}console\n$ echo '[r](README.md)'\n> [!NOTE]\n{fence}\n"
+        out = build.adapt(text, "recovery/README.md")  # a page that gets no title or heading changes
         self.assertIn("[r](recovery.md)\n", out)
-        self.assertIn(f"$ echo '[r](recovery/README.md)'\n> [!NOTE]\n{fence}", out)
+        self.assertIn(f"$ echo '[r](README.md)'\n> [!NOTE]\n{fence}", out)
         self.assertEqual(out.count("\n"), text.count("\n"))
 
     def test_guide_gets_title_and_loses_toc(self):
@@ -180,6 +181,38 @@ class FinalReviewTests(unittest.TestCase):
         page = build.render_download([release("<b>v1</b>", "2026-10-01", body="Hi <script>alert(1)</script>")])
         self.assertNotIn("<script>", page)
         self.assertIn("## &lt;b&gt;v1&lt;/b&gt;", page)  # the name; the fixture URL keeps the raw tag
+
+
+class TocSidebarTests(unittest.TestCase):
+    """Material shows only the first H1's children in the page sidebar, so pages with many H1s lost it."""
+
+    def test_headings_move_down_a_level(self):
+        fence = "`" * 3
+        text = f"Intro.\n\n# One\n\n## Sub\n\n{fence}sh\n# a comment\n{fence}\n\n# Two\n"
+        self.assertEqual(build.demote_headings(text),
+                         f"Intro.\n\n## One\n\n### Sub\n\n{fence}sh\n# a comment\n{fence}\n\n## Two\n")
+
+    def test_multi_h1_pages_get_a_title_and_demoted_headings(self):
+        for source, title in (("README.md", "Guide"), ("SECENV.md", "Secure environment"),
+                              ("piv/README.md", "PIV")):
+            out = build.adapt("# A\n\nText\n\n# B\n", source)
+            self.assertTrue(out.startswith(f"---\ntitle: {title}\n---\n\n"), source)
+            self.assertIn("\n## A\n", out)
+            self.assertIn("\n## B\n", out)
+
+    def test_single_h1_page_is_left_alone(self):
+        self.assertEqual(build.adapt("# YubiKey recovery\n\n## Use\n", "recovery/README.md"),
+                         "# YubiKey recovery\n\n## Use\n")
+
+    def test_built_guide_has_sidebar_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "b"
+            build.build(out, None)
+            for page in ("guide.md", "secenv.md", "piv.md"):
+                h1 = []
+                build._outside_code((out / page).read_text(encoding="utf-8"),
+                                    lambda part: h1.extend(re.findall(r"(?m)^# .*", part)) or part)
+                self.assertEqual(h1, [], page)  # shell comments in code blocks do not count
 
 
 if __name__ == "__main__":
