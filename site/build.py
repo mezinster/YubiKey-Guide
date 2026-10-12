@@ -123,6 +123,40 @@ def adapt(text: str, source: str) -> str:
     return _outside_code(text, change)
 
 
+def _demote(notes: str) -> str:
+    """Puts any heading of the release notes below the page's "### Release notes" heading."""
+    return re.sub(r"^(#{1,6}) ", lambda m: "#" * min(6, len(m[1]) + 3) + " ", notes, flags=re.M)
+
+
+def render_download(releases) -> str:
+    lines = ["# Download", "",
+             "Windows builds of the ykrecover recovery tool. Unpack the zip and run `ykrecover.exe`; "
+             "see [Recovery tool](recovery.md) for what it needs and how to use it.", ""]
+    published = sorted((r for r in releases or () if not r.get("draft")),
+                       key=lambda r: r.get("published_at") or "", reverse=True)
+    if not published:
+        lines.append(f"Releases are listed on [GitHub]({REPO_URL}/releases).")
+        return "\n".join(lines) + "\n"
+    latest = published[0]
+    name = latest.get("name") or latest["tag_name"]
+    lines += [f"## {name}" + (" (pre-release)" if latest.get("prerelease") else ""), "",
+              f"Published {(latest.get('published_at') or '')[:10]}.", ""]
+    for asset in latest.get("assets") or ():
+        lines.append(f"- [{asset['name']}]({asset['browser_download_url']}) "
+                     f"({asset['size'] / 1_000_000:.1f} MB)")
+    notes = (latest.get("body") or "").strip()
+    if notes:
+        lines += ["", "### Release notes", "", _demote(notes)]
+    if len(published) > 1:
+        lines += ["", "## Earlier releases", "", "| Release | Date | |", "| - | - | - |"]
+        for r in published[1:]:
+            label = "pre-release" if r.get("prerelease") else ""
+            lines.append(f"| [{r.get('name') or r['tag_name']}]({r['html_url']}) | "
+                         f"{(r.get('published_at') or '')[:10]} | {label} |")
+    lines += ["", f"All releases: [GitHub]({REPO_URL}/releases)."]
+    return "\n".join(lines) + "\n"
+
+
 def build(out: Path, releases) -> None:
     if out.exists():
         shutil.rmtree(out)
@@ -131,7 +165,7 @@ def build(out: Path, releases) -> None:
         text = (ROOT / source).read_text(encoding="utf-8")
         (out / page).write_text(adapt(text, source), encoding="utf-8")
     shutil.copytree(ROOT / "media", out / "media")
-    (out / "download.md").write_text("# Download\n", encoding="utf-8")  # Task 2: render_download
+    (out / "download.md").write_text(render_download(releases), encoding="utf-8")
 
 
 def main(argv=None) -> int:
