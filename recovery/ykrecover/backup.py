@@ -524,7 +524,34 @@ def repair_ecdh_imports(home: Home, bare=()) -> None:
             raise RecoveryError(GNUPG25_DROPPED.format(" ".join(dropped)), EXIT_BACKUP)
 
 
-def load(candidate: Candidate, staging: Home) -> list:
+# gpg exits non-zero when it skips any part of a file it imports (GnuPG 2.5 also for a user ID with no valid
+# self-signature), yet it may have imported the secret keys. A backup file counts as imported when gpg's IMPORT_RES
+# status line says it imported secret keys or already had them; whether those are the chosen key's, with its secret
+# parts, is decided after the import, from the staged keys (list_bundles, choose_key, Session.validate_bundle).
+SKIP_KEY = re.compile(r"^key [0-9A-F]{8,40}: ")
+SKIP_DONE = re.compile(r'^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*)$')
+SKIP_NOISE = re.compile(r"^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$")
+
+
+def secret_keys_imported(status: str) -> bool:
+    """True when an IMPORT_RES status line counts secret keys imported or unchanged (gpg's sec_imported and
+    sec_dups fields)."""
+    lines = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] IMPORT_RES ")]
+    fields = lines[-1] if lines else []
+    if len(fields) < 14 or not all(re.fullmatch(r"[0-9]+", f) for f in fields[12:14]):
+        return False
+    return int(fields[12]) + int(fields[13]) > 0
+
+
+def skipped_line(stderr: str, code: int) -> str:
+    """The first gpg message about a key it did not take, else its first message that is not routine."""
+    lines = [line[5:] for line in stderr.splitlines() if line.startswith("gpg: ")]
+    keys = [line for line in lines if SKIP_KEY.match(line) and not SKIP_DONE.match(line)]
+    other = [line for line in lines if not SKIP_DONE.match(line) and not SKIP_NOISE.match(line)]
+    return (keys or other or [f"gpg exited with status {code}"])[0]
+
+
+def load(candidate: Candidate, staging: Home, warn=None) -> list:
     if candidate.kind == "gnupghome":
         staging.kill_agents()
         for src in candidate.files:  # read-only media keeps its mode bits; make the copies usable
@@ -544,9 +571,12 @@ def load(candidate: Candidate, staging: Home) -> list:
             source = readable_copy(src, staging, f"bom-{index}.key")
             if source is None:
                 raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
-            result = staging.run(["gpg", "--batch", "--import", "--", str(source)])
+            result = staging.run(["gpg", "--batch", "--status-fd", "1", "--import", "--", str(source)])
             if result.returncode != 0:
-                raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+                if not secret_keys_imported(result.stdout):
+                    raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+                if warn:
+                    warn(f"gpg skipped part of {src}: {skipped_line(result.stderr, result.returncode)}")
         repair_ecdh_imports(staging, candidate.bare)
     bundles = list_bundles(staging)
     if not bundles:

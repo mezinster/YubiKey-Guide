@@ -1,5 +1,7 @@
 """Shared test helpers: fixtures, running either implementation, fake hardware."""
 
+import base64
+import importlib.util
 import os
 import select
 import shutil
@@ -74,6 +76,58 @@ def bom_crlf_folder(test) -> Path:
     root = short_tempdir(test, "bom")
     text = (FIXTURES / "unprotected" / "key.asc").read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     (root / "bom.asc").write_bytes(b"\xef\xbb\xbf" + text)
+    return root
+
+
+def _packets():
+    spec = importlib.util.spec_from_file_location("make_stubs", FIXTURES / "make_stubs.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def dearmor(text: bytes) -> bytes:
+    lines = text.decode("ascii").replace("\r", "").split("\n")
+    body = lines[lines.index("") + 1:]
+    return base64.b64decode("".join(line for line in body if line and not line.startswith(("=", "-----"))))
+
+
+def without_uid_self_sigs(data: bytes) -> bytes:
+    """A binary key export with the signatures after each user ID dropped: gpg finds no valid user ID in it."""
+    packets, out, in_uid = _packets(), b"", False
+    for tag, body in packets.read_packets(data):
+        in_uid = tag == 13 or (in_uid and tag == 2)
+        if not (tag == 2 and in_uid):
+            out += packets.write_packet(tag, body)
+    return out
+
+
+def partial_import_folder(test, shape: str) -> Path:
+    """A backup file that gpg imports only in part (it exits non-zero), made from the fixture keys at test time.
+
+    user:       the ed25519 key's secret block with no user ID self-signature, then its public block. GnuPG 2.5
+                skips the user ID ("no valid user IDs"), exits non-zero and imports the main key's secret but
+                none of the subkeys'; GnuPG 2.4 stops at the secret block and imports nothing secret.
+    bad-public: the same key's public block with no user ID self-signature, then its secret block. GnuPG 2.5
+                exits non-zero and imports every secret; GnuPG 2.4 does the same and exits 0.
+    two-keys:   the ed25519 key's secret block, then the unprotected key's secret block with no user ID
+                self-signature. Every GnuPG exits non-zero and imports the ed25519 secret key only.
+    rejected:   only the unprotected key's secret block with no user ID self-signature: nothing secret comes in."""
+    home, root = short_tempdir(test, "pi"), short_tempdir(test, f"pi-{shape}")
+    env = {**os.environ, "GNUPGHOME": str(home)}
+
+    def gpg(*args):
+        return subprocess.run([REAL_GPG, "--batch", *args], env=env, check=True, capture_output=True).stdout
+
+    import_unprotected(home)
+    fpr = fixture_info("unprotected")["KEY_FP"]
+    broken = without_uid_self_sigs(gpg("--export-secret-keys", fpr))
+    export = FIXTURES / "ed25519" / "export"
+    ed25519 = dearmor((export / f"secret-{fixture_info('ed25519')['KEY_ID']}-Certify.key").read_bytes())
+    public = dearmor(next(export.glob("public-*.asc")).read_bytes())
+    data = {"user": without_uid_self_sigs(ed25519) + public, "bad-public": without_uid_self_sigs(public) + ed25519,
+            "two-keys": ed25519 + broken, "rejected": broken}[shape]
+    (root / "partial.gpg").write_bytes(data)
     return root
 
 

@@ -2,8 +2,8 @@
 
 import unittest
 
-from tests.helpers import (FIXTURES, LINUX, bare_first_folder, bom_crlf_folder, repeated_key_folder, run_impl,
-                           short_tempdir)
+from tests.helpers import (FIXTURES, LINUX, bare_first_folder, bom_crlf_folder, fixture_info, partial_import_folder,
+                           repeated_key_folder, run_impl, short_tempdir)
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -33,11 +33,67 @@ class InventoryParityTests(unittest.TestCase):
                 self.assertEqual(report(sh.stderr), report(py.stderr))
                 self.assertEqual(sh.returncode, py.returncode, sh.stderr)
 
-    def assert_same_run(self, folder):
-        py = run_impl("python", ["--backup", str(folder), "--dry-run"])
-        sh = run_impl("bash", ["--backup", str(folder), "--dry-run"])
+    def assert_same_run(self, folder, *extra):
+        py = run_impl("python", ["--backup", str(folder), "--dry-run", *extra])
+        sh = run_impl("bash", ["--backup", str(folder), "--dry-run", *extra])
         self.assertEqual((sh.returncode, sh.stdout, sh.stderr), (py.returncode, py.stdout, py.stderr))
         return py
+
+    def assert_same_import_error(self, folder):
+        """Both fail to import; gpg's own message names the random staging folder, so only the start matches."""
+        py = run_impl("python", ["--backup", str(folder), "--dry-run"])
+        sh = run_impl("bash", ["--backup", str(folder), "--dry-run"])
+        self.assertEqual((sh.returncode, sh.stdout, report(sh.stderr)), (py.returncode, py.stdout, report(py.stderr)))
+        self.assertEqual(py.returncode, 2, py.stderr)
+        for run in (py, sh):
+            self.assertIn(f"\nerror: cannot import {folder / 'partial.gpg'}: gpg: ", run.stderr)
+            self.assertNotIn("warning: gpg skipped part of", run.stderr)
+
+    def test_file_gpg_imports_in_part_loads_with_a_warning(self):
+        root = partial_import_folder(self, "two-keys")
+        ed, bad = fixture_info("ed25519")["KEY_ID"], fixture_info("unprotected")["KEY_ID"]
+        py = self.assert_same_run(root, "--key", ed)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertEqual(py.stderr.count("warning: gpg skipped part of"), 1, py.stderr)
+        self.assertIn(f"\nwarning: gpg skipped part of {root / 'partial.gpg'}: key {bad}: ", py.stderr)
+        self.assertIn(ed, py.stdout)
+
+    def test_skipped_key_is_not_loaded(self):
+        root = partial_import_folder(self, "two-keys")
+        bad = fixture_info("unprotected")["KEY_ID"]
+        py = self.assert_same_run(root, "--key", bad)
+        self.assertEqual(py.returncode, 2, py.stderr)
+        self.assertIn("warning: gpg skipped part of", py.stderr)
+        self.assertTrue(py.stderr.endswith(f"error: no key matches --key {bad}\n"), py.stderr)
+
+    def assert_same_partial_run(self, shape):
+        """Both twins agree on what real gpg let in; returns the Python run, or None when nothing secret came in."""
+        root = partial_import_folder(self, shape)
+        py = run_impl("python", ["--backup", str(root), "--dry-run"])
+        if "error: cannot import " in py.stderr:
+            self.assert_same_import_error(root)
+            return None
+        self.assert_same_run(root)
+        if "warning: gpg skipped part of" in py.stderr:
+            self.assertIn(f"\nwarning: gpg skipped part of {root / 'partial.gpg'}: key "
+                          f"{fixture_info('ed25519')['KEY_ID']}: no valid user IDs\n", py.stderr)
+        return py
+
+    def test_secret_block_without_user_id_self_signature(self):
+        # GnuPG 2.5 imports the main key's secret only: clone refuses the subkeys as stubs; GnuPG 2.4 imports nothing
+        py = self.assert_same_partial_run("user")
+        if py is not None:
+            self.assertIn("warning: gpg skipped part of", py.stderr)
+            self.assertIn("\nerror: the backup holds card stubs, not secret subkeys: ", py.stderr)
+            self.assertEqual(py.returncode, 2)
+
+    def test_public_block_without_user_id_self_signature(self):
+        py = self.assert_same_partial_run("bad-public")
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertIn(fixture_info("ed25519")["KEY_FP"], py.stdout)
+
+    def test_rejected_secret_block_is_an_import_error(self):
+        self.assert_same_import_error(partial_import_folder(self, "rejected"))
 
     def test_repeated_key_first_copy_wins(self):
         py = self.assert_same_run(repeated_key_folder(self))

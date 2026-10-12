@@ -660,8 +660,37 @@ repair_ecdh_imports() { # repair_ecdh_imports HOME BARE: BARE are the keyids the
   fi
 }
 
+# A backup file counts as imported when gpg imported or already had secret keys from it, though it exits non-zero
+# for any part it skipped (as Python's backup.load; the staged keys are checked afterwards by load_bundle and
+# check_bundle). SKIP_* pick the gpg message the warning quotes, as backup.skipped_line.
+SKIP_KEY='^key [0-9A-F]{8,40}: '
+SKIP_DONE='^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*)$'
+SKIP_NOISE="^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$"
+
+secret_keys_imported() { # secret_keys_imported STATUS_FILE: IMPORT_RES counts secret keys imported or unchanged
+  local -a f
+  local line counts=""
+  while IFS= read -r line; do
+    if [[ $line == "[GNUPG:] IMPORT_RES "* ]]; then counts=$line; fi
+  done <"$1"
+  read -ra f <<<"$counts"
+  (( ${#f[@]} >= 14 )) && [[ ${f[12]} =~ ^[0-9]+$ && ${f[13]} =~ ^[0-9]+$ ]] && (( 10#${f[12]} + 10#${f[13]} > 0 ))
+}
+
+skipped_line() { # skipped_line STDERR_FILE CODE: the gpg message a partial import's warning quotes
+  local line other=""
+  while IFS= read -r line; do
+    [[ $line == "gpg: "* ]] || continue
+    line=${line#gpg: }
+    [[ $line =~ $SKIP_DONE ]] && continue
+    if [[ $line =~ $SKIP_KEY ]]; then printf '%s' "$line"; return; fi
+    if [[ -z $other && ! $line =~ $SKIP_NOISE ]]; then other=$line; fi
+  done <"$1"
+  printf '%s' "${other:-gpg exited with status $2}"
+}
+
 load_candidate() {
-  local i=$1 f n=0 source
+  local i=$1 f n=0 source rc
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
     kill_agents "$STAGING"
     while IFS= read -r f; do
@@ -672,8 +701,13 @@ load_candidate() {
     while IFS= read -r f; do
       readable_copy "$f" "$STAGING" "bom-$n.key" source || die "$EXIT_BACKUP" "cannot import $f: cannot read the file"
       n=$((n + 1))
-      GNUPGHOME=$STAGING gpg --batch --import -- "$source" 2>"$WORK/import.err" ||
-        die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
+      rc=0
+      GNUPGHOME=$STAGING gpg --batch --status-fd 1 --import -- "$source" >"$WORK/import.status" \
+        2>"$WORK/import.err" || rc=$?
+      if (( rc )); then
+        secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
+        warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"
+      fi
     done <<<"${CAND_FILES[i]}"
     repair_ecdh_imports "$STAGING" "${CAND_BARE[i]}"
   fi

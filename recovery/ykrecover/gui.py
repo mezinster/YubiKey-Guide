@@ -704,7 +704,8 @@ class App:
 
     def build_key(self):
         self.heading("3. Confirm key", "The subkeys marked <- card will be written to every new card.")
-        self.readonly_text(self.session.describe(), 8)
+        warnings = "\n".join(f"warning: {w}" for w in self.session.load_warnings)
+        self.readonly_text(self.session.describe() + (f"\n\n{warnings}" if warnings else ""), 8)
 
     def build_mode(self):
         self.heading("4. Mode", MODE_HELP)

@@ -506,7 +506,7 @@ def fake_session(cards=10):
                                detail="decrypt round-trip (PINs were changed; see PINs shown)")
                for i in range(1, cards + 1)]
     return SimpleNamespace(opts=opts, results=results, describe=lambda: DESCRIBE, cleanup=lambda: None,
-                           bundle=SimpleNamespace(has_certify_secret=True))
+                           bundle=SimpleNamespace(has_certify_secret=True), load_warnings=[])
 
 
 @SKIP_GUI
@@ -867,6 +867,20 @@ class GuiBehaviourTests(unittest.TestCase):
         app.show(1)
         self.assertEqual(app.cand_list.size(), 0)
         self.assertTrue(app.cand_error.cget("text"))
+
+    def test_key_page_shows_what_gpg_skipped(self):
+        app = self.app()
+        app.session.load_warnings = ["gpg skipped part of /b/key.asc: key 0123456789ABCDEF: no valid user IDs"]
+        app.show(2)
+        texts, todo = [], list(app.body.winfo_children())
+        while todo:
+            widget = todo.pop()
+            todo.extend(widget.winfo_children())
+            if isinstance(widget, tk.Text):
+                texts.append(widget.get("1.0", "end"))
+        (text,) = texts
+        self.assertTrue(text.startswith(DESCRIBE), text)
+        self.assertIn("\n\nwarning: gpg skipped part of /b/key.asc: key 0123456789ABCDEF: no valid user IDs\n", text)
 
     def test_backup_page_shows_the_report(self):
         app = self.app()
