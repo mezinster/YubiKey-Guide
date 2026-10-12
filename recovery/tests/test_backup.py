@@ -131,6 +131,32 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(inv.candidates), 1)
         self.assertIn("  junk.asc: not a readable key file (ignored)", backup.report(inv))
 
+    def test_no_match_lists_what_was_found(self):
+        info = fixture_info("multikey")
+        found = backup.detect(FIXTURES / "multikey")
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.choose(found, key="DEADBEEFDEADBEEF")
+        self.assertEqual(ctx.exception.code, EXIT_BACKUP)
+        text = str(ctx.exception)
+        self.assertTrue(text.startswith("no backup matches --source or --key; found:\n"), text)
+        for fp in (info["KEY_FP"], info["KEY2_FP"]):
+            self.assertIn(f"  export: {FIXTURES / 'multikey'} (key {fp[-16:]})", text)
+
+    def test_dash_relative_path_is_not_an_option(self):
+        import os
+        root = short_tempdir(self, "dash")
+        (root / "-dash").mkdir()
+        (root / "-dash" / "key.asc").write_bytes((FIXTURES / "unprotected" / "key.asc").read_bytes())
+        cwd = os.getcwd()
+        os.chdir(root)
+        self.addCleanup(os.chdir, cwd)
+        (c,) = backup.detect(Path("-dash"))
+        self.assertEqual([str(f) for f in c.files], [os.path.join("-dash", "key.asc")])
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(c, staging)
+        self.assertTrue(bundle.has_certify_secret)
+
     def test_loads_split_files_into_one_key(self):
         (c,) = backup.detect(FIXTURES / "split")
         staging = Home.create("t")

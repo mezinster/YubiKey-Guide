@@ -179,7 +179,7 @@ def walk(folder: Path) -> tuple:
 
 
 def classify(path: Path, scan: Home):
-    result = scan.run(["gpg", "--batch", "--list-packets", str(path)])
+    result = scan.run(["gpg", "--batch", "--list-packets", "--", str(path)])
     parts = parse_packets(result.stdout) if result.returncode == 0 else []
     return parts or None
 
@@ -273,7 +273,12 @@ def detect(folder: Path) -> list:
     return list(inventory(folder).candidates)
 
 
+def _listing(candidates) -> str:
+    return "\n".join(f"  {c.kind}: {c.path}" + (f" (key {c.key_id})" if c.key_id else "") for c in candidates)
+
+
 def choose(candidates, kind=None, key=None) -> Candidate:
+    found = list(candidates)
     if kind:
         candidates = [c for c in candidates if c.kind == kind]
     if key:
@@ -281,11 +286,13 @@ def choose(candidates, kind=None, key=None) -> Candidate:
         candidates = [c for c in candidates if not c.key_id or want.endswith(c.key_id) or c.key_id.endswith(want)]
     if len(candidates) == 1:
         return candidates[0]
-    if not candidates:
+    if not found:
         raise RecoveryError("no backup found (expected secret-*-Certify.key, secret-*-Subkeys.key "
                             "or a GnuPG home)", EXIT_BACKUP)
-    listing = "\n".join(f"  {c.kind}: {c.path}" + (f" (key {c.key_id})" if c.key_id else "") for c in candidates)
-    raise RecoveryError(f"several backups found; narrow --backup or pass --source or --key:\n{listing}", EXIT_BACKUP)
+    if not candidates:
+        raise RecoveryError(f"no backup matches --source or --key; found:\n{_listing(found)}", EXIT_BACKUP)
+    raise RecoveryError(f"several backups found; narrow --backup or pass --source or --key:\n{_listing(candidates)}",
+                        EXIT_BACKUP)
 
 
 def parse_secret_keys(colons: str) -> list:
@@ -345,7 +352,7 @@ def load(candidate: Candidate, staging: Home) -> list:
                 raise RecoveryError(f"cannot copy {src} into staging: {err}", EXIT_BACKUP) from err
     else:
         for src in candidate.files:
-            result = staging.run(["gpg", "--batch", "--import", str(src)])
+            result = staging.run(["gpg", "--batch", "--import", "--", str(src)])
             if result.returncode != 0:
                 raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
     bundles = list_bundles(staging)
