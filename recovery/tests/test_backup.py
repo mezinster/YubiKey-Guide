@@ -22,6 +22,13 @@ fpr:::::::::AAAA1111111111111111111111111111111111111:
 
 
 class ParseTests(unittest.TestCase):
+    def test_main_key_expiry_and_algo(self):
+        colons = COLONS_TWO_KEYS.replace("sec:u:255:22:D35238B02045AC9D:1791717022:::",
+                                         "sec:e:255:22:D35238B02045AC9D:1791717022:1791800000::", 1)
+        first, second = backup.parse_secret_keys(colons)
+        self.assertEqual((first.expires, first.algo), (1791800000, "ed25519"))
+        self.assertEqual(second.expires, 0)
+
     def test_parses_keys_and_subkeys(self):
         first, second = backup.parse_secret_keys(COLONS_TWO_KEYS)
         self.assertEqual(first.key_fp, "9D1EEF5129527741D5D71C30D35238B02045AC9D")

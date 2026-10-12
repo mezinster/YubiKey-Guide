@@ -70,6 +70,8 @@ class KeyBundle:
     uids: tuple
     subkeys: tuple
     has_certify_secret: bool
+    expires: int = 0  # main key; 0 means never
+    algo: str = ""
 
 
 @dataclass(frozen=True)
@@ -310,7 +312,8 @@ def parse_secret_keys(colons: str) -> list:
         if f[0] == "sec":
             if current is not None:
                 close_sub()
-            current = {"key_fp": "", "key_id": f[4], "uids": [], "subkeys": [], "has_certify_secret": f[14] != "#"}
+            current = {"key_fp": "", "key_id": f[4], "uids": [], "subkeys": [], "has_certify_secret": f[14] != "#",
+                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}"}
             bundles.append(current)
         elif f[0] == "ssb" and current is not None:
             close_sub()
@@ -327,8 +330,8 @@ def parse_secret_keys(colons: str) -> list:
             current["uids"].append(f[9])
     if current is not None:
         close_sub()
-    return [KeyBundle(b["key_fp"], b["key_id"], tuple(b["uids"]), tuple(b["subkeys"]), b["has_certify_secret"])
-            for b in bundles]
+    return [KeyBundle(b["key_fp"], b["key_id"], tuple(b["uids"]), tuple(b["subkeys"]), b["has_certify_secret"],
+                      b["expires"], b["algo"]) for b in bundles]
 
 
 def list_bundles(home: Home) -> list:

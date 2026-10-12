@@ -1,5 +1,8 @@
 """clone / renew / rotate: which subkeys go to cards, and the staging steps that produce them."""
 
+import datetime
+import re
+
 from . import EXIT_BACKUP, RecoveryError
 from .plan import STAGING, Step
 
@@ -12,6 +15,7 @@ ALGOS = {
 ROTATED = {"s": "<NEW_FPR_S>", "e": "<NEW_FPR_E>", "a": "<NEW_FPR_A>"}
 PASS = "<CERTIFY_PASS>"
 LOOPBACK = ("gpg", "--batch", "--pinentry-mode", "loopback")
+UNIT_SECONDS = {"": 86400, "d": 86400, "w": 7 * 86400, "m": 30 * 86400, "y": 365 * 86400}
 
 
 def select_targets(bundle) -> dict:
@@ -39,16 +43,45 @@ def default_algo(bundle, targets) -> str:
     return "rsa4096" if algo.startswith("rsa") else "ed25519"
 
 
-def mode_steps(mode, bundle, targets, expire, algo, revoke_old) -> list:
+def expire_at(expire: str, now: int):
+    """When subkeys given this --expire end; None for never, or for a form we do not parse."""
+    text = expire.strip().lower()
+    match = re.fullmatch(r"(\d+)([dwmy]?)", text)
+    if match and int(match.group(1)) > 0:
+        return now + int(match.group(1)) * UNIT_SECONDS[match.group(2)]
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if match:
+        try:
+            day = datetime.datetime(*map(int, match.groups()), tzinfo=datetime.timezone.utc)
+        except ValueError:
+            return None
+        return int(day.timestamp())
+    return None
+
+
+def main_needs_extending(bundle, expire: str, now: int) -> bool:
+    """A main key with an expiry that has passed, or that comes before the subkeys this run writes."""
+    if bundle.expires <= 0:
+        return False
+    until = expire_at(expire, now)
+    return bundle.expires <= now or until is None or bundle.expires < until
+
+
+def mode_steps(mode, bundle, targets, expire, algo, revoke_old, now=0, unprotected=False) -> list:
     fp = bundle.key_fp
+    steps = []
+    if mode in ("renew", "rotate") and main_needs_extending(bundle, expire, now):
+        steps.append(Step("mode", STAGING, (*LOOPBACK, "--passphrase-fd", "0", "--quick-set-expire", fp, expire),
+                          (PASS,)))
     if mode == "renew":
         fprs = unique(targets[u] for u in USAGES)
-        return [Step("mode", STAGING, (*LOOPBACK, "--passphrase-fd", "0", "--quick-set-expire", fp, expire, *fprs),
-                     (PASS,))]
+        steps.append(Step("mode", STAGING, (*LOOPBACK, "--passphrase-fd", "0", "--quick-set-expire", fp, expire,
+                                            *fprs), (PASS,)))
+        return steps
     if mode != "rotate":
-        return []
-    steps = [Step("mode", STAGING, (*LOOPBACK, "--passphrase-fd", "0", "--quick-add-key", fp, ALGOS[algo][u],
-                                    USAGE_WORD[u], expire), (PASS,)) for u in USAGES]
+        return steps
+    steps += [Step("mode", STAGING, (*LOOPBACK, "--passphrase-fd", "0", "--quick-add-key", fp, ALGOS[algo][u],
+                                     USAGE_WORD[u], expire), (PASS,)) for u in USAGES]
     if revoke_old:
         for old in unique(targets[u] for u in USAGES):
             steps.append(Step("mode", STAGING, ("gpgconf", "--kill", "all")))

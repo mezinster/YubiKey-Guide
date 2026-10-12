@@ -228,7 +228,10 @@ class Session:
             if stubs:
                 raise RecoveryError(f"the backup holds card stubs, not secret subkeys: {' '.join(stubs)}",
                                     EXIT_BACKUP)
-        stale = modes.expired(self.bundle, self.targets, int(time.time()))
+        now = int(time.time())
+        if mode == "clone" and 0 < self.bundle.expires <= now:
+            raise RecoveryError("the main key has expired; use --mode renew or --mode rotate", EXIT_BACKUP)
+        stale = modes.expired(self.bundle, self.targets, now)
         if stale and mode == "clone":
             raise RecoveryError(f"subkeys have expired: {' '.join(stale)}; use --mode renew or --mode rotate",
                                 EXIT_BACKUP)
@@ -255,7 +258,8 @@ class Session:
     def staging_steps(self) -> list:
         o, b = self.opts, self.bundle
         algo = o.algo or modes.default_algo(b, self.targets)
-        return modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old) + modes.backup_steps(o.mode, b)
+        steps = modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old, int(time.time()))
+        return steps + modes.backup_steps(o.mode, b)
 
     def card_plan(self, index: int, targets: dict) -> list:
         fp = self.bundle.key_fp
