@@ -57,9 +57,13 @@ def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings) -
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-card"), (*holder, "quit")),
     ]
     for usage, slot, _ in SLOTS:
+        if targets[usage] is None:
+            continue
         steps += [kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-key", key_fp),
                              (f"key {targets[usage]}", "keytocard", slot, "<CERTIFY_PASS>", "<ADMIN_PIN>", "save"))]
-    for _, _, ref in SLOTS:
+    for usage, _, ref in SLOTS:
+        if targets[usage] is None:
+            continue
         steps += [kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "keys", "set-touch", ref,
                                                settings.touch[ref], "-f", "-a", "<ADMIN_PIN>"))]
     return steps
@@ -68,19 +72,22 @@ def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings) -
 def verify_steps(index: int, key_fp: str, targets: dict) -> list:
     phase, v = f"verify{index}", VERIFYHOME
     pin = ("gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase-fd", "0", "--yes")
-    return [
+    steps = [
         Step(phase, STAGING, ("gpg", "--batch", "--yes", "--armor", "--output", f"{v}/pub.asc", "--export", key_fp)),
         Step(phase, v, ("gpg", "--batch", "--import", f"{v}/pub.asc")),
         Step(phase, v, ("gpg", "--batch", "--with-colons", "--card-status"), check="cardstatus"),
-        Step(phase, v, (*pin, "--local-user", f"{targets['s']}!", "--output", f"{v}/test.sig", "--detach-sign",
-                        f"{v}/test.txt"), ("<USER_PIN>",)),
-        Step(phase, v, ("gpg", "--batch", "--verify", f"{v}/test.sig", f"{v}/test.txt")),
-        Step(phase, v, ("gpg", "--batch", "--yes", "--trust-model", "always", "--recipient", f"{targets['e']}!",
-                        "--output", f"{v}/test.gpg", "--encrypt", f"{v}/test.txt")),
-        Step(phase, v, ("gpgconf", "--kill", "all")),
-        Step(phase, v, (*pin, "--output", f"{v}/test.out", "--decrypt", f"{v}/test.gpg"), ("<USER_PIN>",),
-             check="roundtrip"),
     ]
+    if targets["s"]:
+        steps += [Step(phase, v, (*pin, "--local-user", f"{targets['s']}!", "--output", f"{v}/test.sig",
+                                  "--detach-sign", f"{v}/test.txt"), ("<USER_PIN>",)),
+                  Step(phase, v, ("gpg", "--batch", "--verify", f"{v}/test.sig", f"{v}/test.txt"))]
+    if targets["e"]:
+        steps += [Step(phase, v, ("gpg", "--batch", "--yes", "--trust-model", "always", "--recipient",
+                                  f"{targets['e']}!", "--output", f"{v}/test.gpg", "--encrypt", f"{v}/test.txt")),
+                  Step(phase, v, ("gpgconf", "--kill", "all")),
+                  Step(phase, v, (*pin, "--output", f"{v}/test.out", "--decrypt", f"{v}/test.gpg"), ("<USER_PIN>",),
+                       check="roundtrip")]
+    return steps
 
 
 def parse_serials(text: str) -> list:

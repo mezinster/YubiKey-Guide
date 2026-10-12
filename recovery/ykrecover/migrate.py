@@ -224,7 +224,7 @@ class Session:
                                 EXIT_BACKUP)
         if mode != "rotate":  # rotate writes new subkeys; the old ones are only revoked or left
             by_fpr = {k.fpr: k for k in self.bundle.subkeys}
-            stubs = [f for f in modes.unique(self.targets[u] for u in modes.USAGES) if not by_fpr[f].secret]
+            stubs = [f for f in modes.present(self.targets) if not by_fpr[f].secret]
             if stubs:
                 raise RecoveryError(f"the backup holds card stubs, not secret subkeys: {' '.join(stubs)}",
                                     EXIT_BACKUP)
@@ -235,6 +235,14 @@ class Session:
         if stale and mode == "clone":
             raise RecoveryError(f"subkeys have expired: {' '.join(stale)}; use --mode renew or --mode rotate",
                                 EXIT_BACKUP)
+        gaps = modes.missing(self.targets)
+        if mode == "clone" and len(gaps) == len(modes.USAGES):
+            raise RecoveryError("the key has no subkeys to put on a card; use --mode renew or --mode rotate",
+                                EXIT_BACKUP)
+        if mode == "clone":
+            for u in gaps:
+                extra = "; SSH will not work from this card" if u == "a" else ""
+                self.ui.warn(f"no {modes.SLOT_WORD[u]} subkey: that card slot stays empty{extra}")
 
     def describe(self) -> str:
         b = self.bundle
@@ -243,6 +251,8 @@ class Session:
             mark = " <- card" if k.fpr in self.targets.values() else ""
             expires = datetime.date.fromtimestamp(k.expires).isoformat() if k.expires else "never"
             lines.append(f"  [{k.usage.upper()}] {k.algo} {k.fpr} expires {expires}{mark}")
+        for u in modes.missing(self.targets):
+            lines.append(f"  [{u.upper()}] none (clone leaves it empty; renew and rotate create one)")
         return "\n".join(lines)
 
     def unlock(self, passphrase: str) -> bool:
@@ -440,7 +450,7 @@ class Session:
 
     def _check(self, step, output: str, verifyhome: Home) -> None:
         if step.check == "cardstatus":
-            want = [self.targets[u].upper() for u in modes.USAGES]
+            want = [(self.targets[u] or "").upper() for u in modes.USAGES]
             got = card.parse_card_fprs(output)
             if got != want:
                 raise StepError("card fingerprints", f"card has {got}, expected {want}")
@@ -465,7 +475,9 @@ class Session:
         return EXIT_OK if all(r.status == "OK" for r in self.results) else EXIT_CARD
 
     def dry_run_text(self) -> str:
-        targets = modes.ROTATED if self.opts.mode == "rotate" else self.targets
+        mode = self.opts.mode
+        targets = (modes.ROTATED if mode == "rotate"
+                   else modes.renew_targets(self.targets) if mode == "renew" else self.targets)
         steps = self.staging_steps()
         for index in range(1, self.opts.cards + 1):
             steps += self.card_plan(index, targets)

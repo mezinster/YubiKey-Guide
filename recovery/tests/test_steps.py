@@ -1,6 +1,6 @@
 import unittest
 
-from ykrecover import RecoveryError, card, modes
+from ykrecover import card, modes
 from ykrecover.backup import KeyBundle, Subkey
 from ykrecover.plan import Step, format_plan, public_tokens, substitute
 
@@ -42,8 +42,7 @@ class ModeTests(unittest.TestCase):
 
     def test_missing_usage(self):
         bundle = KeyBundle(FP, "A" * 16, (), (sub("S1" * 20, "s", 1),), True)
-        with self.assertRaises(RecoveryError):
-            modes.select_targets(bundle)
+        self.assertEqual(modes.select_targets(bundle), {"s": "S1" * 20, "e": None, "a": None})
 
     def test_expired(self):
         bundle = KeyBundle(FP, "A" * 16, (), (sub("S1" * 20, "s", 1, expires=50),

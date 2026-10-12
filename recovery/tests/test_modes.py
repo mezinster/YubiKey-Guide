@@ -1,6 +1,6 @@
 import unittest
 
-from ykrecover import modes
+from ykrecover import card, modes
 from ykrecover.backup import KeyBundle, Subkey
 
 NOW = 1_800_000_000
@@ -44,3 +44,40 @@ class ExpireTests(unittest.TestCase):
                                  "2y", "ed25519", False, NOW)
         self.assertEqual(steps[0].argv[-3:], ("--quick-set-expire", "F" * 40, "2y"))
         self.assertIn("--quick-add-key", steps[1].argv)
+
+
+NOAUTH = (Subkey("S" * 40, "", "s", "ed25519", 1, 0, "u"), Subkey("E" * 40, "", "e", "cv25519", 1, 0, "u"))
+
+
+class MissingSlotTests(unittest.TestCase):
+    def test_select_targets_marks_missing(self):
+        targets = modes.select_targets(bundle(subkeys=NOAUTH))
+        self.assertEqual(targets, {"s": "S" * 40, "e": "E" * 40, "a": None})
+        self.assertEqual(modes.missing(targets), ["a"])
+
+    def test_renew_adds_missing_subkey(self):
+        targets = modes.select_targets(bundle(subkeys=NOAUTH))
+        steps = modes.mode_steps("renew", bundle(subkeys=NOAUTH), targets, "2y", "ed25519", False, NOW)
+        self.assertEqual(steps[0].argv[-5:], ("--quick-set-expire", "F" * 40, "2y", "S" * 40, "E" * 40))
+        self.assertEqual(steps[1].argv[-5:], ("--quick-add-key", "F" * 40, "ed25519", "auth", "2y"))
+
+    def test_renew_without_any_subkey_only_adds(self):
+        targets = modes.select_targets(bundle(subkeys=()))
+        steps = modes.mode_steps("renew", bundle(subkeys=()), targets, "2y", "ed25519", False, NOW)
+        self.assertEqual([s.argv[s.argv.index("--quick-add-key") + 3] for s in steps], ["sign", "encrypt", "auth"])
+
+    def test_card_steps_skip_empty_slot(self):
+        targets = {"s": "S" * 40, "e": "E" * 40, "a": None}
+        steps = card.card_steps(1, "F" * 40, targets, card.CardSettings())
+        keytocard = [s for s in steps if "--edit-key" in s.argv]
+        self.assertEqual([s.stdin[2] for s in keytocard], ["1", "2"])
+        touch = [s.argv[s.argv.index("set-touch") + 1] for s in steps if "set-touch" in s.argv]
+        self.assertEqual(touch, ["sig", "dec"])
+
+    def test_finish_skips_ssh_without_auth(self):
+        steps = modes.finish_steps("F" * 40, "F" * 16, {"s": "S" * 40, "e": "E" * 40, "a": None})
+        self.assertFalse(any("--export-ssh-key" in s.argv for s in steps))
+
+    def test_default_algo_falls_back_to_main_key(self):
+        self.assertEqual(modes.default_algo(bundle(subkeys=(), algo="rsa2048"), modes.select_targets(
+            bundle(subkeys=(), algo="rsa2048"))), "rsa4096")
