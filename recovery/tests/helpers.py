@@ -104,6 +104,23 @@ def without_uid_self_sigs(data: bytes, drop_uids: bool = False) -> bytes:
 
 
 MALLORY = "Mallory Müller <m@example.org>"
+REVOKED_UID = "Revoked Test <r@example.org>"
+
+
+def revoked_uid_folder(test) -> Path:
+    """The unprotected fixture key with a second user ID that is revoked, exported (binary) into a folder."""
+    info, home, root = fixture_info("unprotected"), short_tempdir(test, "rv"), short_tempdir(test, "rev")
+    env = {**os.environ, "GNUPGHOME": str(home)}
+
+    def gpg(*args):
+        return subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", "--passphrase", "", *args],
+                              env=env, check=True, capture_output=True).stdout
+
+    import_unprotected(home)
+    gpg("--quick-add-uid", info["KEY_FP"], REVOKED_UID)
+    gpg("--quick-revoke-uid", info["KEY_FP"], REVOKED_UID)
+    (root / "key.gpg").write_bytes(gpg("--export-secret-keys", info["KEY_FP"]))
+    return root
 
 
 def partial_import_folder(test, shape: str) -> Path:

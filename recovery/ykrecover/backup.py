@@ -75,7 +75,7 @@ class KeyBundle:
     expires: int = 0  # main key; 0 means never
     algo: str = ""
     validity: str = ""  # main key, colon field 2: "i" when no user ID has a valid self-signature
-    unsigned_uids: tuple = ()  # user IDs with no valid self-signature (listed with no creation date)
+    unsigned_uids: tuple = ()  # user IDs with no valid self-signature (no creation date, not revoked or expired)
 
 
 @dataclass(frozen=True)
@@ -355,7 +355,7 @@ def parse_secret_keys(colons: str) -> list:
             sub["keygrip"] = f[9]
         elif f[0] == "uid" and current is not None:
             current["uids"].append(f[9])
-            if not f[5]:
+            if not f[5] and f[1] not in ("r", "e"):  # revoked and expired ones list no creation date either
                 current["unsigned"].append(f[9])
     if current is not None:
         close_sub()

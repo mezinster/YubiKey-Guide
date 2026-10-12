@@ -5,7 +5,8 @@ import subprocess
 import unittest
 
 from tests.helpers import (FIXTURES, LINUX, MALLORY, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
-                           partial_import_folder, repeated_key_folder, run_impl, short_tempdir)
+                           partial_import_folder, repeated_key_folder, revoked_uid_folder, run_impl,
+                           short_tempdir)
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -127,6 +128,11 @@ class InventoryParityTests(unittest.TestCase):
                 warnings = [line for line in py.stderr.splitlines() if line.startswith("warning: ")]
                 self.assertEqual(warnings, [f'warning: user ID "{MALLORY}" of key {fixture_info("ed25519")["KEY_FP"]} '
                                             "has no valid self-signature; it will not be published with the key"])
+
+    def test_revoked_user_id_is_not_reported(self):
+        py = self.assert_same_run(revoked_uid_folder(self))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertNotIn("warning: user ID", py.stderr)
 
     def test_rejected_secret_block_is_an_import_error(self):
         self.assert_same_import_error(partial_import_folder(self, "rejected"))

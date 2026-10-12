@@ -493,7 +493,7 @@ list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO VALIDITY" 
                     validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
       $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo, kvalid; insec = 0; next }
       $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
-      $1 == "uid" { print "uid", (($6 == "") ? "-" : "+"), $10 }'
+      $1 == "uid" { print "uid", (($6 == "" && $2 != "r" && $2 != "e") ? "-" : "+"), $10 }'
 }
 
 load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and SUB_* arrays
@@ -519,7 +519,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
     read -r kind a b c d e f g <<<"$line"
     case $kind in
       sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; KEY_VALIDITY=$f; fi ;;
-      uid) # "uid + TEXT", or "uid - TEXT" with no valid self-signature (no creation date)
+      uid) # "uid + TEXT"; "uid - TEXT" has no valid self-signature (no date, not revoked or expired)
         if [[ $current == "$KEY_FP" ]]; then
           UIDS+=("${line#uid ? }")
           if [[ $a == - ]]; then UIDS_UNSIGNED+=("${line#uid - }"); fi

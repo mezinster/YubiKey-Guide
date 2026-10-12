@@ -5,9 +5,9 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, LINUX, MALLORY, PASSPHRASE, RECOVERY, REAL_GPG, bare_first_folder,
-                           bom_crlf_folder, fixture_info, import_unprotected, partial_import_folder, repeated_key_folder,
-                           short_tempdir)
+from tests.helpers import (FIXTURES, LINUX, MALLORY, PASSPHRASE, RECOVERY, REAL_GPG, REVOKED_UID,
+                           bare_first_folder, bom_crlf_folder, fixture_info, import_unprotected, partial_import_folder,
+                           repeated_key_folder, revoked_uid_folder, short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
 from ykrecover.gpg import Home, gpg_version
 
@@ -324,6 +324,25 @@ class PartialImportTests(unittest.TestCase):
         self.assertEqual(bundle.unsigned_uids, (MALLORY,))
         backup.check_user_ids(bundle)
         self.assertEqual(backup.unsigned_uid_warnings(bundle), [unsigned_warning(MALLORY, info["KEY_FP"])])
+
+    def test_revoked_or_expired_user_id_is_not_unsigned(self):
+        colons = ("sec:-:255:22:D35238B02045AC9D:1791717022:::-:::cESCA:::+::ed25519:::0:\n"
+                  "fpr:::::::::9D1EEF5129527741D5D71C30D35238B02045AC9D:\n"
+                  "uid:-::::1791717022::230162C5BA27CB835FEFA182F7362D77F77BB1A7::Good <g@example.org>::::::::::0:\n"
+                  "uid:r::::::330162C5BA27CB835FEFA182F7362D77F77BB1A7::Revoked <r@example.org>::::::::::0:\n"
+                  "uid:e::::::430162C5BA27CB835FEFA182F7362D77F77BB1A7::Expired <e@example.org>::::::::::0:\n"
+                  "uid:-::::::530162C5BA27CB835FEFA182F7362D77F77BB1A7::Unsigned <u@example.org>::::::::::0:\n")
+        (bundle,) = backup.parse_secret_keys(colons)
+        self.assertEqual(len(bundle.uids), 4)
+        self.assertEqual(bundle.unsigned_uids, ("Unsigned <u@example.org>",))
+
+    def test_revoked_user_id_is_not_reported(self):
+        candidate = backup.choose(backup.detect(revoked_uid_folder(self)))
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(candidate, staging, self.fail)
+        self.assertIn(REVOKED_UID, bundle.uids)
+        self.assertEqual(backup.unsigned_uid_warnings(bundle), [])
 
     def test_rejected_secret_block_is_an_import_error(self):
         root = partial_import_folder(self, "rejected")
