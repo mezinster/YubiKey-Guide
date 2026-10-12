@@ -70,15 +70,18 @@ Release notes are inserted as Markdown and limited to their own section. Asset s
 ## Workflow (`.github/workflows/pages.yml`)
 
 **Triggers**
+
 - `push` to `master`, limited by `paths`: `README.md`, `SECENV.md`, `piv/README.md`, `recovery/README.md`, `media/**`, `site/**` and the workflow file itself.
 - `release` (`published`).
 - `workflow_dispatch`.
 
 **Settings**
+
 - **Permissions:** `contents: read`, `pages: write`, `id-token: write`.
 - **Concurrency:** group `pages`, so that a newer run replaces a queued one.
 
 **Job `build`**
+
 1. Checkout, then `setup-python` 3.12, then `pip install -r site/requirements.txt`.
 2. `gh api repos/${{ github.repository }}/releases > releases.json` (with the job's `GITHUB_TOKEN`).
 3. `python3 site/build.py --releases releases.json`.
@@ -86,6 +89,7 @@ Release notes are inserted as Markdown and limited to their own section. Asset s
 5. `actions/upload-pages-artifact` from `site/.site`.
 
 **Job `deploy`**
+
 - Uses the `github-pages` environment.
 - Runs `actions/deploy-pages`.
 
