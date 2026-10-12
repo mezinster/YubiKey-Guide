@@ -188,18 +188,22 @@ def classify(path: Path, scan: Home):
 
 
 def _select(key: str, rows: list) -> tuple:
-    """rows: (walk_index, path, parts) holding this key; returns (used paths, supplied ranks by keyid)."""
+    """rows: (walk_index, path, parts) holding this key; returns (used paths, supplied ranks by keyid).
+
+    gpg keeps the first copy of a key it imports and reports later copies "unchanged", so files holding
+    protected copies are imported first, and a keyid's first secret copy decides its state."""
     def order(row):
+        ranks = [RANK.get(p.state, 0) for p in row[2]]
         secret = [p for p in row[2] if RANK.get(p.state, 0)]
-        return (-len(secret), -any(p.role == "main" for p in secret), row[0])
+        return (-max(ranks, default=0), -len(secret), -any(p.role == "main" for p in secret), row[0])
 
     used, supplied = [], {}
     for _, path, parts in sorted(rows, key=order):
-        better = [p for p in parts if RANK.get(p.state, 0) > supplied.get(p.keyid, 0)]
-        if better:
+        new = [p for p in parts if RANK.get(p.state, 0) and p.keyid not in supplied]
+        if new:
             used.append(path)
-            for p in better:  # a file may repeat a key: the strongest secret wins
-                supplied[p.keyid] = max(supplied.get(p.keyid, 0), RANK[p.state])
+            for p in new:
+                supplied.setdefault(p.keyid, RANK[p.state])
     return used, supplied
 
 

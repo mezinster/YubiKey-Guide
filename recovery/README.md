@@ -125,7 +125,7 @@ Backup files in tests/fixtures/flexible/asc backup:
   subkeys/flex.sub_priv.asc: key 5B21983A476B3572: main missing, 2 subkeys secret (not needed)
 ```
 
-"used" files supply the key. "not needed" files hold secrets that another file already provides. If a file repeats a key that another file also holds, the copy protected by a passphrase is kept. When one folder holds several backups, or several keys, the tool lists them and asks you to narrow `--backup` or pass `--source` or `--key`.
+"used" files supply the key. "not needed" files hold secrets that another file already provides. When several files hold the same key, the tool prefers a copy protected by a passphrase. Within one file the first copy counts, as it does for `gpg --import`. When one folder holds several backups, or several keys, the tool lists them and asks you to narrow `--backup` or pass `--source` or `--key`.
 
 A backup can mix protection: a passphrase-protected main key with subkeys that have no passphrase. The tool still asks for the passphrase, and sends it to `keytocard` only for the subkeys that have one.
 

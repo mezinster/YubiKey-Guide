@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests.helpers import FIXTURES, LINUX, repeated_key_folder, run_impl, short_tempdir
+from tests.helpers import FIXTURES, LINUX, bare_first_folder, repeated_key_folder, run_impl, short_tempdir
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -38,10 +38,17 @@ class InventoryParityTests(unittest.TestCase):
         self.assertEqual((sh.returncode, sh.stdout, sh.stderr), (py.returncode, py.stdout, py.stderr))
         return py
 
-    def test_repeated_key_needs_the_passphrase(self):
+    def test_repeated_key_first_copy_wins(self):
         py = self.assert_same_run(repeated_key_folder(self))
         self.assertEqual(py.returncode, 0, py.stderr)
-        self.assertIn("<CERTIFY_PASS>", py.stdout)
+        self.assertNotIn("<CERTIFY_PASS>", py.stdout)
+
+    def test_protected_file_wins_over_an_earlier_bare_file(self):
+        py = self.assert_same_run(bare_first_folder(self))
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertIn("STDIN <CERTIFY_PASS>\nSTDIN <ADMIN_PIN>", py.stdout)
+        self.assertRegex(py.stderr, r"a-bare\.gpg: key \w+: .* \(not needed\)")
+        self.assertRegex(py.stderr, r"b-protected\.gpg: key \w+: .* \(used\)")
 
     def test_only_stubs(self):
         root = short_tempdir(self, "stubs")

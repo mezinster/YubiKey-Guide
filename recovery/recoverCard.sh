@@ -340,32 +340,35 @@ describe_parts() { # describe_parts "ROLE STATE KEYID"... → "main secret, 2 su
   printf '%s' "$out"
 }
 
-select_files() { # select_files KEY: the files that supply KEY's secrets best (as Python's _select)
-  local key=$1 i line role state kid secret main_secret better kind unprot bare=""
+select_files() { # select_files KEY: the files that supply KEY's secrets (as Python's _select: first copy wins)
+  local key=$1 i line role state kid secret main_secret max r new kind unprot bare=""
   local rows=() sorted=() used=() supplied_order=()
   local -A supplied=()
   for i in "${!KEY_FILES[@]}"; do
     [[ -n ${parts_of[$i,$key]+set} ]] || continue
-    secret=0 main_secret=0
+    secret=0 main_secret=0 max=0
     while read -r role state kid; do
-      if (( $(rank "$state") )); then
+      r=$(rank "$state")
+      if (( r > max )); then max=$r; fi
+      if (( r )); then
         secret=$((secret + 1))
         if [[ $role == main ]]; then main_secret=1; fi
       fi
     done <<<"${parts_of[$i,$key]%$'\n'}"
-    rows+=("$secret $main_secret $i")
+    rows+=("$max $secret $main_secret $i")
   done
-  mapfile -t sorted < <(printf '%s\n' "${rows[@]}" | sort -k1,1nr -k2,2nr -k3,3n | cut -d' ' -f3)
+  mapfile -t sorted < <(printf '%s\n' "${rows[@]}" | sort -k1,1nr -k2,2nr -k3,3nr -k4,4n | cut -d' ' -f4)
   for i in "${sorted[@]}"; do
-    better=0
-    while read -r role state kid; do
-      if (( $(rank "$state") > ${supplied[$kid]:-0} )); then
-        if [[ -z ${supplied[$kid]+set} ]]; then supplied_order+=("$kid"); fi
-        supplied[$kid]=$(rank "$state")
-        better=1
+    new=0
+    while read -r role state kid; do # gpg keeps a key's first copy: later ones are "unchanged"
+      r=$(rank "$state")
+      if (( r )) && [[ -z ${supplied[$kid]+set} ]]; then
+        supplied_order+=("$kid")
+        supplied[$kid]=$r
+        new=1
       fi
     done <<<"${parts_of[$i,$key]%$'\n'}"
-    if (( better )); then used+=("$i"); fi
+    if (( new )); then used+=("$i"); fi
   done
   for i in "${sorted[@]}"; do
     if [[ " ${used[*]} " == *" $i "* ]]; then status[$i,$key]=used; continue; fi

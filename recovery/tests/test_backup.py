@@ -3,7 +3,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, PASSPHRASE, REAL_GPG, fixture_info, repeated_key_folder, short_tempdir
+from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, fixture_info, repeated_key_folder,
+                           short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup
 from ykrecover.gpg import Home
 
@@ -132,10 +133,29 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(c.unprotected)
         self.assertEqual(sorted(c.bare), sorted(info[k][-16:] for k in ("FPR_S", "FPR_E", "FPR_A")))
 
-    def test_repeated_key_keeps_the_strongest_secret(self):
-        # one file holding the same key protected and then with no passphrase: the passphrase is still needed
-        (c,) = backup.detect(repeated_key_folder(self))
-        self.assertEqual(([f.name for f in c.files], c.unprotected, c.bare), (["both.gpg"], False, ()))
+    def assert_staging_protected(self, candidate, protected):
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(candidate, staging)
+        self.assertEqual(backup.check_passphrase(staging, bundle, "not-the-passphrase"), not protected)
+
+    def test_repeated_key_first_copy_wins(self):
+        # one file holding the same key with no passphrase and then protected: gpg keeps the first copy
+        root = repeated_key_folder(self)
+        (c,) = backup.detect(root)
+        info = fixture_info("unprotected")
+        self.assertEqual(([f.name for f in c.files], c.unprotected), (["both.gpg"], True))
+        self.assertEqual(sorted(c.bare), sorted(info[k][-16:] for k in ("KEY_FP", "FPR_S", "FPR_E", "FPR_A")))
+        self.assert_staging_protected(c, False)
+
+    def test_protected_copy_wins_over_an_earlier_bare_file(self):
+        root = bare_first_folder(self)
+        inv = backup.inventory(root)
+        (c,) = inv.candidates
+        self.assertEqual(([f.name for f in c.files], c.unprotected, c.bare), (["b-protected.gpg"], False, ()))
+        self.assertEqual([(f.path.name, f.status) for f in inv.files],
+                         [("a-bare.gpg", "not needed"), ("b-protected.gpg", "used")])
+        self.assert_staging_protected(c, True)
 
     def test_gnupg1_home(self):
         (c,) = backup.detect(FIXTURES / "gnupg1")
