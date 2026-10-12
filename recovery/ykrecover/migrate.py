@@ -89,6 +89,7 @@ class Session:
         self.inventory = None
         self.candidate = None
         self.bundle = None
+        self.load_warnings = []  # what gpg skipped in the backup files (the CLI prints them after the report)
         self.loaded_fprs = frozenset()  # subkeys as loaded from the backup, before renew/rotate
         self.targets = {}
         self.passphrase = ""
@@ -216,7 +217,11 @@ class Session:
         if self.staging:
             self._destroy(self.staging)
         self.staging = Home.create("staging")
-        self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or candidate.key_id or None)
+        self.load_warnings = []
+        bundles = backup.load(candidate, self.staging, self.load_warnings.append)
+        self.bundle = backup.choose_key(bundles, self.opts.key or candidate.key_id or None)
+        backup.check_user_ids(self.bundle)
+        self.load_warnings.extend(backup.unsigned_uid_warnings(self.bundle))
         self.loaded_fprs = frozenset(k.fpr for k in self.bundle.subkeys)
         self.targets = modes.select_targets(self.bundle)
         return self.bundle
@@ -524,6 +529,8 @@ def run(opts: Options, ui) -> int:
             text = backup.report(session.inventory) if session.inventory else ""
             if text:
                 ui.info(text)
+            for warning in session.load_warnings:
+                ui.warn(warning)
         session.validate_bundle()
         if opts.dry_run:
             ui.output(session.dry_run_text())

@@ -5,8 +5,9 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, RECOVERY, REAL_GPG, bare_first_folder, bom_crlf_folder,
-                           fixture_info, import_unprotected, repeated_key_folder, short_tempdir)
+from tests.helpers import (FIXTURES, LINUX, MALLORY, PASSPHRASE, RECOVERY, REAL_GPG, REVOKED_UID,
+                           bare_first_folder, bom_crlf_folder, fixture_info, import_unprotected, partial_import_folder,
+                           repeated_key_folder, revoked_uid_folder, short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
 from ykrecover.gpg import Home, gpg_version
 
@@ -138,7 +139,7 @@ class InventoryTests(unittest.TestCase):
     def assert_staging_protected(self, candidate, protected):
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(candidate, staging)
+        (bundle,) = backup.load(candidate, staging, self.fail)
         self.assertEqual(backup.check_passphrase(staging, bundle, "not-the-passphrase"), not protected)
 
     def test_repeated_key_first_copy_wins(self):
@@ -170,7 +171,7 @@ class InventoryTests(unittest.TestCase):
                          "3 subkeys secret (no passphrase) (used)")
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(c, staging)
+        (bundle,) = backup.load(c, staging, self.fail)
         self.assertTrue(bundle.has_certify_secret)
         self.assertEqual((root / "bom.asc").read_bytes(), original)
         copies = [p for p in staging.path.iterdir() if p.is_file() and p.read_bytes() == original[3:]]
@@ -230,16 +231,152 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([str(f) for f in c.files], [os.path.join("-dash", "key.asc")])
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(c, staging)
+        (bundle,) = backup.load(c, staging, self.fail)
         self.assertTrue(bundle.has_certify_secret)
 
     def test_loads_split_files_into_one_key(self):
         (c,) = backup.detect(FIXTURES / "split")
         staging = Home.create("t")
         self.addCleanup(staging.destroy)
-        (bundle,) = backup.load(c, staging)
+        (bundle,) = backup.load(c, staging, self.fail)
         self.assertTrue(bundle.has_certify_secret)
         self.assertTrue(all(k.secret for k in bundle.subkeys))
+
+
+def unsigned_warning(uid, fpr):
+    return f'user ID "{uid}" of key {fpr} has no valid self-signature; it will not be published with the key'
+
+
+class PartialImportTests(unittest.TestCase):
+    """gpg exits non-zero when it skips part of a backup file; the import is judged by the secret keys it read."""
+
+    def load(self, shape, key=None):
+        root = partial_import_folder(self, shape)
+        candidate = backup.choose(backup.detect(root), key=key)
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        warnings = []
+        bundles = backup.load(candidate, staging, warn=warnings.append)
+        return root / "partial.gpg", bundles, warnings
+
+    def real_import(self, path):
+        """What gpg itself does with the file: (exit code, secret key ids it imported)."""
+        home = short_tempdir(self, "ri")
+        env = {**os.environ, "GNUPGHOME": str(home)}
+        done = subprocess.run([REAL_GPG, "--batch", "--import", str(path)], env=env, capture_output=True)
+        listing = subprocess.run([REAL_GPG, "--batch", "--with-colons", "-K"], env=env, capture_output=True,
+                                 text=True).stdout
+        return done.returncode, [line.split(":")[4] for line in listing.splitlines() if line.startswith("sec:")]
+
+    def test_file_gpg_imports_in_part_loads_with_a_warning(self):
+        ed, bad = fixture_info("ed25519")["KEY_ID"], fixture_info("unprotected")["KEY_ID"]
+        path, bundles, warnings = self.load("two-keys", key=ed)
+        self.assertEqual(self.real_import(path), (2, [ed]))
+        (bundle,) = bundles
+        self.assertEqual(bundle.key_id, ed)
+        self.assertTrue(bundle.has_certify_secret)
+        self.assertTrue(all(k.secret for k in bundle.subkeys))
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertTrue(warnings[0].startswith(f"gpg skipped part of {path}: key {bad}: "), warnings)
+
+    def load_whole_key(self, shape):
+        info = fixture_info("ed25519")
+        path, bundles, warnings = self.load(shape)
+        (bundle,) = bundles
+        self.assertEqual(bundle.key_fp, info["KEY_FP"])
+        self.assertTrue(bundle.has_certify_secret)
+        self.assertTrue(bundle.subkeys and all(k.secret for k in bundle.subkeys))
+        self.assertEqual(bundle.uids, ("Recovery Test (ed25519) <test@example.org>",))
+        backup.check_user_ids(bundle)
+        self.assertEqual(bundle.unsigned_uids, ())
+        self.assertEqual(warnings, [])
+        return path
+
+    def test_secret_block_without_user_id_self_signature(self):
+        # the reported Gpg4win case: plain GnuPG 2.5 imports the main key's secret but not the subkeys' and exits
+        # non-zero; GnuPG 2.4 stops at that block. With --allow-non-selfsigned-uid both take the whole key, and the
+        # public block that follows supplies the user ID's self-signature.
+        path = self.load_whole_key("user")
+        code, imported = self.real_import(path)
+        self.assertNotEqual(code, 0)
+
+    def test_public_block_without_user_id_self_signature(self):
+        self.load_whole_key("bad-public")
+
+    def test_key_with_no_self_signed_user_id_is_refused(self):
+        info = fixture_info("ed25519")
+        path, bundles, warnings = self.load("unsigned")
+        self.assertEqual(self.real_import(path), (2, []))
+        (bundle,) = bundles
+        self.assertEqual(warnings, [])
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.check_user_ids(bundle)
+        self.assertEqual((ctx.exception.code, str(ctx.exception)),
+                         (EXIT_BACKUP, f"key {info['KEY_FP']} has no user ID with a valid self-signature in the "
+                                       "backup; re-export the key from a keyring that holds it"))
+
+    def test_unsigned_extra_user_id_is_reported(self):
+        info = fixture_info("ed25519")
+        _, bundles, warnings = self.load("forged")
+        (bundle,) = bundles
+        self.assertEqual(warnings, [])
+        self.assertEqual(bundle.uids, ("Recovery Test (ed25519) <test@example.org>", MALLORY))
+        self.assertEqual(bundle.unsigned_uids, (MALLORY,))
+        backup.check_user_ids(bundle)
+        self.assertEqual(backup.unsigned_uid_warnings(bundle), [unsigned_warning(MALLORY, info["KEY_FP"])])
+
+    def test_revoked_or_expired_user_id_is_not_unsigned(self):
+        colons = ("sec:-:255:22:D35238B02045AC9D:1791717022:::-:::cESCA:::+::ed25519:::0:\n"
+                  "fpr:::::::::9D1EEF5129527741D5D71C30D35238B02045AC9D:\n"
+                  "uid:-::::1791717022::230162C5BA27CB835FEFA182F7362D77F77BB1A7::Good <g@example.org>::::::::::0:\n"
+                  "uid:r::::::330162C5BA27CB835FEFA182F7362D77F77BB1A7::Revoked <r@example.org>::::::::::0:\n"
+                  "uid:e::::::430162C5BA27CB835FEFA182F7362D77F77BB1A7::Expired <e@example.org>::::::::::0:\n"
+                  "uid:-::::::530162C5BA27CB835FEFA182F7362D77F77BB1A7::Unsigned <u@example.org>::::::::::0:\n")
+        (bundle,) = backup.parse_secret_keys(colons)
+        self.assertEqual(len(bundle.uids), 4)
+        self.assertEqual(bundle.unsigned_uids, ("Unsigned <u@example.org>",))
+
+    def test_revoked_user_id_is_not_reported(self):
+        candidate = backup.choose(backup.detect(revoked_uid_folder(self)))
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(candidate, staging, self.fail)
+        self.assertIn(REVOKED_UID, bundle.uids)
+        self.assertEqual(backup.unsigned_uid_warnings(bundle), [])
+
+    def test_rejected_secret_block_is_an_import_error(self):
+        root = partial_import_folder(self, "rejected")
+        self.assertEqual(self.real_import(root / "partial.gpg"), (2, []))
+        candidate = backup.choose(backup.detect(root))
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.load(candidate, staging, self.fail)
+        self.assertEqual(ctx.exception.code, EXIT_BACKUP)
+        self.assertTrue(str(ctx.exception).startswith(f"cannot import {root / 'partial.gpg'}: gpg: "),
+                        str(ctx.exception))
+
+    def test_the_skipped_key_is_not_loaded(self):
+        bad = fixture_info("unprotected")["KEY_ID"]
+        _, bundles, warnings = self.load("two-keys", key=bad)
+        self.assertEqual(len(warnings), 1)
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.choose_key(bundles, bad)
+        self.assertEqual((ctx.exception.code, str(ctx.exception)), (EXIT_BACKUP, f"no key matches --key {bad}"))
+
+    def test_skipped_line_is_the_first_problem_gpg_names(self):
+        stderr = ("gpg: keybox '/x/pubring.kbx' created\n"
+                  "gpg: key AAAA1111BBBB2222: public key \"A <a@example.org>\" imported\n"
+                  "gpg: key AAAA1111BBBB2222: secret key imported\n"
+                  "gpg: WARNING: something general\n"
+                  "gpg: key CCCC3333DDDD4444: no valid user IDs\n"
+                  "gpg: this may be caused by a missing self-signature\n"
+                  "gpg: Total number processed: 2\n")
+        self.assertEqual(backup.skipped_line(stderr, 2), "key CCCC3333DDDD4444: no valid user IDs")
+        self.assertEqual(backup.skipped_line(stderr.replace("key CCCC", "kex CCCC"), 2), "WARNING: something general")
+        self.assertEqual(backup.skipped_line("gpg: Total number processed: 1\n", 2), "gpg exited with status 2")
+        accepted = 'gpg: key CCCC3333DDDD4444: accepted non self-signed user ID "C <c@example.org>"\n'
+        self.assertEqual(backup.skipped_line(accepted + stderr, 2), "key CCCC3333DDDD4444: no valid user IDs")
 
 
 class HomeRegistryTests(unittest.TestCase):
@@ -455,7 +592,7 @@ class LoadTests(unittest.TestCase):
 
     def load(self, profile: str, kind: str):
         candidate = backup.choose(backup.detect(FIXTURES / profile / kind))
-        return backup.choose_key(backup.load(candidate, self.home))
+        return backup.choose_key(backup.load(candidate, self.home, self.fail))
 
     def test_export_matches_fixture(self):
         info = fixture_info("ed25519")
@@ -595,7 +732,7 @@ class EcdhRepairTests(unittest.TestCase):
         if self.bash:
             self.skipTest("backup.load is Python's")
         candidate = backup.choose(backup.detect(FIXTURES / "unprotected"))
-        bundle = backup.choose_key(backup.load(candidate, self.home))
+        bundle = backup.choose_key(backup.load(candidate, self.home, self.fail))
         self.assertEqual([k.secret for k in bundle.subkeys], [True] * 3,
                          f"gpg {'.'.join(map(str, gpg_version()))} staging listing:\n{self.listing()}\n"
                          f"key files: {sorted(self.key_files())}")

@@ -19,11 +19,12 @@ RETRIES=5,5,5 TOUCH=on TOUCH_SIG="" TOUCH_ENC="" TOUCH_AUT="" NAME="" LOGIN="" U
 SOURCE="" KEY="" WORKDIR="" DRY_RUN=0 YES=0
 RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS=""
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
-KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" UNPROTECTED=0 NOW=0
+KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" KEY_VALIDITY="" UNPROTECTED=0 NOW=0
 LOADED_FPRS=()
 CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
 KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
-UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
+UIDS=() UIDS_UNSIGNED=()
+SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
 declare -A TARGET=() TOKENS=()
 
 die() { # Prints an error and exits with the given code.
@@ -483,16 +484,16 @@ candidate_listing() { # candidate_listing INDEX...: "\n  <kind>: <path> (key <KE
   done
 }
 
-list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
+list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO VALIDITY" | "uid +|- TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
   GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
     awk -F: '
       $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1
-                    kexp = $7 + 0; kalgo = ($17 != "") ? $17 : "rsa" $3; next }
+                    kexp = $7 + 0; kalgo = ($17 != "") ? $17 : "rsa" $3; kvalid = ($2 != "") ? $2 : "-"; next }
       $1 == "ssb" { insub = 1; insec = 0; usage = $12; created = $6 + 0; expires = $7 + 0
                     validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
-      $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo; insec = 0; next }
+      $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo, kvalid; insec = 0; next }
       $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
-      $1 == "uid" { print "uid", $10 }'
+      $1 == "uid" { print "uid", (($6 == "" && $2 != "r" && $2 != "e") ? "-" : "+"), $10 }'
 }
 
 load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and SUB_* arrays
@@ -512,12 +513,17 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
     die "$EXIT_BACKUP" "several keys found; choose one with --key:$listing"
   fi
   KEY_FP=${matches[0]}
-  UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
+  UIDS=() UIDS_UNSIGNED=()
+  SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
   while IFS= read -r line; do
     read -r kind a b c d e f g <<<"$line"
     case $kind in
-      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; fi ;;
-      uid) if [[ $current == "$KEY_FP" ]]; then UIDS+=("${line#uid }"); fi ;;
+      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; KEY_VALIDITY=$f; fi ;;
+      uid) # "uid + TEXT"; "uid - TEXT" has no valid self-signature (no date, not revoked or expired)
+        if [[ $current == "$KEY_FP" ]]; then
+          UIDS+=("${line#uid ? }")
+          if [[ $a == - ]]; then UIDS_UNSIGNED+=("${line#uid - }"); fi
+        fi ;;
       ssb)
         if [[ $current == "$KEY_FP" ]]; then
           SUB_FPR+=("$a"); SUB_USAGE+=("$b"); SUB_CREATED+=("$c"); SUB_EXPIRES+=("$d")
@@ -660,8 +666,41 @@ repair_ecdh_imports() { # repair_ecdh_imports HOME BARE: BARE are the keyids the
   fi
 }
 
+# Backup files are imported with --allow-non-selfsigned-uid, and a key left with no validly self-signed user ID
+# is refused, as in Python's backup.load and backup.check_user_ids (whose comments explain why).
+UNSIGNED_UIDS="has no user ID with a valid self-signature in the backup; re-export the key from a keyring that holds it"
+
+# A backup file counts as imported when gpg imported or already had secret keys from it, though it exits non-zero
+# for any part it skipped (as Python's backup.load; the staged keys are checked afterwards by load_bundle and
+# check_bundle). SKIP_* pick the gpg message the warning quotes, as backup.skipped_line.
+SKIP_KEY='^key [0-9A-F]{8,40}: '
+SKIP_DONE='^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*|accepted non self-signed user ID ".*")$'
+SKIP_NOISE="^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$"
+
+secret_keys_imported() { # secret_keys_imported STATUS_FILE: IMPORT_RES counts secret keys imported or unchanged
+  local -a f
+  local line counts=""
+  while IFS= read -r line; do
+    if [[ $line == "[GNUPG:] IMPORT_RES "* ]]; then counts=$line; fi
+  done <"$1"
+  read -ra f <<<"$counts"
+  (( ${#f[@]} >= 14 )) && [[ ${f[12]} =~ ^[0-9]+$ && ${f[13]} =~ ^[0-9]+$ ]] && (( 10#${f[12]} + 10#${f[13]} > 0 ))
+}
+
+skipped_line() { # skipped_line STDERR_FILE CODE: the gpg message a partial import's warning quotes
+  local line other=""
+  while IFS= read -r line; do
+    [[ $line == "gpg: "* ]] || continue
+    line=${line#gpg: }
+    [[ $line =~ $SKIP_DONE ]] && continue
+    if [[ $line =~ $SKIP_KEY ]]; then printf '%s' "$line"; return; fi
+    if [[ -z $other && ! $line =~ $SKIP_NOISE ]]; then other=$line; fi
+  done <"$1"
+  printf '%s' "${other:-gpg exited with status $2}"
+}
+
 load_candidate() {
-  local i=$1 f n=0 source
+  local i=$1 f n=0 source rc
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
     kill_agents "$STAGING"
     while IFS= read -r f; do
@@ -672,12 +711,21 @@ load_candidate() {
     while IFS= read -r f; do
       readable_copy "$f" "$STAGING" "bom-$n.key" source || die "$EXIT_BACKUP" "cannot import $f: cannot read the file"
       n=$((n + 1))
-      GNUPGHOME=$STAGING gpg --batch --import -- "$source" 2>"$WORK/import.err" ||
-        die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
+      rc=0
+      GNUPGHOME=$STAGING gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$source" \
+        >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
+      if (( rc )); then
+        secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
+        warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"
+      fi
     done <<<"${CAND_FILES[i]}"
     repair_ecdh_imports "$STAGING" "${CAND_BARE[i]}"
   fi
   load_bundle "$STAGING"
+  if [[ $KEY_VALIDITY == i ]]; then die "$EXIT_BACKUP" "key $KEY_FP $UNSIGNED_UIDS"; fi
+  for f in "${UIDS_UNSIGNED[@]}"; do
+    warn "user ID \"$f\" of key $KEY_FP has no valid self-signature; it will not be published with the key"
+  done
 }
 
 usage_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf auth ;; esac; }

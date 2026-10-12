@@ -74,6 +74,8 @@ class KeyBundle:
     has_certify_secret: bool
     expires: int = 0  # main key; 0 means never
     algo: str = ""
+    validity: str = ""  # main key, colon field 2: "i" when no user ID has a valid self-signature
+    unsigned_uids: tuple = ()  # user IDs with no valid self-signature (no creation date, not revoked or expired)
 
 
 @dataclass(frozen=True)
@@ -338,7 +340,7 @@ def parse_secret_keys(colons: str) -> list:
             if current is not None:
                 close_sub()
             current = {"key_fp": "", "key_id": f[4], "uids": [], "subkeys": [], "has_certify_secret": f[14] != "#",
-                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}"}
+                       "expires": int(f[6] or 0), "algo": f[16] or f"rsa{f[2]}", "validity": f[1], "unsigned": []}
             bundles.append(current)
         elif f[0] == "ssb" and current is not None:
             close_sub()
@@ -353,10 +355,12 @@ def parse_secret_keys(colons: str) -> list:
             sub["keygrip"] = f[9]
         elif f[0] == "uid" and current is not None:
             current["uids"].append(f[9])
+            if not f[5] and f[1] not in ("r", "e"):  # revoked and expired ones list no creation date either
+                current["unsigned"].append(f[9])
     if current is not None:
         close_sub()
     return [KeyBundle(b["key_fp"], b["key_id"], tuple(b["uids"]), tuple(b["subkeys"]), b["has_certify_secret"],
-                      b["expires"], b["algo"]) for b in bundles]
+                      b["expires"], b["algo"], b["validity"], tuple(b["unsigned"])) for b in bundles]
 
 
 def list_bundles(home: Home) -> list:
@@ -524,7 +528,56 @@ def repair_ecdh_imports(home: Home, bare=()) -> None:
             raise RecoveryError(GNUPG25_DROPPED.format(" ".join(dropped)), EXIT_BACKUP)
 
 
-def load(candidate: Candidate, staging: Home) -> list:
+# Backup files are imported with --allow-non-selfsigned-uid. A secret block whose user ID lacks a valid
+# self-signature is otherwise skipped in part: GnuPG 2.4 stops at it with nothing secret imported, GnuPG 2.5 takes
+# the main key's secret but not the subkeys'. The option lets gpg take the whole block; a public block of the key
+# in the backup then adds the self-signature. A key left with no validly self-signed user ID is refused
+# (check_user_ids), as the public key written for the daily machine would not import there.
+UNSIGNED_UIDS = "key {} has no user ID with a valid self-signature in the backup; re-export the key from a keyring " \
+                "that holds it"
+
+
+def check_user_ids(bundle: KeyBundle) -> None:
+    if bundle.validity == "i":
+        raise RecoveryError(UNSIGNED_UIDS.format(bundle.key_fp), EXIT_BACKUP)
+
+
+def unsigned_uid_warnings(bundle: KeyBundle) -> list:
+    """The key's other user IDs that gpg took with no valid self-signature: the public key leaves them out."""
+    return [f'user ID "{uid}" of key {bundle.key_fp} has no valid self-signature; it will not be published with the '
+            "key" for uid in bundle.unsigned_uids]
+
+
+# gpg exits non-zero when it skips any part of a file it imports (GnuPG 2.5 also for a user ID with no valid
+# self-signature), yet it may have imported the secret keys. A backup file counts as imported when gpg's IMPORT_RES
+# status line says it imported secret keys or already had them; whether those are the chosen key's, with its secret
+# parts, is decided after the import, from the staged keys (list_bundles, choose_key, Session.validate_bundle).
+SKIP_KEY = re.compile(r"^key [0-9A-F]{8,40}: ")
+SKIP_DONE = re.compile(r'^key [0-9A-F]{8,40}: (public key ".*" imported|secret key imported|".*|'
+                       r'accepted non self-signed user ID ".*")$')
+SKIP_NOISE = re.compile(r"^(keybox '.*' created|.*: trustdb created| *[A-Za-z /-]+: *[0-9]+)$")
+
+
+def secret_keys_imported(status: str) -> bool:
+    """True when an IMPORT_RES status line counts secret keys imported or unchanged (gpg's sec_imported and
+    sec_dups fields)."""
+    lines = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] IMPORT_RES ")]
+    fields = lines[-1] if lines else []
+    if len(fields) < 14 or not all(re.fullmatch(r"[0-9]+", f) for f in fields[12:14]):
+        return False
+    return int(fields[12]) + int(fields[13]) > 0
+
+
+def skipped_line(stderr: str, code: int) -> str:
+    """The first gpg message about a key it did not take, else its first message that is not routine."""
+    lines = [line[5:] for line in stderr.splitlines() if line.startswith("gpg: ")]
+    keys = [line for line in lines if SKIP_KEY.match(line) and not SKIP_DONE.match(line)]
+    other = [line for line in lines if not SKIP_DONE.match(line) and not SKIP_NOISE.match(line)]
+    return (keys or other or [f"gpg exited with status {code}"])[0]
+
+
+def load(candidate: Candidate, staging: Home, warn) -> list:
+    """Imports the candidate into staging and lists its keys; warn(msg) receives what gpg took or skipped."""
     if candidate.kind == "gnupghome":
         staging.kill_agents()
         for src in candidate.files:  # read-only media keeps its mode bits; make the copies usable
@@ -544,9 +597,12 @@ def load(candidate: Candidate, staging: Home) -> list:
             source = readable_copy(src, staging, f"bom-{index}.key")
             if source is None:
                 raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
-            result = staging.run(["gpg", "--batch", "--import", "--", str(source)])
+            result = staging.run(["gpg", "--batch", "--allow-non-selfsigned-uid", "--status-fd", "1", "--import",
+                                  "--", str(source)])
             if result.returncode != 0:
-                raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+                if not secret_keys_imported(result.stdout):
+                    raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+                warn(f"gpg skipped part of {src}: {skipped_line(result.stderr, result.returncode)}")
         repair_ecdh_imports(staging, candidate.bare)
     bundles = list_bundles(staging)
     if not bundles:
