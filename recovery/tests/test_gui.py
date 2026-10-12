@@ -541,7 +541,8 @@ class GuiLayoutTests(unittest.TestCase):
                 with self.subTest(scaling=round(scaling, 2), page=page):
                     app.show(page)
                     root.update()
-                    self.assertEqual(root.minsize(), (width, height))  # fit_page did not have to grow it
+                    # fit_page did not have to grow it
+                    self.assertEqual(root.minsize(), (width, height), self.layout(app))
                     self.assertLessEqual(root.winfo_reqwidth(), width)
                     self.assertLessEqual(root.winfo_reqheight(), height)
                     for button in (app.back_btn, app.next_btn):
@@ -552,6 +553,17 @@ class GuiLayoutTests(unittest.TestCase):
                                              root.winfo_height())
                     for text in self.texts(app.body):
                         self.assertEqual(text.cget("wrap"), "word")  # no line runs off the side
+
+    @staticmethod
+    def layout(app) -> str:
+        """What each widget of the page asks for, to find the one that outgrew the window."""
+        from tkinter import font as tkfont
+        fonts = {name: tkfont.nametofont(name, root=app.root).metrics("linespace")
+                 for name in ("TkDefaultFont", "TkFixedFont")}
+        rows = [f"{child.winfo_class()} {child.winfo_reqwidth()}x{child.winfo_reqheight()}"
+                for child in app.body.winfo_children()]
+        return f"linespace {fonts}; body {app.body.winfo_reqheight()}, nav {app.next_btn.master.winfo_reqheight()}: " \
+            + ", ".join(rows)
 
     def texts(self, widget):
         for child in widget.winfo_children():

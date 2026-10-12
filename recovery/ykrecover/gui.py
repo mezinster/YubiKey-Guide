@@ -529,7 +529,9 @@ class App:
         frame.columnconfigure(0, weight=1)
         self.cand_error = self.wrapped_label()
         self.cand_error.pack(anchor="w", fill="x", pady=(0, 8))
-        self.report_box = self.readonly_text("", 4)
+        # Asks for one line and takes whatever height the window has left (it is the page's only expanding
+        # widget), so the page still fits the minimum window with Windows' fonts at 133% scaling.
+        self.report_box = self.readonly_text("", 1)
         self.cand_list.bind("<<ListboxSelect>>", lambda event: self.update_pass_state())
         self.pass_entry = self.row("Certify key passphrase",
                                    lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
