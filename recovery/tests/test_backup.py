@@ -1,7 +1,9 @@
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, PASSPHRASE, fixture_info, short_tempdir
+from tests.helpers import FIXTURES, PASSPHRASE, REAL_GPG, fixture_info, short_tempdir
 from ykrecover import EXIT_BACKUP, RecoveryError, backup
 from ykrecover.gpg import Home
 
@@ -107,7 +109,28 @@ class InventoryTests(unittest.TestCase):
     def test_unprotected_candidate(self):
         (c,) = backup.detect(FIXTURES / "unprotected")
         self.assertTrue(c.unprotected)
+        self.assertEqual(len(c.bare), 4)
+        self.assertEqual(backup.detect(FIXTURES / "split")[0].bare, ())
         self.assertFalse(backup.detect(FIXTURES / "split")[0].unprotected)
+
+    def test_mixed_candidate_lists_its_bare_parts(self):
+        # A protected main key beside subkeys exported with no passphrase: built from the unprotected fixture.
+        info, home, root = fixture_info("unprotected"), short_tempdir(self, "mx"), short_tempdir(self, "mixed")
+        env = {**os.environ, "GNUPGHOME": str(home)}
+
+        def gpg(*args, stdin=""):
+            subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", *args], input=stdin, text=True,
+                           env=env, check=True, capture_output=True)
+
+        gpg("--import", str(FIXTURES / "unprotected" / "key.asc"))
+        gpg("--armor", "--output", str(root / "subs.asc"), "--export-secret-subkeys", info["KEY_FP"])
+        gpg("--passphrase-fd", "0", "--passwd", info["KEY_FP"], stdin=PASSPHRASE + "\n")
+        gpg("--passphrase-fd", "0", "--armor", "--output", str(root / "main.asc"), "--export-secret-keys",
+            info["KEY_FP"] + "!", stdin=PASSPHRASE + "\n")
+        (c,) = backup.detect(root)
+        self.assertEqual((c.kind, sorted(f.name for f in c.files)), ("export", ["main.asc", "subs.asc"]))
+        self.assertFalse(c.unprotected)
+        self.assertEqual(sorted(c.bare), sorted(info[k][-16:] for k in ("FPR_S", "FPR_E", "FPR_A")))
 
     def test_gnupg1_home(self):
         (c,) = backup.detect(FIXTURES / "gnupg1")

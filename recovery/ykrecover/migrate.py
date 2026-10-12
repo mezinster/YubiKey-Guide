@@ -89,6 +89,7 @@ class Session:
         self.inventory = None
         self.candidate = None
         self.bundle = None
+        self.loaded_fprs = frozenset()  # subkeys as loaded from the backup, before renew/rotate
         self.targets = {}
         self.passphrase = ""
         self.results = []
@@ -214,6 +215,7 @@ class Session:
             self._destroy(self.staging)
         self.staging = Home.create("staging")
         self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or candidate.key_id or None)
+        self.loaded_fprs = frozenset(k.fpr for k in self.bundle.subkeys)
         self.targets = modes.select_targets(self.bundle)
         return self.bundle
 
@@ -265,6 +267,16 @@ class Session:
     def unprotected(self) -> bool:
         return bool(self.candidate and self.candidate.unprotected)
 
+    def _bare(self, keyid: str) -> bool:
+        return bool(self.candidate) and keyid in self.candidate.bare
+
+    def bare_targets(self, targets: dict) -> frozenset:
+        """Targets whose keytocard asks no passphrase. A subkey made by renew or rotate takes the main key's
+        protection."""
+        main = self._bare(self.bundle.key_id)
+        return frozenset(t for t in targets.values() if t and (
+            self._bare(t[-16:]) if t in self.loaded_fprs else main))
+
     def _settings(self) -> card.CardSettings:
         o = self.opts
         return card.CardSettings(retries=tuple(o.retries), touch=dict(o.touch), name=o.name, url=o.url)
@@ -273,12 +285,12 @@ class Session:
         o, b = self.opts, self.bundle
         algo = o.algo or modes.default_algo(b, self.targets)
         steps = modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old, int(time.time()),
-                                 unprotected=self.unprotected)
+                                 unprotected=self._bare(b.key_id))
         return steps + modes.backup_steps(o.mode, b)
 
     def card_plan(self, index: int, targets: dict) -> list:
         fp = self.bundle.key_fp
-        return (card.card_steps(index, fp, targets, self._settings(), unprotected=self.unprotected)
+        return (card.card_steps(index, fp, targets, self._settings(), self.bare_targets(targets))
                 + card.verify_steps(index, fp, targets))
 
     def _tokens(self) -> dict:

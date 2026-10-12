@@ -33,6 +33,7 @@ class Candidate:
     files: tuple
     key_id: str = ""  # main-key keyid; empty for a GnuPG home
     unprotected: bool = False  # every secret part it supplies has no passphrase
+    bare: tuple = ()  # keyids of the parts it supplies with no passphrase
 
 
 @dataclass(frozen=True)
@@ -234,8 +235,8 @@ def inventory(folder: Path) -> Inventory:
             unrecoverable.append(key)
             continue
         kind = "export" if supplied.get(key, 0) else "subkeys-only"
-        candidates.append(Candidate(kind, used[0].parent, tuple(used), key,
-                                    all(rank == 1 for rank in supplied.values())))
+        bare = tuple(keyid for keyid, rank in supplied.items() if rank == 1)
+        candidates.append(Candidate(kind, used[0].parent, tuple(used), key, len(bare) == len(supplied), bare))
     for path in paths:
         if path in unreadable:
             reports.append(FileReport(path, "", (), "unreadable"))

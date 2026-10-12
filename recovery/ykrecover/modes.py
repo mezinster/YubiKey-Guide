@@ -98,7 +98,7 @@ def mode_steps(mode, bundle, targets, expire, algo, revoke_old, now=0, unprotect
     steps += [Step("mode", STAGING, (*LOOPBACK, "--passphrase-fd", "0", "--quick-add-key", fp, ALGOS[algo][u],
                                      USAGE_WORD[u], expire), (PASS,)) for u in USAGES]
     if revoke_old:
-        secret = () if unprotected else (PASS,)  # gpg asks no passphrase for an unprotected key
+        secret = () if unprotected else (PASS,)  # unprotected: the main key, which signs the revocation, is bare
         for old in present(targets):
             steps.append(Step("mode", STAGING, ("gpgconf", "--kill", "all")))
             steps.append(Step("mode", STAGING, (*LOOPBACK, "--command-fd", "0", "--edit-key", fp),
