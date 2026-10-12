@@ -31,6 +31,17 @@ class GuiAvailable(unittest.TestCase):
         self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
 
 
+def detected(app, folder, candidates):
+    """Puts candidates on the backup page as if Detect had found them in folder."""
+    from ykrecover.backup import Inventory
+    app.v["folder"].set(str(folder))
+    app.inventory = Inventory(Path(folder), (), tuple(candidates), ())
+    app.candidates = list(candidates)
+    for c in candidates:
+        app.cand_list.insert("end", f"{c.kind}: {c.path}")
+    app.cand_list.selection_set(0)
+
+
 def grab_holder(root):
     """The Tcl name of the window holding the grab, or "". Asks Tcl directly: tkinter's grab_current()
     raises KeyError for Tk's own message boxes (".__tk__messagebox" on X11)."""
@@ -147,9 +158,7 @@ class GuiSmokeTests(unittest.TestCase):
         alerts = []
         app.alert = alerts.append
         app.show(1)
-        app.candidates = [Candidate("export", Path("/backup"), ())]
-        app.cand_list.insert("end", "export: /backup")
-        app.cand_list.selection_set(0)
+        detected(app, "/backup", [Candidate("export", Path("/backup"), ())])
         app.v["workdir"].set("/nonexistent/work/folder")
         self.assertFalse(app.leave_backup())
         self.assertEqual(len(alerts), 1)
@@ -399,10 +408,7 @@ class GuiSmokeTests(unittest.TestCase):
         app.alert = lambda text: self.fail(text)
         folder = Path("/backup")
         app.show(1)
-        app.v["folder"].set(str(folder))  # a key found in files loads from the chosen folder
-        app.candidates = [Candidate("export", folder, ())]
-        app.cand_list.insert("end", "export: /backup")
-        app.cand_list.selection_set(0)
+        detected(app, folder, [Candidate("export", folder, ())])  # a key found in files loads from the chosen folder
 
         def no_reload():
             raise AssertionError("reloaded")
@@ -422,10 +428,7 @@ class GuiSmokeTests(unittest.TestCase):
         app.alert = lambda text: self.fail(text)
         home = Path("/backup/gnupg")
         app.show(1)
-        app.v["folder"].set("/backup")
-        app.candidates = [Candidate("gnupghome", home, ())]
-        app.cand_list.insert("end", "gnupghome: /backup/gnupg")
-        app.cand_list.selection_set(0)
+        detected(app, "/backup", [Candidate("gnupghome", home, ())])
 
         def no_reload():
             raise AssertionError("reloaded")
@@ -810,9 +813,7 @@ class GuiBehaviourTests(unittest.TestCase):
         app = self.app()
         app.session = None
         app.show(1)
-        app.candidates = [Candidate("export", Path("/backup"), ())]
-        app.cand_list.insert("end", "export: /backup")
-        app.cand_list.selection_set(0)
+        detected(app, "/backup", [Candidate("export", Path("/backup"), ())])
         bundles = [SimpleNamespace(key_fp="A" * 40, uids=("one",)), SimpleNamespace(key_fp="B" * 40, uids=("two",))]
         with mock.patch.object(Session, "load", side_effect=[AmbiguousKey(bundles), None]), \
                 mock.patch.object(Session, "unlock", return_value=True), \
@@ -870,6 +871,22 @@ class GuiBehaviourTests(unittest.TestCase):
         self.assertEqual(app.session.opts.backup, FIXTURES / "split")
         self.assertTrue(app.session.bundle.has_certify_secret)
 
+
+    def test_next_redetects_a_folder_typed_after_detect(self):
+        app = self.app()
+        app.session = None
+        app.show(1)
+        app.v["folder"].set(str(FIXTURES / "split"))
+        app.refresh_candidates()
+        app.cand_list.selection_set(0)
+        app.v["passphrase"].set(PASSPHRASE)
+        app.v["folder"].set(str(FIXTURES / "unprotected"))
+        app.next()
+        self.assertEqual(app.page, 1)
+        self.assertIsNone(app.session)
+        self.assertEqual(app.inventory.root, FIXTURES / "unprotected")
+        self.assertEqual(app.cand_list.size(), 1)
+        self.assertIn("key " + fixture_info("unprotected")["KEY_ID"], app.cand_list.get(0))
 
 if __name__ == "__main__":
     unittest.main()

@@ -618,6 +618,10 @@ class App:
             self.pass_entry.state(["!disabled"])
 
     def leave_backup(self):
+        folder = self.v["folder"].get()
+        if (Path(folder) if folder else None) != (self.inventory.root if self.inventory else None):
+            self.refresh_candidates()  # the folder changed after Detect: show what the new one holds first
+            return False
         candidate = self.selected_candidate()
         if candidate is None:
             self.alert("Select a detected backup.")
@@ -626,7 +630,7 @@ class App:
         workdir = Path(text) if text else None
         # A key found in files may span folders, so it loads from the chosen folder by its ID; a GnuPG home
         # loads from its own path.
-        opts = Options(backup=candidate.path if candidate.kind == "gnupghome" else Path(self.v["folder"].get()),
+        opts = Options(backup=candidate.path if candidate.kind == "gnupghome" else self.inventory.root,
                        source=candidate.kind, key=candidate.key_id or "", workdir=workdir)
         s = self.session
         # With no key given, the session's key is the one chosen from several when it loaded.
