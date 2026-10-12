@@ -81,3 +81,17 @@ class MissingSlotTests(unittest.TestCase):
     def test_default_algo_falls_back_to_main_key(self):
         self.assertEqual(modes.default_algo(bundle(subkeys=(), algo="rsa2048"), modes.select_targets(
             bundle(subkeys=(), algo="rsa2048"))), "rsa4096")
+
+
+class UnprotectedTests(unittest.TestCase):
+    def test_keytocard_without_passphrase_line(self):
+        targets = {"s": "S" * 40, "e": "E" * 40, "a": "A" * 40}
+        steps = card.card_steps(1, "F" * 40, targets, card.CardSettings(), unprotected=True)
+        keytocard = [s for s in steps if "--edit-key" in s.argv]
+        self.assertEqual(keytocard[0].stdin, ("key " + "S" * 40, "keytocard", "1", "<ADMIN_PIN>", "save"))
+
+    def test_revoke_without_passphrase_line(self):
+        targets = {"s": "S" * 40, "e": "E" * 40, "a": "A" * 40}
+        steps = modes.mode_steps("rotate", bundle(), targets, "2y", "ed25519", True, NOW, unprotected=True)
+        edits = [s for s in steps if "--edit-key" in s.argv]
+        self.assertTrue(edits and all(modes.PASS not in s.stdin for s in edits))

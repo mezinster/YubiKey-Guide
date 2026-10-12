@@ -20,11 +20,11 @@ class FakeHardwareTests:
 
     IMPL = ""
 
-    def migrate(self, profile, extra, stdin, serials=(S1,), fail_at="", list_script=None):
+    def migrate(self, profile, extra, stdin, serials=(S1,), fail_at="", list_script=None, folder="export"):
         env = fake_hardware(self, list(serials), fail_at, list_script)
         out = short_tempdir(self, "out")
-        result = run_impl(self.IMPL, ["--backup", str(FIXTURES / profile / "export"), "--out", str(out), *extra],
-                          stdin, env)
+        backup = FIXTURES / profile / folder if folder else FIXTURES / profile
+        result = run_impl(self.IMPL, ["--backup", str(backup), "--out", str(out), *extra], stdin, env)
         state = Path(env["FAKE_HW_DIR"])
         calls = (state / "calls.log").read_text() if (state / "calls.log").exists() else ""
         return result, out, calls, state
@@ -240,6 +240,18 @@ class FakeHardwareTests:
 
 class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):
     IMPL = "python"
+
+    def test_clone_unprotected_key(self):
+        info = fixture_info("unprotected")
+        result, _, _, state = self.migrate("unprotected", [], f"y\n\nRESET {S1}\n", folder="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("the backup's secret keys have no passphrase", result.stderr)
+        self.assertNotIn("Certify key passphrase", result.stderr)
+        self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
+        scripts = (state / "keytocard.txt").read_text().split("save\n")[:-1]
+        self.assertEqual(len(scripts), 3)
+        for script, slot in zip(scripts, ("1", "2", "3")):
+            self.assertRegex(script, rf"^key [0-9A-F]{{40}}\nkeytocard\n{slot}\n\d{{8}}\n$")
 
 
 @unittest.skipUnless(LINUX, "the bash implementation is Linux-only")

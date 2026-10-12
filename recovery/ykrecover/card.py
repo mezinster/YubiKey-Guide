@@ -37,7 +37,7 @@ def split_name(name: str) -> tuple:
     return (parts[-1], " ".join(parts[:-1])) if parts else ("", "")
 
 
-def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings) -> list:
+def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings, unprotected: bool = False) -> list:
     phase, serial = f"card{index}", f"<SERIAL{index}>"
     kill = Step(phase, CARDHOME, ("gpgconf", "--kill", "all"))
     holder = ["admin", "login", "<LOGIN>", "<ADMIN_PIN>"]
@@ -56,11 +56,13 @@ def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings) -
                    ("1", "<DEFAULT_USER_PIN>", "<USER_PIN>", "<USER_PIN>", "q")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-card"), (*holder, "quit")),
     ]
+    # gpg asks no passphrase for an unprotected key; an extra line would be read as the Admin PIN.
+    secret = () if unprotected else ("<CERTIFY_PASS>",)
     for usage, slot, _ in SLOTS:
         if targets[usage] is None:
             continue
         steps += [kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-key", key_fp),
-                             (f"key {targets[usage]}", "keytocard", slot, "<CERTIFY_PASS>", "<ADMIN_PIN>", "save"))]
+                             (f"key {targets[usage]}", "keytocard", slot, *secret, "<ADMIN_PIN>", "save"))]
     for usage, _, ref in SLOTS:
         if targets[usage] is None:
             continue

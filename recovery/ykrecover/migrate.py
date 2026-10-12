@@ -261,6 +261,10 @@ class Session:
             return True
         return False
 
+    @property
+    def unprotected(self) -> bool:
+        return bool(self.candidate and self.candidate.unprotected)
+
     def _settings(self) -> card.CardSettings:
         o = self.opts
         return card.CardSettings(retries=tuple(o.retries), touch=dict(o.touch), name=o.name, url=o.url)
@@ -268,12 +272,14 @@ class Session:
     def staging_steps(self) -> list:
         o, b = self.opts, self.bundle
         algo = o.algo or modes.default_algo(b, self.targets)
-        steps = modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old, int(time.time()))
+        steps = modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old, int(time.time()),
+                                 unprotected=self.unprotected)
         return steps + modes.backup_steps(o.mode, b)
 
     def card_plan(self, index: int, targets: dict) -> list:
         fp = self.bundle.key_fp
-        return card.card_steps(index, fp, targets, self._settings()) + card.verify_steps(index, fp, targets)
+        return (card.card_steps(index, fp, targets, self._settings(), unprotected=self.unprotected)
+                + card.verify_steps(index, fp, targets))
 
     def _tokens(self) -> dict:
         return {
@@ -321,6 +327,8 @@ class Session:
         except OSError as err:
             raise RecoveryError(f"cannot create the --out folder {o.out}: {err}", EXIT_USAGE) from err
         self.apply_mode()
+        if o.mode != "clone" and self.unprotected:
+            self.ui.warn(f"the new backup in {o.out} will also have no passphrase")
         if o.mode != "clone":
             while not self.ui.confirm(f"New backup written to {o.out}. Saved it to offline storage?"):
                 self.ui.warn("copy the new backup before writing cards")
@@ -507,12 +515,17 @@ def run(opts: Options, ui) -> int:
             ui.output(session.dry_run_text())
             return EXIT_OK
         ui.info(session.describe())
-        for _ in range(3):
-            if session.unlock(ui.ask_secret("Certify key passphrase:")):
-                break
-            ui.warn("wrong passphrase")
+        if session.unprotected:
+            ui.warn("the backup's secret keys have no passphrase")
+            if not session.unlock(""):
+                raise RecoveryError("cannot use the backup's secret keys", EXIT_BACKUP)
         else:
-            raise RecoveryError("wrong passphrase three times", EXIT_BACKUP)
+            for _ in range(3):
+                if session.unlock(ui.ask_secret("Certify key passphrase:")):
+                    break
+                ui.warn("wrong passphrase")
+            else:
+                raise RecoveryError("wrong passphrase three times", EXIT_BACKUP)
         if not opts.yes and not ui.confirm(f"Write subkeys of {session.bundle.key_fp} to {opts.cards} card(s)?"):
             return EXIT_INTERRUPT
         return session.execute()
