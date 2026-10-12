@@ -75,6 +75,12 @@ Notes:
 | `renew` | the same subkeys with a new expiry | yes | yes |
 | `rotate` | newly generated subkeys | yes | yes |
 
+Details:
+
+- `renew` and `rotate` first extend the main key to `--expire` when it would expire before the new subkey expiry, including a main key that has already expired. A main key that never expires is left untouched.
+- `renew` and `rotate` create a missing sign, encrypt or authentication subkey. The default algorithm follows the existing subkeys (`rsa4096` for RSA, otherwise `ed25519`). `rotate` uses the same default unless `--algo` is given; `renew` does not accept `--algo`.
+- `clone` leaves an empty slot empty and warns about it. It writes no `ssh-*.pub` file when there is no authentication subkey.
+
 Choose `rotate` if the old cards may be lost or in someone else's hands. Add `--revoke-old` to revoke the previous subkeys.
 
 `renew` and `rotate` write a new backup to `--out` and wait for you to confirm that you saved it before any card is touched. Store the new backup the same way as the original.
@@ -92,6 +98,38 @@ recoverCard.sh --backup /mnt/backup --mode rotate --revoke-old --dry-run
 `--out` is required for every run except `--dry-run`, `clone` included: the public key (`public-KEYID-DATE.asc`) and the SSH public key (`ssh-KEYID.pub`) are written there, and for `renew` and `rotate` the new backup too. It must be outside the backup folder and must not already hold `secret-*.key` files.
 
 A backup made with the main guide often holds both the exported key files (`secret-*-Certify.key`, `secret-*-Subkeys.key`) and a copy of the GnuPG home. The tool then stops and asks you to choose with `--source`. Pass `--source export`: the exports were made before `keytocard` and hold the secret subkeys, while a GnuPG home copied after `keytocard` holds only card stubs, which the tool refuses for `clone` and `renew`.
+
+## What counts as a backup
+
+`--backup` takes a folder. The tool looks inside it, and up to 3 folder levels below, and decides by the **content** of each file, not by its name. It accepts:
+
+- the guide's files, `secret-*-Certify.key` and `secret-*-Subkeys.key`;
+- armored or binary OpenPGP key files with any name or extension;
+- one key split across several files (for example the main key in one file and the subkeys in another);
+- several keys in one file: pick one with `--key KEYID`;
+- unprotected exports, made without a passphrase: no passphrase is asked for them;
+- GnuPG 2.x home folders;
+- GnuPG 1.x home folders (`secring.gpg`).
+
+A GnuPG 2.1+ home migrated from 1.x that still contains `secring.gpg` shows two candidates: the home itself and the old `secring.gpg` as an export of the same key. Pick one with `--source gnupghome` or `--source export`.
+
+Card stubs and public keys are reported but never used: a stub holds no secret key. Revocation certificate files (`.rev`) are ignored. A key that exists only as stubs or a public key is listed as "not recoverable from this folder".
+
+Before anything else the tool prints a report of every file it found on stderr (plans go to stdout). This is the real output for the `flexible` test fixture; the key ID belongs to a test key:
+
+```console
+$ python3 -m ykrecover --cli --backup "tests/fixtures/flexible/asc backup" --mode renew --dry-run
+Backup files in tests/fixtures/flexible/asc backup:
+  private/flex.priv.asc: key 5B21983A476B3572: main secret, 2 subkeys secret (used)
+  pub/flex.pub.asc: key 5B21983A476B3572: main public, 2 subkeys public (ignored)
+  stub/flex.priv_stub.asc: key 5B21983A476B3572: main card stub, 2 subkeys card stub (ignored)
+  stub/flex.sub_priv_stub.asc: key 5B21983A476B3572: main missing, 2 subkeys card stub (ignored)
+  subkeys/flex.sub_priv.asc: key 5B21983A476B3572: main missing, 2 subkeys secret (not needed)
+```
+
+"used" files supply the key. "not needed" files hold secrets that another file already provides. When several files hold the same key, the tool prefers a copy protected by a passphrase. Within one file the first copy counts, as it does for `gpg --import`. When one folder holds several backups, or several keys, the tool lists them and asks you to narrow `--backup` or pass `--source` or `--key`.
+
+A backup can mix protection: a passphrase-protected main key with subkeys that have no passphrase. The tool still asks for the passphrase, and sends it to `keytocard` only for the subkeys that have one.
 
 `--workdir DIR`: where temporary GnuPG homes go (must exist; on Linux at most 60 characters)
 

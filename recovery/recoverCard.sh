@@ -19,8 +19,10 @@ RETRIES=5,5,5 TOUCH=on TOUCH_SIG="" TOUCH_ENC="" TOUCH_AUT="" NAME="" LOGIN="" U
 SOURCE="" KEY="" WORKDIR="" DRY_RUN=0 YES=0
 RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS=""
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
-KEY_FP="" KEY_ID="" HAS_SECRET=0
-CAND_KIND=() CAND_PATH=() CAND_FILES=()
+KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" UNPROTECTED=0 NOW=0
+LOADED_FPRS=()
+CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
+KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
 UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
 declare -A TARGET=() TOKENS=()
 
@@ -231,68 +233,271 @@ trap 'exit "$EXIT_INTERRUPT"' INT TERM HUP
 
 # --- backup detection and loading (sources are only read)
 
-add_candidate() { # add_candidate KIND DIR FILE...
+add_candidate() { # add_candidate KIND DIR KEY UNPROT BARE FILE...
   CAND_KIND+=("$1")
   CAND_PATH+=("$2")
-  shift 2
+  CAND_KEY+=("$3")
+  CAND_UNPROT+=("$4")
+  CAND_BARE+=("$5")
+  shift 5
   local IFS=$'\n'
   CAND_FILES+=("$*")
 }
 
-detect_dir() {
-  local dir=$1 f files=() certify=() subkeys=()
-  if [[ -d $dir/private-keys-v1.d ]] && { [[ -f $dir/pubring.kbx ]] || [[ -f $dir/pubring.gpg ]]; }; then
+looks_like_key_file() { # looks_like_key_file PATH: an armored key block or a binary key packet, at most 1 MiB
+  local f=$1 head byte tag
+  [[ -f $f && -r $f && ! -L $f ]] || return 1
+  (( $(stat -c %s -- "$f") <= 1048576 )) || return 1
+  head=$(head -c 64 -- "$f" | tr '\000' '\001')
+  head=${head#$'\xef\xbb\xbf'}
+  head=${head#"${head%%[![:space:]]*}"}
+  if [[ $head == '-----BEGIN PGP PRIVATE KEY BLOCK-----'* || $head == '-----BEGIN PGP PUBLIC KEY BLOCK-----'* ]]; then
+    return 0
+  fi
+  byte=$(od -An -tu1 -N1 -- "$f" | tr -d ' \n')
+  [[ -n $byte ]] && (( byte & 0x80 )) || return 1
+  if (( byte & 0x40 )); then tag=$((byte & 0x3F)); else tag=$(((byte >> 2) & 0x0F)); fi
+  [[ $tag == 5 || $tag == 6 || $tag == 7 || $tag == 14 ]]
+}
+
+is_gnupg2_home() { [[ -d $1/private-keys-v1.d ]] && { [[ -f $1/pubring.kbx ]] || [[ -f $1/pubring.gpg ]]; }; }
+
+walk_dir() { # walk_dir DIR DEPTH: GnuPG homes become candidates, key files go to KEY_FILES (byte order)
+  local dir=$1 depth=$2 entry name home=0 f files=()
+  if is_gnupg2_home "$dir"; then
+    home=1
     for f in private-keys-v1.d pubring.kbx pubring.gpg trustdb.gpg; do
       if [[ -e $dir/$f ]]; then files+=("$dir/$f"); fi
     done
-    add_candidate gnupghome "$dir" "${files[@]}"
+    add_candidate gnupghome "$dir" "" 0 "" "${files[@]}"
   fi
-  shopt -s nullglob
-  certify=("$dir"/secret-*-Certify.key)
-  subkeys=("$dir"/secret-*-Subkeys.key)
-  shopt -u nullglob
-  if (( ${#certify[@]} )); then
-    add_candidate export "$dir" "${certify[@]}"
-  elif (( ${#subkeys[@]} )); then
-    add_candidate subkeys-only "$dir" "${subkeys[@]}"
-  fi
-}
-
-detect() {
-  local root=${BACKUP%/} sub
-  [[ -d $root ]] || die "$EXIT_BACKUP" "backup folder not found: $BACKUP"
-  detect_dir "$root"
-  for sub in "$root"/*/; do
-    sub=${sub%/}
-    if [[ -d $sub && ${sub##*/} != private-keys-v1.d ]]; then detect_dir "$sub"; fi
+  for entry in "$dir"/*; do # LC_ALL=C: byte order; hidden names are not matched
+    [[ -e $entry || -L $entry ]] || continue
+    name=${entry##*/}
+    # random_seed is random bytes that can pass the packet-tag sniff
+    if [[ -L $entry || $name == random_seed ]]; then continue; fi
+    if [[ -d $entry ]]; then
+      if [[ $name != private-keys-v1.d ]] && (( depth < 3 )); then walk_dir "$entry" $((depth + 1)); fi
+    elif (( home )) && [[ $name == pubring.kbx || $name == pubring.gpg || $name == trustdb.gpg ]]; then
+      continue
+    elif looks_like_key_file "$entry"; then
+      KEY_FILES+=("$entry")
+    fi
   done
 }
 
-choose_candidate() {
-  local i matches=() listing=""
+readable_copy() { # readable_copy PATH HOME NAME VAR: gpg cannot parse armor that starts with a UTF-8 BOM,
+  # so such a file is read from a BOM-stripped copy (mode 0600) in HOME; returns 1 when it cannot be read
+  local src=$1 copy=$2/$3 bom
+  bom=$(head -c 3 -- "$src" | od -An -tx1 | tr -d ' \n') || return 1
+  if [[ $bom != efbbbf ]]; then printf -v "$4" '%s' "$src"; return 0; fi
+  (umask 077 && tail -c +4 -- "$src" >"$copy") 2>/dev/null || return 1
+  printf -v "$4" '%s' "$copy"
+}
+
+classify_file() { # classify_file PATH → lines "MAINKID KEYID ROLE STATE"; non-zero when unreadable
+  local out source
+  readable_copy "$1" "$WORK" bom.key source || return 1
+  out=$(GNUPGHOME=$WORK gpg --batch --list-packets -- "$source" 2>/dev/null) || return 1
+  awk '
+    function close_part() {
+      if (inpkt && kid != "") { if (state == "") state = "missing"; print main, kid, role, state }
+      inpkt = 0; kid = ""
+    }
+    /^:/ {
+      close_part()
+      if ($0 ~ /^:(secret|public)( sub)? key packet:/) {
+        inpkt = 1; role = ($0 ~ /^:[a-z]+ sub key packet:/) ? "sub" : "main"
+        state = ($0 ~ /^:public/) ? "public" : ""
+      }
+      next
+    }
+    !inpkt { next }
+    {
+      t = $0; sub(/^[ \t\r\n\v\f]+/, "", t); sub(/[ \t\r\n\v\f]+$/, "", t)
+      if (index(t, "gnu-divert-to-card")) state = "card-stub"
+      else if (state != "") { }
+      else if (index(t, "gnu-dummy")) state = "missing"
+      else if (index(t, "S2K") || (t ~ /^skey\[/ && t ~ /protected\]$/)) state = "secret"
+      else if (t ~ /^skey\[/ && t ~ /bits\]$/) state = "secret-unprotected"
+      if (t ~ /^keyid:/) { split(t, w, /[ \t]+/); kid = w[2]; if (role == "main") main = kid }
+    }
+    END { close_part() }' <<<"$out" | grep . || return 1
+}
+
+rank() { case $1 in secret) printf 2 ;; secret-unprotected) printf 1 ;; *) printf 0 ;; esac; }
+
+state_word() {
+  case $1 in secret) printf secret ;; secret-unprotected) printf 'secret (no passphrase)' ;;
+    missing) printf missing ;; card-stub) printf 'card stub' ;; public) printf public ;; esac
+}
+
+describe_parts() { # describe_parts "ROLE STATE KEYID"... → "main secret, 2 subkeys secret"
+  local line role state n s out="" sep=""
+  for line in "$@"; do
+    read -r role state _ <<<"$line"
+    if [[ $role == main ]]; then out+="${sep}main $(state_word "$state")"; sep=", "; fi
+  done
+  for s in secret secret-unprotected missing card-stub public; do
+    n=0
+    for line in "$@"; do
+      read -r role state _ <<<"$line"
+      if [[ $role == sub && $state == "$s" ]]; then n=$((n + 1)); fi
+    done
+    if (( n == 1 )); then out+="${sep}1 subkey $(state_word "$s")"; sep=", "
+    elif (( n > 1 )); then out+="${sep}$n subkeys $(state_word "$s")"; sep=", "; fi
+  done
+  printf '%s' "$out"
+}
+
+select_files() { # select_files KEY: the files that supply KEY's secrets (as Python's _select: first copy wins)
+  local key=$1 i line role state kid secret main_secret max r new kind unprot bare=""
+  local rows=() sorted=() used=() supplied_order=()
+  local -A supplied=()
+  for i in "${!KEY_FILES[@]}"; do
+    [[ -n ${parts_of[$i,$key]+set} ]] || continue
+    secret=0 main_secret=0 max=0
+    while read -r role state kid; do
+      r=$(rank "$state")
+      if (( r > max )); then max=$r; fi
+      if (( r )); then
+        secret=$((secret + 1))
+        if [[ $role == main ]]; then main_secret=1; fi
+      fi
+    done <<<"${parts_of[$i,$key]%$'\n'}"
+    rows+=("$max $secret $main_secret $i")
+  done
+  mapfile -t sorted < <(printf '%s\n' "${rows[@]}" | sort -k1,1nr -k2,2nr -k3,3nr -k4,4n | cut -d' ' -f4)
+  for i in "${sorted[@]}"; do
+    new=0
+    while read -r role state kid; do # gpg keeps a key's first copy: later ones are "unchanged"
+      r=$(rank "$state")
+      if (( r )) && [[ -z ${supplied[$kid]+set} ]]; then
+        supplied_order+=("$kid")
+        supplied[$kid]=$r
+        new=1
+      fi
+    done <<<"${parts_of[$i,$key]%$'\n'}"
+    if (( new )); then used+=("$i"); fi
+  done
+  for i in "${sorted[@]}"; do
+    if [[ " ${used[*]} " == *" $i "* ]]; then status[$i,$key]=used; continue; fi
+    status[$i,$key]=ignored
+    while read -r role state kid; do
+      if (( $(rank "$state") )); then status[$i,$key]="not needed"; fi
+    done <<<"${parts_of[$i,$key]%$'\n'}"
+  done
+  if (( ${#used[@]} == 0 )); then INV_UNRECOVERABLE+=("$key"); return 0; fi
+  kind=subkeys-only
+  if (( ${supplied[$key]:-0} )); then kind="export"; fi
+  unprot=1
+  for kid in "${supplied_order[@]}"; do
+    if (( supplied[$kid] == 1 )); then bare+="${bare:+ }$kid"; else unprot=0; fi
+  done
+  local paths=()
+  for i in "${used[@]}"; do paths+=("${KEY_FILES[i]}"); done
+  add_candidate "$kind" "${paths[0]%/*}" "$key" "$unprot" "$bare" "${paths[@]}"
+}
+
+build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() writes it
+  local root=$1 i key rel
+  local -a parts
+  INV_REPORT=""
+  (( ${#KEY_FILES[@]} )) || return 0
+  INV_REPORT="Backup files in $root:"
+  for i in "${!KEY_FILES[@]}"; do
+    rel=${KEY_FILES[i]#"$root"/}
+    if [[ -n ${unreadable[$i]+set} ]]; then
+      INV_REPORT+=$'\n'"  $rel: not a readable key file (ignored)"
+      continue
+    fi
+    for key in "${order[@]}"; do
+      [[ -n ${parts_of[$i,$key]+set} ]] || continue
+      mapfile -t parts <<<"${parts_of[$i,$key]%$'\n'}"
+      INV_REPORT+=$'\n'"  $rel: key $key: $(describe_parts "${parts[@]}") (${status[$i,$key]})"
+    done
+  done
+  for key in "${INV_UNRECOVERABLE[@]}"; do
+    INV_REPORT+=$'\n'"  key $key: not recoverable from this folder (card stubs / public key only)"
+  done
+}
+
+sort_candidates() { # by path bytes, then gnupghome, export, subkeys-only; ties keep their order
+  local i n order_of=() kind=() path=() files=() key=() unprot=() bare=()
   for i in "${!CAND_KIND[@]}"; do
-    if [[ -z $SOURCE || ${CAND_KIND[i]} == "$SOURCE" ]]; then matches+=("$i"); fi
+    case ${CAND_KIND[i]} in gnupghome) n=0 ;; export) n=1 ;; *) n=2 ;; esac
+    order_of+=("${CAND_PATH[i]}"$'\t'"$n"$'\t'"$i")
+  done
+  (( ${#order_of[@]} )) || return 0
+  while IFS=$'\t' read -r _ _ i; do
+    kind+=("${CAND_KIND[i]}"); path+=("${CAND_PATH[i]}"); files+=("${CAND_FILES[i]}")
+    key+=("${CAND_KEY[i]}"); unprot+=("${CAND_UNPROT[i]}"); bare+=("${CAND_BARE[i]}")
+  done < <(printf '%s\n' "${order_of[@]}" | sort -t $'\t' -k1,1 -k2,2n -k3,3n)
+  CAND_KIND=("${kind[@]}") CAND_PATH=("${path[@]}") CAND_FILES=("${files[@]}")
+  CAND_KEY=("${key[@]}") CAND_UNPROT=("${unprot[@]}") CAND_BARE=("${bare[@]}")
+}
+
+detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and INV_FILES_FOUND
+  local root=${BACKUP%/} i out main kid role state order=()
+  local -A parts_of=() seen_key=() status=() unreadable=()
+  [[ -d $root ]] || die "$EXIT_BACKUP" "backup folder not found: $root"
+  KEY_FILES=() INV_UNRECOVERABLE=()
+  walk_dir "$root" 0
+  INV_FILES_FOUND=${#KEY_FILES[@]}
+  INV_UNREADABLE=0
+  for i in "${!KEY_FILES[@]}"; do
+    if ! out=$(classify_file "${KEY_FILES[i]}"); then unreadable[$i]=1 INV_UNREADABLE=1; continue; fi
+    while read -r main kid role state; do
+      parts_of[$i,$main]+="$role $state $kid"$'\n'
+      if [[ -z ${seen_key[$main]+set} ]]; then seen_key[$main]=1; order+=("$main"); fi
+    done <<<"$out"
+  done
+  for main in "${order[@]}"; do
+    select_files "$main"
+  done
+  build_report "$root"
+  sort_candidates
+}
+
+choose_candidate() { # as Python's backup.choose; main reports a folder with no candidates first
+  local i matches=() want=${KEY^^} k
+  want=${want// /}
+  for i in "${!CAND_KIND[@]}"; do
+    [[ -z $SOURCE || ${CAND_KIND[i]} == "$SOURCE" ]] || continue
+    k=${CAND_KEY[i]}
+    if [[ -n $want && -n $k && $want != *"$k" && $k != *"$want" ]]; then continue; fi
+    matches+=("$i")
   done
   if (( ${#matches[@]} == 1 )); then CHOSEN=${matches[0]}; return 0; fi
-  (( ${#matches[@]} )) ||
-    die "$EXIT_BACKUP" "no backup found (expected secret-*-Certify.key, secret-*-Subkeys.key or a GnuPG home)"
-  for i in "${matches[@]}"; do listing+=$'\n'"  ${CAND_KIND[i]}: ${CAND_PATH[i]}"; done
-  die "$EXIT_BACKUP" "several backups found; narrow --backup or pass --source:$listing"
+  if (( ${#matches[@]} == 0 )); then
+    die "$EXIT_BACKUP" "no backup matches --source or --key; found:$(candidate_listing "${!CAND_KIND[@]}")"
+  fi
+  die "$EXIT_BACKUP" "several backups found; narrow --backup or pass --source or --key:$(candidate_listing "${matches[@]}")"
 }
 
-list_keys() { # list_keys HOME → "sec FPR KEYID SECRET" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
+candidate_listing() { # candidate_listing INDEX...: "\n  <kind>: <path> (key <KEYID>)" per candidate
+  local i
+  for i in "$@"; do
+    printf '\n  %s: %s' "${CAND_KIND[i]}" "${CAND_PATH[i]}"
+    if [[ -n ${CAND_KEY[i]} ]]; then printf ' (key %s)' "${CAND_KEY[i]}"; fi
+  done
+}
+
+list_keys() { # list_keys HOME → "sec FPR KEYID SECRET EXPIRES ALGO" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
   GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
     awk -F: '
-      $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1; next }
+      $1 == "sec" { insec = 1; insub = 0; kid = $5; secret = ($15 == "#") ? 0 : 1
+                    kexp = $7 + 0; kalgo = ($17 != "") ? $17 : "rsa" $3; next }
       $1 == "ssb" { insub = 1; insec = 0; usage = $12; created = $6 + 0; expires = $7 + 0
                     validity = $2; algo = ($17 != "") ? $17 : "rsa" $3; ssecret = ($15 == "+") ? 1 : 0; next }
-      $1 == "fpr" && insec { print "sec", $10, kid, secret; insec = 0; next }
+      $1 == "fpr" && insec { print "sec", $10, kid, secret, kexp, kalgo; insec = 0; next }
       $1 == "fpr" && insub { print "ssb", $10, usage, created, expires, validity, algo, ssecret; insub = 0; next }
       $1 == "uid" { print "uid", $10 }'
 }
 
 load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and SUB_* arrays
-  local kind a b c d e f g line current="" want=${KEY^^} fps=() matches=() listing=""
+  local kind a b c d e f g line current="" raw=${KEY:-${CAND_KEY[CHOSEN]:-}} want fps=() matches=() listing=""
+  want=${raw^^}
   want=${want// /}
   while read -r kind a _; do
     if [[ $kind == sec ]]; then fps+=("$a"); fi
@@ -301,7 +506,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   for a in "${fps[@]}"; do
     if [[ -z $want || $a == *"$want" ]]; then matches+=("$a"); fi
   done
-  if [[ -n $want ]] && (( ${#matches[@]} == 0 )); then die "$EXIT_BACKUP" "no key matches --key $KEY"; fi
+  if [[ -n $want ]] && (( ${#matches[@]} == 0 )); then die "$EXIT_BACKUP" "no key matches --key $raw"; fi
   if (( ${#matches[@]} != 1 )); then
     for a in "${matches[@]}"; do listing+=$'\n'"  $a"; done
     die "$EXIT_BACKUP" "several keys found; choose one with --key:$listing"
@@ -311,7 +516,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   while IFS= read -r line; do
     read -r kind a b c d e f g <<<"$line"
     case $kind in
-      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; fi ;;
+      sec) current=$a; if [[ $a == "$KEY_FP" ]]; then KEY_ID=$b; HAS_SECRET=$c; KEY_EXPIRES=$d; KEY_ALGO=$e; fi ;;
       uid) if [[ $current == "$KEY_FP" ]]; then UIDS+=("${line#uid }"); fi ;;
       ssb)
         if [[ $current == "$KEY_FP" ]]; then
@@ -323,7 +528,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
 }
 
 load_candidate() {
-  local i=$1 f
+  local i=$1 f n=0 source
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
     kill_agents "$STAGING"
     while IFS= read -r f; do
@@ -332,7 +537,9 @@ load_candidate() {
     chmod -R u+rwX,go-rwx "$STAGING"
   else
     while IFS= read -r f; do
-      GNUPGHOME=$STAGING gpg --batch --import "$f" 2>"$WORK/import.err" ||
+      readable_copy "$f" "$STAGING" "bom-$n.key" source || die "$EXIT_BACKUP" "cannot import $f: cannot read the file"
+      n=$((n + 1))
+      GNUPGHOME=$STAGING gpg --batch --import -- "$source" 2>"$WORK/import.err" ||
         die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
     done <<<"${CAND_FILES[i]}"
   fi
@@ -341,7 +548,7 @@ load_candidate() {
 
 usage_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf auth ;; esac; }
 
-select_targets() { # the newest non-revoked subkey for each usage
+select_targets() { # the newest non-revoked subkey for each usage; empty when the key has none
   local u i best created
   for u in s e a; do
     best="" created=-1
@@ -349,26 +556,60 @@ select_targets() { # the newest non-revoked subkey for each usage
       [[ ${SUB_USAGE[i]} == *"$u"* && ${SUB_VALIDITY[i]} != r ]] || continue
       if (( SUB_CREATED[i] > created )); then created=${SUB_CREATED[i]}; best=${SUB_FPR[i]}; fi
     done
-    [[ -n $best ]] || die "$EXIT_BACKUP" "key $KEY_FP has no $(usage_word "$u") subkey"
     TARGET[$u]=$best
   done
 }
 
-unique_targets() { # unique_targets ARRAY_NAME: target fingerprints in s, e, a order without repeats
+unique_targets() { # unique_targets ARRAY_NAME: non-empty target fingerprints in s, e, a order without repeats
   local -n _list=$1
   local u
   _list=()
   for u in s e a; do
+    [[ -n ${TARGET[$u]} ]] || continue
     if [[ " ${_list[*]} " != *" ${TARGET[$u]} "* ]]; then _list+=("${TARGET[$u]}"); fi
   done
 }
 
+missing_slots() { # the usages without a target, in s e a order
+  local u
+  for u in s e a; do
+    if [[ -z ${TARGET[$u]} ]]; then printf '%s\n' "$u"; fi
+  done
+}
+
+slot_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf authentication ;; esac; }
+
+expire_at() { # expire_at EXPIRE NOW → epoch, or nothing for never / an unknown form (as modes.expire_at)
+  local t=${1,,} n unit
+  t=${t#"${t%%[![:space:]]*}"}
+  t=${t%"${t##*[![:space:]]}"}
+  if [[ $t =~ ^([0-9]+)([dwmy]?)$ ]] && (( 10#${BASH_REMATCH[1]} > 0 )); then
+    n=$((10#${BASH_REMATCH[1]}))
+    case ${BASH_REMATCH[2]} in '' | d) unit=86400 ;; w) unit=604800 ;; m) unit=2592000 ;; y) unit=31536000 ;; esac
+    printf '%s' $(($2 + n * unit))
+  elif [[ $t =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    date -u -d "$t" +%s 2>/dev/null || true
+  fi
+}
+
+main_needs_extending() { # main_needs_extending NOW: the main key expired, or ends before the subkeys this run writes
+  local until
+  (( KEY_EXPIRES > 0 )) || return 1
+  until=$(expire_at "$EXPIRE" "$1")
+  (( KEY_EXPIRES <= $1 )) || [[ -z $until ]] || (( KEY_EXPIRES < until ))
+}
+
+is_bare() { [[ " ${CAND_BARE[CHOSEN]} " == *" $1 "* ]]; } # is_bare KEYID: supplied with no passphrase
+
+target_is_bare() { # target_is_bare FPR: keytocard asks no passphrase; a renew/rotate subkey takes the main key's
+  if [[ " ${LOADED_FPRS[*]} " == *" $1 "* ]]; then is_bare "${1: -16}"; else is_bare "$KEY_ID"; fi
+}
+
 check_bundle() {
-  local now f i fprs=() stale=() stubs=()
+  local now=$NOW f i u extra fprs=() stale=() stubs=() gaps=()
   if [[ $MODE != clone ]] && (( ! HAS_SECRET )); then
     die "$EXIT_BACKUP" "--mode $MODE needs the Certify key, but this backup only has subkeys"
   fi
-  now=$(date +%s)
   unique_targets fprs
   if [[ $MODE != rotate ]]; then # rotate writes new subkeys; the old ones are only revoked or left
     for f in "${fprs[@]}"; do
@@ -378,6 +619,9 @@ check_bundle() {
     done
     if (( ${#stubs[@]} )); then die "$EXIT_BACKUP" "the backup holds card stubs, not secret subkeys: ${stubs[*]}"; fi
   fi
+  if [[ $MODE == clone ]] && (( KEY_EXPIRES > 0 && KEY_EXPIRES <= now )); then
+    die "$EXIT_BACKUP" "the main key has expired; use --mode renew or --mode rotate"
+  fi
   for f in "${fprs[@]}"; do
     for i in "${!SUB_FPR[@]}"; do
       if [[ ${SUB_FPR[i]} == "$f" ]] && (( SUB_EXPIRES[i] > 0 && SUB_EXPIRES[i] <= now )); then stale+=("$f"); fi
@@ -386,6 +630,16 @@ check_bundle() {
   if (( ${#stale[@]} )) && [[ $MODE == clone ]]; then
     die "$EXIT_BACKUP" "subkeys have expired: ${stale[*]}; use --mode renew or --mode rotate"
   fi
+  [[ $MODE == clone ]] || return 0
+  mapfile -t gaps < <(missing_slots)
+  if (( ${#gaps[@]} == 3 )); then
+    die "$EXIT_BACKUP" "the key has no subkeys to put on a card; use --mode renew or --mode rotate"
+  fi
+  for u in "${gaps[@]}"; do
+    extra=""
+    if [[ $u == a ]]; then extra="; SSH will not work from this card"; fi
+    warn "no $(slot_word "$u") subkey: that card slot stays empty$extra"
+  done
 }
 
 # --- canonical steps (byte-identical to the Python plan)
@@ -429,37 +683,50 @@ algo_for() { # algo_for ALGO USAGE
   if [[ $1 == rsa4096 ]]; then printf rsa4096; elif [[ $2 == e ]]; then printf cv25519; else printf ed25519; fi
 }
 
-rotate_algo() {
-  local i
+default_algo() { # --algo, else the family of the sign subkey (else encrypt, else auth, else the main key)
+  local i ref=${TARGET[s]:-${TARGET[e]:-${TARGET[a]}}} algo=$KEY_ALGO
   if [[ -n $ALGO ]]; then printf '%s' "$ALGO"; return; fi
   for i in "${!SUB_FPR[@]}"; do
-    if [[ ${SUB_FPR[i]} == "${TARGET[s]}" ]]; then
-      if [[ ${SUB_ALGO[i]} == rsa* ]]; then printf rsa4096; else printf ed25519; fi
-      return
-    fi
+    if [[ ${SUB_FPR[i]} == "$ref" ]]; then algo=${SUB_ALGO[i]}; break; fi
   done
+  if [[ $algo == rsa* ]]; then printf rsa4096; else printf ed25519; fi
 }
 
 mode_steps() {
-  local u old algo fprs=()
+  local u old algo secret=('<CERTIFY_PASS>') fprs=() gaps=()
+  if [[ $MODE == renew || $MODE == rotate ]] && main_needs_extending "$NOW"; then
+    STEP_STDIN=('<CERTIFY_PASS>')
+    step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-set-expire "$KEY_FP" "$EXPIRE" || return 1
+  fi
   case $MODE in
     renew)
+      algo=$(default_algo)
       unique_targets fprs
-      STEP_STDIN=('<CERTIFY_PASS>')
-      step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-set-expire "$KEY_FP" "$EXPIRE" \
-        "${fprs[@]}" || return 1 ;;
+      if (( ${#fprs[@]} )); then
+        STEP_STDIN=('<CERTIFY_PASS>')
+        step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-set-expire "$KEY_FP" "$EXPIRE" \
+          "${fprs[@]}" || return 1
+      fi
+      mapfile -t gaps < <(missing_slots)
+      for u in "${gaps[@]}"; do
+        STEP_STDIN=('<CERTIFY_PASS>')
+        step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-add-key "$KEY_FP" \
+          "$(algo_for "$algo" "$u")" "$(usage_word "$u")" "$EXPIRE" || return 1
+      done ;;
     rotate)
-      algo=$(rotate_algo)
+      algo=$(default_algo)
       for u in s e a; do
         STEP_STDIN=('<CERTIFY_PASS>')
         step mode '<STAGING>' '' "${LOOPBACK[@]}" --passphrase-fd 0 --quick-add-key "$KEY_FP" \
           "$(algo_for "$algo" "$u")" "$(usage_word "$u")" "$EXPIRE" || return 1
       done
       if (( REVOKE_OLD )); then
+        # the main key signs the revocation; with no passphrase gpg asks none
+        if is_bare "$KEY_ID"; then secret=(); fi
         unique_targets fprs
         for old in "${fprs[@]}"; do
           kill_step mode '<STAGING>' || return 1
-          STEP_STDIN=("key $old" revkey y 0 '' y '<CERTIFY_PASS>' save)
+          STEP_STDIN=("key $old" revkey y 0 '' y "${secret[@]}" save)
           step mode '<STAGING>' '' "${LOOPBACK[@]}" --command-fd 0 --edit-key "$KEY_FP" || return 1
         done
       fi ;;
@@ -484,7 +751,7 @@ touch_for() {
 }
 
 card_steps() { # card_steps INDEX
-  local phase="card$1" serial="<SERIAL$1>" h='<CARDHOME>' slot usage ref
+  local phase="card$1" serial="<SERIAL$1>" h='<CARDHOME>' slot usage ref secret=()
   local -a holder=(admin login '<LOGIN>' '<ADMIN_PIN>')
   if [[ -n $NAME ]]; then holder+=(name '<SURNAME>' '<GIVEN>'); fi
   if [[ -n $URL ]]; then holder+=(url '<URL>'); fi
@@ -505,11 +772,17 @@ card_steps() { # card_steps INDEX
   step "$phase" "$h" '' "${CARD_GPG[@]}" --edit-card || return 1
   for slot in 1 2 3; do
     case $slot in 1) usage=s ;; 2) usage=e ;; 3) usage=a ;; esac
+    [[ -n ${TARGET[$usage]} ]] || continue
+    # gpg asks no passphrase for an unprotected subkey; an extra line would be read as the Admin PIN.
+    secret=('<CERTIFY_PASS>')
+    if target_is_bare "${TARGET[$usage]}"; then secret=(); fi
     kill_step "$phase" "$h" || return 1
-    STEP_STDIN=("key ${TARGET[$usage]}" keytocard "$slot" '<CERTIFY_PASS>' '<ADMIN_PIN>' save)
+    STEP_STDIN=("key ${TARGET[$usage]}" keytocard "$slot" "${secret[@]}" '<ADMIN_PIN>' save)
     step "$phase" "$h" '' "${CARD_GPG[@]}" --edit-key "$KEY_FP" || return 1
   done
   for ref in sig dec aut; do
+    case $ref in sig) usage=s ;; dec) usage=e ;; aut) usage=a ;; esac
+    [[ -n ${TARGET[$usage]} ]] || continue
     kill_step "$phase" "$h" || return 1
     step "$phase" "$h" '' ykman --device "$serial" openpgp keys set-touch "$ref" "$(touch_for "$ref")" -f -a \
       '<ADMIN_PIN>' || return 1
@@ -522,10 +795,13 @@ verify_steps() { # verify_steps INDEX
   step "$phase" '<STAGING>' '' gpg --batch --yes --armor --output "$v/pub.asc" --export "$KEY_FP" || return 1
   step "$phase" "$v" '' gpg --batch --import "$v/pub.asc" || return 1
   step "$phase" "$v" cardstatus gpg --batch --with-colons --card-status || return 1
-  STEP_STDIN=('<USER_PIN>')
-  step "$phase" "$v" '' "${pin[@]}" --local-user "${TARGET[s]}!" --output "$v/test.sig" --detach-sign \
-    "$v/test.txt" || return 1
-  step "$phase" "$v" '' gpg --batch --verify "$v/test.sig" "$v/test.txt" || return 1
+  if [[ -n ${TARGET[s]} ]]; then
+    STEP_STDIN=('<USER_PIN>')
+    step "$phase" "$v" '' "${pin[@]}" --local-user "${TARGET[s]}!" --output "$v/test.sig" --detach-sign \
+      "$v/test.txt" || return 1
+    step "$phase" "$v" '' gpg --batch --verify "$v/test.sig" "$v/test.txt" || return 1
+  fi
+  [[ -n ${TARGET[e]} ]] || return 0
   step "$phase" "$v" '' gpg --batch --yes --trust-model always --recipient "${TARGET[e]}!" --output \
     "$v/test.gpg" --encrypt "$v/test.txt" || return 1
   kill_step "$phase" "$v" || return 1
@@ -537,6 +813,7 @@ finish_steps() { # tries both exports; warns per failure (live run)
   local rc=0
   step finish '<STAGING>' '' gpg --batch --yes --armor --output "<OUT>/public-$KEY_ID-<DATE>.asc" \
     --export "$KEY_FP" || { rc=1; warn "export failed: $CURRENT_STEP"; }
+  [[ -n ${TARGET[a]} ]] || return "$rc"
   step finish '<STAGING>' '' gpg --batch --yes --output "<OUT>/ssh-$KEY_ID.pub" --export-ssh-key \
     "${TARGET[a]}!" || { rc=1; warn "export failed: $CURRENT_STEP"; }
   return "$rc"
@@ -547,6 +824,9 @@ dry_run() {
   mode_steps
   backup_steps
   if [[ $MODE == rotate ]]; then TARGET=([s]='<NEW_FPR_S>' [e]='<NEW_FPR_E>' [a]='<NEW_FPR_A>'); fi
+  if [[ $MODE == renew ]]; then
+    TARGET[s]=${TARGET[s]:-<NEW_FPR_S>} TARGET[e]=${TARGET[e]:-<NEW_FPR_E>} TARGET[a]=${TARGET[a]:-<NEW_FPR_A>}
+  fi
   for ((i = 1; i <= CARDS; i++)); do
     card_steps "$i"
     verify_steps "$i"
@@ -565,8 +845,19 @@ main() {
   new_home work WORK || die "$EXIT_BACKUP" "cannot create a temporary GnuPG home in $(runtime_base)"
   new_home staging STAGING || die "$EXIT_BACKUP" "cannot create a temporary GnuPG home in $(runtime_base)"
   detect
+  if [[ -n $INV_REPORT ]]; then info "$INV_REPORT"; fi
+  if (( ${#CAND_KIND[@]} == 0 )); then
+    if (( INV_UNREADABLE )); then die "$EXIT_BACKUP" "no usable secret keys in ${BACKUP%/} (see the report above)"; fi
+    if (( INV_FILES_FOUND )); then
+      die "$EXIT_BACKUP" "no secret keys in ${BACKUP%/}: only card stubs or public keys"
+    fi
+    die "$EXIT_BACKUP" "no backup found in ${BACKUP%/} (looked for OpenPGP key files and GnuPG homes)"
+  fi
   choose_candidate
+  UNPROTECTED=${CAND_UNPROT[CHOSEN]}
   load_candidate "$CHOSEN"
+  LOADED_FPRS=("${SUB_FPR[@]}")
+  NOW=$(date +%s)
   select_targets
   check_bundle
   if (( DRY_RUN )); then
@@ -634,7 +925,7 @@ run_check() {
 }
 
 describe_key() {
-  local i mark expires targets=" ${TARGET[s]} ${TARGET[e]} ${TARGET[a]} "
+  local i u mark expires targets=" ${TARGET[s]} ${TARGET[e]} ${TARGET[a]} "
   info "Key $KEY_FP"
   for i in "${!UIDS[@]}"; do info "  uid ${UIDS[i]}"; done
   for i in "${!SUB_FPR[@]}"; do
@@ -644,6 +935,7 @@ describe_key() {
     if (( SUB_EXPIRES[i] > 0 )); then expires=$(date -d "@${SUB_EXPIRES[i]}" +%F); fi
     info "  [${SUB_USAGE[i]^^}] ${SUB_ALGO[i]} ${SUB_FPR[i]} expires $expires$mark"
   done
+  for u in $(missing_slots); do info "  [${u^^}] none (clone leaves it empty; renew and rotate create one)"; done
 }
 
 check_passphrase() { # check_passphrase PASS → status
@@ -865,7 +1157,13 @@ finish() {
 run_live() {
   local rc=0
   describe_key
-  unlock
+  if (( UNPROTECTED )); then
+    warn "the backup's secret keys have no passphrase"
+    CERTIFY_PASS=""
+    check_passphrase "" || die "$EXIT_BACKUP" "cannot use the backup's secret keys"
+  else
+    unlock
+  fi
   if ! (( YES )) && ! confirm "Write subkeys of $KEY_FP to $CARDS card(s)?"; then exit "$EXIT_INTERRUPT"; fi
   mkdir -p -m 700 -- "$OUT" || die "$EXIT_USAGE" "cannot create the --out folder $OUT"
   TOKENS=(['<CERTIFY_PASS>']=$CERTIFY_PASS ['<OUT>']=$OUT ['<DATE>']=$(date +%F)
@@ -877,6 +1175,7 @@ run_live() {
     load_bundle "$STAGING"
     select_targets
     kill_agents "$STAGING"
+    if (( UNPROTECTED )); then warn "the new backup in $OUT will also have no passphrase"; fi
     until confirm "New backup written to $OUT. Saved it to offline storage?"; do
       warn "copy the new backup before writing cards"
     done

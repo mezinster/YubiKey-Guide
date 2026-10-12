@@ -1,6 +1,8 @@
+import os
+import subprocess
 import unittest
 
-from tests.helpers import FIXTURES, fixture_info
+from tests.helpers import FIXTURES, LINUX, REAL_GPG, fixture_info, short_tempdir
 
 
 class FixtureTests(unittest.TestCase):
@@ -17,6 +19,49 @@ class FixtureTests(unittest.TestCase):
                 self.assertTrue((root / "gnupghome" / "private-keys-v1.d").is_dir())
                 self.assertTrue((root / "gnupghome" / "pubring.kbx").is_file())
                 self.assertFalse(list((root / "subkeys-only").glob("*Certify*")))
+
+
+    @unittest.skipUnless(LINUX, "the fixture script is bash")
+    def test_make_fixtures_without_profiles_prints_usage(self):
+        result = subprocess.run(["bash", str(FIXTURES / "make_fixtures.sh")], capture_output=True, text=True,
+                                check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage: make_fixtures.sh PROFILE...", result.stderr)
+        self.assertIn("profiles: ed25519 rsa4096 expired flexible noauth split unprotected mixed gnupg1 multikey",
+                      result.stderr)
+
+class NewFixtureShapeTests(unittest.TestCase):
+    def packets(self, path):
+        result = subprocess.run([REAL_GPG, "--batch", "--list-packets", str(path)], capture_output=True, text=True,
+                                env={**os.environ, "GNUPGHOME": str(short_tempdir(self, "pk"))}, check=False)
+        return result.stdout
+
+    def test_stub_files_are_card_stubs(self):
+        folder = FIXTURES / "flexible" / "asc backup" / "stub"
+        full = self.packets(folder / "flex.priv_stub.asc")
+        self.assertEqual(full.count("gnu-divert-to-card"), 3)
+        subs = self.packets(folder / "flex.sub_priv_stub.asc")
+        self.assertEqual(subs.count("gnu-divert-to-card"), 2)
+        self.assertEqual(subs.count("gnu-dummy"), 1)
+
+    def test_split_main_file_has_dummy_subkeys(self):
+        text = self.packets(FIXTURES / "split" / "a-main" / "main-only.asc")
+        self.assertEqual(text.count("gnu-dummy"), 3)
+        self.assertEqual(text.count("S2K"), 1)
+
+    def test_unprotected_key_has_no_s2k(self):
+        text = self.packets(FIXTURES / "unprotected" / "key.asc")
+        self.assertNotIn("S2K", text)
+        self.assertIn("bits]", text)
+
+    def test_mixed_has_protected_main_and_bare_subkeys(self):
+        main = self.packets(FIXTURES / "mixed" / "main.asc")
+        self.assertEqual(main.count("S2K"), 1)
+        subs = self.packets(FIXTURES / "mixed" / "subs.asc")
+        self.assertEqual(subs.count("gnu-dummy"), 1)
+        self.assertNotIn("S2K", subs)
+        self.assertEqual(subs.count("secret sub key packet"), 3)
 
 
 if __name__ == "__main__":

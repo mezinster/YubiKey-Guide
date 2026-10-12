@@ -86,7 +86,10 @@ class Session:
     def __init__(self, opts: Options, ui):
         self.opts, self.ui = opts, ui
         self.staging = None
+        self.inventory = None
+        self.candidate = None
         self.bundle = None
+        self.loaded_fprs = frozenset()  # subkeys as loaded from the backup, before renew/rotate
         self.targets = {}
         self.passphrase = ""
         self.results = []
@@ -199,11 +202,22 @@ class Session:
         return found
 
     def load(self) -> backup.KeyBundle:
-        candidate = backup.choose(backup.detect(self.opts.backup), self.opts.source or None)
+        inv = backup.inventory(Path(self.opts.backup))
+        self.inventory = inv
+        if not inv.candidates:
+            if any(f.status == "unreadable" for f in inv.files):
+                raise RecoveryError(f"no usable secret keys in {inv.root} (see the report above)", EXIT_BACKUP)
+            if inv.files:
+                raise RecoveryError(f"no secret keys in {inv.root}: only card stubs or public keys", EXIT_BACKUP)
+            raise RecoveryError(f"no backup found in {inv.root} (looked for OpenPGP key files and GnuPG homes)",
+                                EXIT_BACKUP)
+        candidate = backup.choose(inv.candidates, self.opts.source or None, self.opts.key or None)
+        self.candidate = candidate
         if self.staging:
             self._destroy(self.staging)
         self.staging = Home.create("staging")
-        self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or None)
+        self.bundle = backup.choose_key(backup.load(candidate, self.staging), self.opts.key or candidate.key_id or None)
+        self.loaded_fprs = frozenset(k.fpr for k in self.bundle.subkeys)
         self.targets = modes.select_targets(self.bundle)
         return self.bundle
 
@@ -214,14 +228,25 @@ class Session:
                                 EXIT_BACKUP)
         if mode != "rotate":  # rotate writes new subkeys; the old ones are only revoked or left
             by_fpr = {k.fpr: k for k in self.bundle.subkeys}
-            stubs = [f for f in modes.unique(self.targets[u] for u in modes.USAGES) if not by_fpr[f].secret]
+            stubs = [f for f in modes.present(self.targets) if not by_fpr[f].secret]
             if stubs:
                 raise RecoveryError(f"the backup holds card stubs, not secret subkeys: {' '.join(stubs)}",
                                     EXIT_BACKUP)
-        stale = modes.expired(self.bundle, self.targets, int(time.time()))
+        now = int(time.time())
+        if mode == "clone" and 0 < self.bundle.expires <= now:
+            raise RecoveryError("the main key has expired; use --mode renew or --mode rotate", EXIT_BACKUP)
+        stale = modes.expired(self.bundle, self.targets, now)
         if stale and mode == "clone":
             raise RecoveryError(f"subkeys have expired: {' '.join(stale)}; use --mode renew or --mode rotate",
                                 EXIT_BACKUP)
+        gaps = modes.missing(self.targets)
+        if mode == "clone" and len(gaps) == len(modes.USAGES):
+            raise RecoveryError("the key has no subkeys to put on a card; use --mode renew or --mode rotate",
+                                EXIT_BACKUP)
+        if mode == "clone":
+            for u in gaps:
+                extra = "; SSH will not work from this card" if u == "a" else ""
+                self.ui.warn(f"no {modes.SLOT_WORD[u]} subkey: that card slot stays empty{extra}")
 
     def describe(self) -> str:
         b = self.bundle
@@ -230,6 +255,8 @@ class Session:
             mark = " <- card" if k.fpr in self.targets.values() else ""
             expires = datetime.date.fromtimestamp(k.expires).isoformat() if k.expires else "never"
             lines.append(f"  [{k.usage.upper()}] {k.algo} {k.fpr} expires {expires}{mark}")
+        for u in modes.missing(self.targets):
+            lines.append(f"  [{u.upper()}] none (clone leaves it empty; renew and rotate create one)")
         return "\n".join(lines)
 
     def unlock(self, passphrase: str) -> bool:
@@ -238,6 +265,20 @@ class Session:
             return True
         return False
 
+    @property
+    def unprotected(self) -> bool:
+        return bool(self.candidate and self.candidate.unprotected)
+
+    def _bare(self, keyid: str) -> bool:
+        return bool(self.candidate) and keyid in self.candidate.bare
+
+    def bare_targets(self, targets: dict) -> frozenset:
+        """Targets whose keytocard asks no passphrase. A subkey made by renew or rotate takes the main key's
+        protection."""
+        main = self._bare(self.bundle.key_id)
+        return frozenset(t for t in targets.values() if t and (
+            self._bare(t[-16:]) if t in self.loaded_fprs else main))
+
     def _settings(self) -> card.CardSettings:
         o = self.opts
         return card.CardSettings(retries=tuple(o.retries), touch=dict(o.touch), name=o.name, url=o.url)
@@ -245,11 +286,14 @@ class Session:
     def staging_steps(self) -> list:
         o, b = self.opts, self.bundle
         algo = o.algo or modes.default_algo(b, self.targets)
-        return modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old) + modes.backup_steps(o.mode, b)
+        steps = modes.mode_steps(o.mode, b, self.targets, o.expire, algo, o.revoke_old, int(time.time()),
+                                 unprotected=self._bare(b.key_id))
+        return steps + modes.backup_steps(o.mode, b)
 
     def card_plan(self, index: int, targets: dict) -> list:
         fp = self.bundle.key_fp
-        return card.card_steps(index, fp, targets, self._settings()) + card.verify_steps(index, fp, targets)
+        return (card.card_steps(index, fp, targets, self._settings(), self.bare_targets(targets))
+                + card.verify_steps(index, fp, targets))
 
     def _tokens(self) -> dict:
         return {
@@ -297,6 +341,8 @@ class Session:
         except OSError as err:
             raise RecoveryError(f"cannot create the --out folder {o.out}: {err}", EXIT_USAGE) from err
         self.apply_mode()
+        if o.mode != "clone" and self.unprotected:
+            self.ui.warn(f"the new backup in {o.out} will also have no passphrase")
         if o.mode != "clone":
             while not self.ui.confirm(f"New backup written to {o.out}. Saved it to offline storage?"):
                 self.ui.warn("copy the new backup before writing cards")
@@ -426,7 +472,7 @@ class Session:
 
     def _check(self, step, output: str, verifyhome: Home) -> None:
         if step.check == "cardstatus":
-            want = [self.targets[u].upper() for u in modes.USAGES]
+            want = [(self.targets[u] or "").upper() for u in modes.USAGES]
             got = card.parse_card_fprs(output)
             if got != want:
                 raise StepError("card fingerprints", f"card has {got}, expected {want}")
@@ -451,7 +497,9 @@ class Session:
         return EXIT_OK if all(r.status == "OK" for r in self.results) else EXIT_CARD
 
     def dry_run_text(self) -> str:
-        targets = modes.ROTATED if self.opts.mode == "rotate" else self.targets
+        mode = self.opts.mode
+        targets = (modes.ROTATED if mode == "rotate"
+                   else modes.renew_targets(self.targets) if mode == "renew" else self.targets)
         steps = self.staging_steps()
         for index in range(1, self.opts.cards + 1):
             steps += self.card_plan(index, targets)
@@ -470,18 +518,28 @@ def run(opts: Options, ui) -> int:
     try:
         session.validate_options()
         session.preflight()
-        session.load()
+        try:
+            session.load()
+        finally:
+            text = backup.report(session.inventory) if session.inventory else ""
+            if text:
+                ui.info(text)
         session.validate_bundle()
         if opts.dry_run:
             ui.output(session.dry_run_text())
             return EXIT_OK
         ui.info(session.describe())
-        for _ in range(3):
-            if session.unlock(ui.ask_secret("Certify key passphrase:")):
-                break
-            ui.warn("wrong passphrase")
+        if session.unprotected:
+            ui.warn("the backup's secret keys have no passphrase")
+            if not session.unlock(""):
+                raise RecoveryError("cannot use the backup's secret keys", EXIT_BACKUP)
         else:
-            raise RecoveryError("wrong passphrase three times", EXIT_BACKUP)
+            for _ in range(3):
+                if session.unlock(ui.ask_secret("Certify key passphrase:")):
+                    break
+                ui.warn("wrong passphrase")
+            else:
+                raise RecoveryError("wrong passphrase three times", EXIT_BACKUP)
         if not opts.yes and not ui.confirm(f"Write subkeys of {session.bundle.key_fp} to {opts.cards} card(s)?"):
             return EXIT_INTERRUPT
         return session.execute()

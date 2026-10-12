@@ -2,11 +2,12 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until,
-                           run_impl, short_tempdir, spawn_impl)
+from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, REAL_GPG, _runtime_base, fake_hardware, fixture_info,
+                           read_until, run_impl, short_tempdir, spawn_impl)
 
 S1, S2 = "11111111", "22222222"
 
@@ -20,11 +21,11 @@ class FakeHardwareTests:
 
     IMPL = ""
 
-    def migrate(self, profile, extra, stdin, serials=(S1,), fail_at="", list_script=None):
+    def migrate(self, profile, extra, stdin, serials=(S1,), fail_at="", list_script=None, folder="export"):
         env = fake_hardware(self, list(serials), fail_at, list_script)
         out = short_tempdir(self, "out")
-        result = run_impl(self.IMPL, ["--backup", str(FIXTURES / profile / "export"), "--out", str(out), *extra],
-                          stdin, env)
+        backup = FIXTURES / profile / folder if folder else FIXTURES / profile
+        result = run_impl(self.IMPL, ["--backup", str(backup), "--out", str(out), *extra], stdin, env)
         state = Path(env["FAKE_HW_DIR"])
         calls = (state / "calls.log").read_text() if (state / "calls.log").exists() else ""
         return result, out, calls, state
@@ -218,6 +219,23 @@ class FakeHardwareTests:
         for f in files:
             self.assertEqual(stat.S_IMODE(os.stat(f).st_mode) & 0o077, 0, f.name)
 
+    def test_renew_creates_the_missing_auth_subkey(self):
+        info = fixture_info("noauth")
+        result, out, _, state = self.migrate("noauth", ["--mode", "renew"], f"{PASSPHRASE}\ny\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sign, enc, auth = self.card_fprs(state, S1)
+        self.assertEqual((sign, enc), (info["FPR_S"], info["FPR_E"]))
+        home = short_tempdir(self, "pub")
+        (public,) = out.glob("public-*.asc")
+        env = {**os.environ, "GNUPGHOME": str(home)}
+        subprocess.run([REAL_GPG, "--batch", "--import", str(public)], env=env, check=True, capture_output=True)
+        colons = subprocess.run([REAL_GPG, "--batch", "--with-colons", "--list-keys", info["KEY_FP"]], env=env,
+                                check=True, capture_output=True, text=True).stdout.splitlines()
+        auth_fprs = [colons[i + 1].split(":")[9] for i, line in enumerate(colons)
+                     if line.startswith("sub:") and "a" in line.split(":")[11]]
+        self.assertEqual(auth_fprs, [auth])
+        self.assertNotIn(auth, (info["FPR_S"], info["FPR_E"]))
+
     def test_rotate_writes_new_subkeys(self):
         info = fixture_info("rsa4096")
         stdin = f"{PASSPHRASE}\ny\ny\n\nRESET {S1}\n"
@@ -236,6 +254,18 @@ class FakeHardwareTests:
         self.assertTrue(homes)
         self.assertTrue(all(Path(h).resolve().parent == workdir.resolve() for h in homes), homes)
         self.assertEqual(list(workdir.glob("ykr-*")), [])
+
+    def test_clone_unprotected_key(self):
+        info = fixture_info("unprotected")
+        result, _, _, state = self.migrate("unprotected", [], f"y\n\nRESET {S1}\n", folder="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("the backup's secret keys have no passphrase", result.stderr)
+        self.assertNotIn("Certify key passphrase", result.stderr)
+        self.assertEqual(self.card_fprs(state, S1), [info["FPR_S"], info["FPR_E"], info["FPR_A"]])
+        scripts = (state / "keytocard.txt").read_text().split("save\n")[:-1]
+        self.assertEqual(len(scripts), 3)
+        for script, slot in zip(scripts, ("1", "2", "3")):
+            self.assertRegex(script, rf"^key [0-9A-F]{{40}}\nkeytocard\n{slot}\n\d{{8}}\n$")
 
 
 class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):

@@ -14,6 +14,14 @@ CASES = {
     "renew-expired": ["--backup", "tests/fixtures/expired/export", "--mode", "renew"],
     "rotate-rsa-to-ed25519-revoke": [
         "--backup", "tests/fixtures/rsa4096/export", "--mode", "rotate", "--algo", "ed25519", "--revoke-old"],
+    "renew-expired-main-asc": ["--backup", "tests/fixtures/flexible/asc backup", "--mode", "renew"],
+    "rotate-expired-main": ["--backup", "tests/fixtures/flexible/asc backup", "--mode", "rotate"],
+    "clone-no-auth": ["--backup", "tests/fixtures/noauth/export"],
+    "renew-no-auth": ["--backup", "tests/fixtures/noauth/export", "--mode", "renew"],
+    "renew-split-files": ["--backup", "tests/fixtures/split", "--mode", "renew"],
+    "clone-unprotected": ["--backup", "tests/fixtures/unprotected"],
+    "clone-gnupg1-home": ["--backup", "tests/fixtures/gnupg1"],
+    "clone-mixed": ["--backup", "tests/fixtures/mixed"],
 }
 
 

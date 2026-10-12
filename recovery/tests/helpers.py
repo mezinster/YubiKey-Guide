@@ -25,6 +25,49 @@ def fixture_info(profile: str) -> dict:
     return dict(line.split("=", 1) for line in text.split())
 
 
+def bare_and_protected_copies(test) -> tuple:
+    """The unprotected fixture key exported (binary) twice: with no passphrase, then protected by PASSPHRASE."""
+    info, home = fixture_info("unprotected"), short_tempdir(test, "rk")
+    env = {**os.environ, "GNUPGHOME": str(home)}
+
+    def gpg(*args, stdin=""):
+        return subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", *args], input=stdin.encode(),
+                              env=env, check=True, capture_output=True).stdout
+
+    gpg("--import", str(FIXTURES / "unprotected" / "key.asc"))
+    bare = gpg("--export-secret-keys", info["KEY_FP"])
+    gpg("--passphrase-fd", "0", "--passwd", info["KEY_FP"], stdin=PASSPHRASE + "\n")
+    protected = gpg("--passphrase-fd", "0", "--export-secret-keys", info["KEY_FP"], stdin=PASSPHRASE + "\n")
+    return bare, protected
+
+
+def repeated_key_folder(test) -> Path:
+    """A folder with one file holding the fixture key twice: with no passphrase first, then protected.
+
+    gpg imports the first copy and leaves the second "unchanged"."""
+    bare, protected = bare_and_protected_copies(test)
+    root = short_tempdir(test, "rep")
+    (root / "both.gpg").write_bytes(bare + protected)
+    return root
+
+
+def bare_first_folder(test) -> Path:
+    """Two full copies of the fixture key: a-bare.gpg (no passphrase, first in walk order), b-protected.gpg."""
+    bare, protected = bare_and_protected_copies(test)
+    root = short_tempdir(test, "bf")
+    (root / "a-bare.gpg").write_bytes(bare)
+    (root / "b-protected.gpg").write_bytes(protected)
+    return root
+
+
+def bom_crlf_folder(test) -> Path:
+    """The unprotected fixture key as armor with a UTF-8 BOM and CRLF line ends, which gpg cannot parse as is."""
+    root = short_tempdir(test, "bom")
+    text = (FIXTURES / "unprotected" / "key.asc").read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    (root / "bom.asc").write_bytes(b"\xef\xbb\xbf" + text)
+    return root
+
+
 def _runtime_base() -> Path:
     return osdeps.default_work_base()
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.helpers import LINUX
+from tests.helpers import FIXTURES, LINUX, PASSPHRASE, fixture_info
 
 try:
     import tkinter as tk
@@ -29,6 +29,17 @@ class GuiAvailable(unittest.TestCase):
     @unittest.skipUnless(REQUIRE_GUI, "YKRECOVER_REQUIRE_GUI is not set")
     def test_gui_tests_can_run(self):
         self.assertFalse(NO_GUI, "YKRECOVER_REQUIRE_GUI=1, but tkinter or the display is missing")
+
+
+def detected(app, folder, candidates):
+    """Puts candidates on the backup page as if Detect had found them in folder."""
+    from ykrecover.backup import Inventory
+    app.v["folder"].set(str(folder))
+    app.inventory = Inventory(Path(folder), (), tuple(candidates), ())
+    app.candidates = list(candidates)
+    for c in candidates:
+        app.cand_list.insert("end", f"{c.kind}: {c.path}")
+    app.cand_list.selection_set(0)
 
 
 def grab_holder(root):
@@ -147,9 +158,7 @@ class GuiSmokeTests(unittest.TestCase):
         alerts = []
         app.alert = alerts.append
         app.show(1)
-        app.candidates = [Candidate("export", Path("/backup"), ())]
-        app.cand_list.insert("end", "export: /backup")
-        app.cand_list.selection_set(0)
+        detected(app, "/backup", [Candidate("export", Path("/backup"), ())])
         app.v["workdir"].set("/nonexistent/work/folder")
         self.assertFalse(app.leave_backup())
         self.assertEqual(len(alerts), 1)
@@ -399,9 +408,7 @@ class GuiSmokeTests(unittest.TestCase):
         app.alert = lambda text: self.fail(text)
         folder = Path("/backup")
         app.show(1)
-        app.candidates = [Candidate("export", folder, ())]
-        app.cand_list.insert("end", "export: /backup")
-        app.cand_list.selection_set(0)
+        detected(app, folder, [Candidate("export", folder, ())])  # a key found in files loads from the chosen folder
 
         def no_reload():
             raise AssertionError("reloaded")
@@ -410,6 +417,26 @@ class GuiSmokeTests(unittest.TestCase):
                                       bundle=object(), load=no_reload, unlock=no_reload, cleanup=no_reload)
         self.assertTrue(app.leave_backup())  # empty passphrase field, but nothing reloaded or unlocked
         self.assertEqual(app.failures, 0)
+
+    def test_back_keeps_a_key_chosen_from_several(self):
+        from ykrecover.backup import Candidate
+        from ykrecover.gui import App
+        from ykrecover.migrate import Options
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        app = App(root)
+        app.alert = lambda text: self.fail(text)
+        home = Path("/backup/gnupg")
+        app.show(1)
+        detected(app, "/backup", [Candidate("gnupghome", home, ())])
+
+        def no_reload():
+            raise AssertionError("reloaded")
+
+        # the key chooser set opts.key when the session loaded
+        app.session = SimpleNamespace(opts=Options(backup=home, source="gnupghome", key="A" * 40), passphrase="secret",
+                                      bundle=object(), load=no_reload, unlock=no_reload, cleanup=no_reload)
+        self.assertTrue(app.leave_backup())
 
     def test_tkui_marshals_calls(self):
         from ykrecover.gui import App
@@ -570,6 +597,17 @@ class GuiLayoutTests(unittest.TestCase):
             self.assertEqual(pins.cget("wrap"), "none")  # a card's two PINs stay on one line
             self.assertGreaterEqual(pins.cget("width"), len("Card 10000000: Admin PIN 12345678   User PIN 123456"))
 
+    def test_backup_page_fits_with_a_long_report(self):
+        root, app = self.app(SCALINGS[2])
+        width, height = root.minsize()
+        root.geometry(f"{width}x{height}")
+        app.show(1)
+        app.set_report("\n".join(f"  folder/sub/file-{i:02d}.asc: key 0123456789ABCDEF: main secret, "
+                                 f"3 subkeys secret (not needed)" for i in range(20)))
+        root.update()
+        self.assertEqual(root.minsize(), (width, height))
+        self.assertLessEqual(root.winfo_reqheight(), height)
+
 
 @SKIP_GUI
 class GuiBehaviourTests(unittest.TestCase):
@@ -581,6 +619,7 @@ class GuiBehaviourTests(unittest.TestCase):
         self.alerts = []
         app.alert = self.alerts.append
         app.session = fake_session(cards=2)
+        self.addCleanup(lambda: app.session and app.session.cleanup())
         return app
 
     def test_closing_the_failure_dialog_aborts_but_the_pins_need_confirming(self):
@@ -774,9 +813,7 @@ class GuiBehaviourTests(unittest.TestCase):
         app = self.app()
         app.session = None
         app.show(1)
-        app.candidates = [Candidate("export", Path("/backup"), ())]
-        app.cand_list.insert("end", "export: /backup")
-        app.cand_list.selection_set(0)
+        detected(app, "/backup", [Candidate("export", Path("/backup"), ())])
         bundles = [SimpleNamespace(key_fp="A" * 40, uids=("one",)), SimpleNamespace(key_fp="B" * 40, uids=("two",))]
         with mock.patch.object(Session, "load", side_effect=[AmbiguousKey(bundles), None]), \
                 mock.patch.object(Session, "unlock", return_value=True), \
@@ -803,6 +840,53 @@ class GuiBehaviourTests(unittest.TestCase):
         self.assertEqual(app.cand_list.size(), 0)
         self.assertTrue(app.cand_error.cget("text"))
 
+    def test_backup_page_shows_the_report(self):
+        app = self.app()
+        app.show(1)
+        app.v["folder"].set(str(FIXTURES / "flexible" / "asc backup"))
+        app.refresh_candidates()
+        text = app.report_box.get("1.0", "end")
+        self.assertIn("private/flex.priv.asc", text)
+        self.assertIn("(used)", text)
+        self.assertIn("key " + fixture_info("flexible")["KEY_ID"], app.cand_list.get(0))
+
+    def test_unprotected_candidate_disables_the_passphrase(self):
+        app = self.app()
+        app.show(1)
+        app.v["folder"].set(str(FIXTURES / "unprotected"))
+        app.refresh_candidates()
+        app.cand_list.selection_set(0)
+        app.cand_list.event_generate("<<ListboxSelect>>")
+        app.root.update()
+        self.assertIn("disabled", app.pass_entry.state())
+
+    def test_key_candidates_load_from_the_root_folder(self):
+        app = self.app()
+        app.show(1)
+        app.v["folder"].set(str(FIXTURES / "split"))
+        app.refresh_candidates()
+        app.cand_list.selection_set(0)
+        app.v["passphrase"].set(PASSPHRASE)
+        self.assertTrue(app.leave_backup())
+        self.assertEqual(app.session.opts.backup, FIXTURES / "split")
+        self.assertTrue(app.session.bundle.has_certify_secret)
+
+
+    def test_next_redetects_a_folder_typed_after_detect(self):
+        app = self.app()
+        app.session = None
+        app.show(1)
+        app.v["folder"].set(str(FIXTURES / "split"))
+        app.refresh_candidates()
+        app.cand_list.selection_set(0)
+        app.v["passphrase"].set(PASSPHRASE)
+        app.v["folder"].set(str(FIXTURES / "unprotected"))
+        app.next()
+        self.assertEqual(app.page, 1)
+        self.assertIsNone(app.session)
+        self.assertEqual(app.inventory.root, FIXTURES / "unprotected")
+        self.assertEqual(app.cand_list.size(), 1)
+        self.assertIn("key " + fixture_info("unprotected")["KEY_ID"], app.cand_list.get(0))
 
 if __name__ == "__main__":
     unittest.main()
