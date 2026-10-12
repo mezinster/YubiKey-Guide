@@ -1,12 +1,14 @@
 import os
+import re
 import subprocess
 import unittest
+from unittest import mock
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
-                           repeated_key_folder, short_tempdir)
-from ykrecover import EXIT_BACKUP, RecoveryError, backup
-from ykrecover.gpg import Home
+from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, RECOVERY, REAL_GPG, bare_first_folder, bom_crlf_folder,
+                           fixture_info, import_unprotected, repeated_key_folder, short_tempdir)
+from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
+from ykrecover.gpg import Home, gpg_version
 
 COLONS_TWO_KEYS = """\
 sec:u:255:22:D35238B02045AC9D:1791717022:::u:::cESCA:::+::ed25519:::0:
@@ -123,7 +125,7 @@ class InventoryTests(unittest.TestCase):
             subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", *args], input=stdin, text=True,
                            env=env, check=True, capture_output=True)
 
-        gpg("--import", str(FIXTURES / "unprotected" / "key.asc"))
+        import_unprotected(home)
         gpg("--armor", "--output", str(root / "subs.asc"), "--export-secret-subkeys", info["KEY_FP"])
         gpg("--passphrase-fd", "0", "--passwd", info["KEY_FP"], stdin=PASSPHRASE + "\n")
         gpg("--passphrase-fd", "0", "--armor", "--output", str(root / "main.asc"), "--export-secret-keys",
@@ -484,6 +486,212 @@ class LoadTests(unittest.TestCase):
         self.load("ed25519", "gnupghome")
         after = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in source.rglob("*")}
         self.assertEqual(before, after)
+
+
+class EcdhRepairTests(unittest.TestCase):
+    """GnuPG 2.5 misfiles imported ECDH subkeys that have no passphrase (see backup.GNUPG25_DROPPED). Real imports
+    show it only on GnuPG 2.5; the misfiled state is also made by hand, so the tests mean something on 2.4 too."""
+
+    bash = False
+
+    def setUp(self):
+        self.home = Home.create("test")
+        self.addCleanup(self.home.destroy)
+
+    def repair_error(self, bare=(), gnupg_25=None):
+        """Runs the repair; returns its error, or None. gnupg_25 overrides the GnuPG 2.5 test."""
+        version = mock.patch.object(backup, "gpg_version", return_value=(2, 5) if gnupg_25 else (2, 4))
+        try:
+            if gnupg_25 is None:
+                backup.repair_ecdh_imports(self.home, bare)
+            else:
+                with version:
+                    backup.repair_ecdh_imports(self.home, bare)
+        except RecoveryError as err:
+            self.assertEqual(err.code, EXIT_BACKUP)
+            return str(err)
+        return None
+
+    def import_raw(self, folder: Path):
+        """Imports the backup's key files as load does, without the repair."""
+        candidate = backup.choose(backup.detect(folder))
+        for path in candidate.files:
+            result = self.home.run(["gpg", "--batch", "--import", "--", str(path)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+        return candidate
+
+    def listing(self) -> str:
+        return self.home.run([*backup.LIST_SECRET[:-1], "--with-key-data", backup.LIST_SECRET[-1]]).stdout
+
+    def grips(self) -> set:
+        return {line.split(":")[9] for line in self.listing().splitlines() if line.startswith("grp:")}
+
+    def key_files(self) -> set:
+        return {p.stem for p in (self.home.path / "private-keys-v1.d").glob("*.key")}
+
+    def decrypt_failures(self) -> list:
+        """Encrypt subkeys a message to them alone does not decrypt with."""
+        bindings = backup._bindings(self.home)
+        return [s.fpr for s in backup.ecdh_subkeys(self.listing()) if not backup.decrypts(self.home, s, bindings)]
+
+    def ecdh_key(self, curves, made=(), expire="never") -> Path:
+        """A folder with one key, made with no passphrase (now, or at the --faked-system-time made): an ed25519 main
+        key and an encrypt subkey per curve, in that order."""
+        home, root = short_tempdir(self, "ek"), short_tempdir(self, "ekf")
+        env = {**os.environ, "GNUPGHOME": str(home)}
+
+        def gpg(*args):
+            return subprocess.run([REAL_GPG, "--batch", *made, "--pinentry-mode", "loopback", "--passphrase", "",
+                                   *args], env=env, check=True, capture_output=True).stdout
+
+        gpg("--quick-gen-key", "Recovery Test (ecdh) <test@example.org>", "ed25519", "cert", "never")
+        fpr = next(line.split(b":")[9] for line in gpg("--with-colons", "--list-keys").splitlines()
+                   if line.startswith(b"fpr:")).decode()
+        for curve in curves:
+            gpg("--quick-add-key", fpr, curve, "encr", expire)
+        (root / "key.asc").write_bytes(gpg("--armor", "--export-secret-keys", fpr))
+        return root
+
+    def misfile(self, sub, name: str) -> None:
+        """What GnuPG 2.5's import writes: the curve as a dotted OID, the KDF parameters as q, a wrong file name."""
+        keys = self.home.path / "private-keys-v1.d"
+        data = (keys / f"{sub.grip}.key").read_bytes()
+        public_q = re.compile(rb"\(q\s*#" + rb"\s*".join(re.escape(c.encode()) for c in sub.q) + rb"#\)")
+        data, n = public_q.subn(f"(q #{sub.kdf}#)".encode(), data, count=1)
+        data, m = re.subn(rb"\(curve\s+[^()]*\)", f'(curve "{sub.curve}")'.encode(), data, count=1)
+        self.assertEqual((n, m), (1, 1))
+        (keys / f"{sub.grip}.key").unlink()
+        (keys / f"{name}.key").write_bytes(data)
+
+    def corrupt_d(self, path: Path) -> None:
+        """Changes the secret d: the "(d #..#)" of GnuPG 2.5, the last skey value of 2.4's openpgp-native form."""
+        data = path.read_bytes()
+        last = list(re.finditer(rb"(?:\(d|_)\s*#\s*([0-9A-Fa-f])", data))[-1]
+        digit = b"1" if last.group(1) != b"1" else b"2"
+        path.write_bytes(data[:last.start(1)] + digit + data[last.end(1):])
+
+    def misfile_all(self, folder: Path, names) -> set:
+        """Imports folder, repairs it, then misfiles its ECDH subkeys (listing order) under names."""
+        self.assertIsNone(self.repair_error(self.import_raw(folder).bare))
+        grips = self.grips()
+        subs = backup.ecdh_subkeys(self.listing())
+        self.home.kill_agents()
+        for sub, name in zip(subs, names):
+            self.misfile(sub, name)
+        self.assertTrue(all(s.flag == "#" for s in backup.ecdh_subkeys(self.listing())))
+        return grips
+
+    def assert_repaired(self, grips: set):
+        self.assertEqual(self.key_files(), grips)
+        self.assertTrue(all(s.flag == "+" for s in backup.ecdh_subkeys(self.listing())), self.listing())
+        self.assertEqual(self.decrypt_failures(), [])
+
+    def assert_imports_cleanly(self, folder: Path):
+        candidate = self.import_raw(folder)
+        self.assertIsNone(self.repair_error(candidate.bare))
+        self.assert_repaired(self.grips())
+
+    def test_load_repairs_the_unprotected_fixture(self):
+        if self.bash:
+            self.skipTest("backup.load is Python's")
+        candidate = backup.choose(backup.detect(FIXTURES / "unprotected"))
+        bundle = backup.choose_key(backup.load(candidate, self.home))
+        self.assertEqual([k.secret for k in bundle.subkeys], [True] * 3,
+                         f"gpg {'.'.join(map(str, gpg_version()))} staging listing:\n{self.listing()}\n"
+                         f"key files: {sorted(self.key_files())}")
+        self.assert_repaired(self.grips())
+
+    def test_unprotected_fixture(self):
+        self.assert_imports_cleanly(FIXTURES / "unprotected")
+
+    def test_ecdh_subkeys_of_two_curves(self):
+        # On GnuPG 2.5 both have the KDF parameters 03010807: only the curve tells their misfiled files apart.
+        self.assert_imports_cleanly(self.ecdh_key(["nistp256", "cv25519"]))
+
+    def test_two_cv25519_subkeys_load_or_name_the_gnupg_25_drop(self):
+        folder = self.ecdh_key(["cv25519", "cv25519"])
+        if gpg_version() == (2, 5):
+            error = self.repair_error(self.import_raw(folder).bare)
+            self.assertIn("GnuPG 2.5 drops additional unprotected ECDH subkeys", error or "")
+        else:
+            self.assert_imports_cleanly(folder)
+
+    def test_misfiled_key_is_refiled(self):
+        grips = self.misfile_all(FIXTURES / "unprotected", ["0" * 40])
+        self.assertIsNone(self.repair_error())
+        self.assert_repaired(grips)
+
+    def test_misfiled_keys_go_to_the_subkey_of_their_curve(self):
+        # the cv25519 file sorts first, the nistp256 subkey is listed first
+        grips = self.misfile_all(self.ecdh_key(["nistp256", "cv25519"]), ["1" * 40, "0" * 40])
+        self.assertIsNone(self.repair_error())
+        self.assert_repaired(grips)
+
+    def test_an_expired_subkey_is_checked_at_its_binding_time(self):
+        made = ("--faked-system-time", "20200101T000000!")
+        grips = self.misfile_all(self.ecdh_key(["cv25519"], made, "1y"), ["0" * 40])
+        self.assertEqual([s.validity for s in backup.ecdh_subkeys(self.listing())], ["e"])
+        self.assertIsNone(self.repair_error())
+        self.assert_repaired(grips)
+
+    def test_a_subkey_that_does_not_decrypt_is_an_error(self):
+        self.misfile_all(self.ecdh_key(["nistp256"]), ["0" * 40])
+        self.corrupt_d(self.home.path / "private-keys-v1.d" / ("0" * 40 + ".key"))
+        (sub,) = backup.ecdh_subkeys(self.listing())
+        self.assertIn(f"subkey {sub.fpr} does not decrypt", self.repair_error() or "")
+
+    def test_two_claimants_of_one_misfiled_file_is_the_drop_error(self):
+        # GnuPG 2.5's state for two cv25519 subkeys: the first misfiled, the second dropped (no file at all)
+        if gpg_version() == (2, 5):
+            self.skipTest("a real import makes this state: see test_two_cv25519_subkeys_load_or_name_the_gnupg_25_drop")
+        self.import_raw(self.ecdh_key(["cv25519", "cv25519"]))
+        first, second = backup.ecdh_subkeys(self.listing())
+        self.home.kill_agents()
+        self.misfile(first, "0" * 40)
+        (self.home.path / "private-keys-v1.d" / f"{second.grip}.key").unlink()
+        self.assertEqual(self.repair_error(), backup.GNUPG25_DROPPED.format(f"{first.fpr} {second.fpr}"))
+
+    def test_dropped_subkey_is_named_on_gnupg_25(self):
+        # the GnuPG 2.5 state of a dropped subkey: the backup supplies it with no passphrase, gpg has no secret
+        candidate = self.import_raw(FIXTURES / "unprotected")
+        self.assertIsNone(self.repair_error(candidate.bare))
+        (sub,) = backup.ecdh_subkeys(self.listing())
+        self.home.kill_agents()
+        (self.home.path / "private-keys-v1.d" / f"{sub.grip}.key").unlink()
+        self.assertEqual(self.repair_error(candidate.bare, gnupg_25=True), backup.GNUPG25_DROPPED.format(sub.fpr))
+        self.assertIsNone(self.repair_error(candidate.bare, gnupg_25=False))  # left to the stub check
+
+    def test_ecdh_subkeys_parse(self):
+        if self.bash:
+            self.skipTest("Python's parser")
+        listing = ("sec:-:255:22:AAAA:1:::-:::cC:::+::ed25519:::0:\npkd:0:80:092B:\n"
+                   "ssb:-:255:18:BBBB:7::::::e:::#::cv25519::\nfpr:::::::::F1:\ngrp:::::::::G1:\n"
+                   "pkd:0:88:0A2B060104019755010501:\npkd:1:263:40AB:\npkd:2:32:03010807:\n"
+                   "ssb:-:255:22:CCCC:1::::::a:::+::ed25519::\nfpr:::::::::F2:\ngrp:::::::::G2:\npkd:1:263:40CD:\n")
+        self.assertEqual(backup.ecdh_subkeys(listing),
+                         [backup.EcdhSubkey("BBBB", "F1", "G1", "1.3.6.1.4.1.3029.1.5.1", "40AB", "03010807", "#",
+                                            "-", 7)])
+        self.assertEqual(backup.oid_text("082A8648CE3D030107"), "1.2.840.10045.3.1.7")
+
+
+@unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
+class BashEcdhRepairTests(EcdhRepairTests):
+    """The same, repaired by recoverCard.sh's repair_ecdh_imports."""
+
+    bash = True
+
+    def repair_error(self, bare=(), gnupg_25=None):
+        script = (RECOVERY / "recoverCard.sh").read_text()
+        block = script[script.index("# GnuPG 2.5 ECDH repair"):script.index("load_candidate() {")]
+        if gnupg_25 is not None:
+            block += f"gnupg_25() {{ {'true' if gnupg_25 else 'false'}; }}\n"
+        result = subprocess.run(["bash", "-c", f"EXIT_BACKUP={EXIT_BACKUP}\n" + 'die() { echo "$2" >&2; exit "$1"; }\n'
+                                 + block + 'set -o nounset -o pipefail -o errexit; repair_ecdh_imports "$1" "$2"',
+                                 "bash", str(self.home.path), " ".join(bare)], capture_output=True, text=True)
+        if result.returncode == 0:
+            return None
+        self.assertEqual(result.returncode, EXIT_BACKUP, result.stderr)
+        return result.stderr.strip()
 
 
 LIST_PACKETS = """\

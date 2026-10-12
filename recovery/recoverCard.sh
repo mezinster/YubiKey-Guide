@@ -527,6 +527,139 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   done < <(list_keys "$1")
 }
 
+# GnuPG 2.5 ECDH repair: as Python's backup.repair_ecdh_imports, whose comments explain the GnuPG 2.5 import bug
+# (g10/import.c build_mode1003_sexp stores the KDF parameters as q; fixed on GnuPG master). A no-op on GnuPG 2.4.
+ECDH_ADVICE="use GnuPG 2.4, or add a passphrase to the backup's keys first (gpg --passwd)"
+GNUPG25_DROPPED="GnuPG 2.5 drops additional unprotected ECDH subkeys on import (%s); $ECDH_ADVICE"
+ECDH_CHECK="ykrecover ECDH check"
+
+gnupg_25() { [[ $(gpg --version 2>/dev/null | awk 'NR == 1 {print $NF}') == 2.5.* ]]; }
+
+ecdh_subkeys() { # ecdh_subkeys HOME → "KEYID FPR GRIP CURVE Q KDF FLAG CREATED" per ECDH subkey that is not revoked
+  GNUPGHOME=$1 gpg --batch --with-colons --with-keygrip --with-key-data --fixed-list-mode --list-secret-keys \
+    2>/dev/null | awk -F: '
+      function hexval(s,   i, v) {
+        v = 0
+        for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789ABCDEF", toupper(substr(s, i, 1))) - 1
+        return v }
+      function oid(h,   n, i, b, a, first, out, v) { # dotted form of a curve OID: a length byte, then DER
+        n = hexval(substr(h, 1, 2))
+        if (n < 1 || n != length(h) / 2 - 1) return "-"
+        first = hexval(substr(h, 3, 2)); a = int(first / 40); if (a > 2) a = 2
+        out = a "." (first - 40 * a); v = 0
+        for (i = 5; i < length(h); i += 2) {
+          b = hexval(substr(h, i, 2)); v = v * 128 + b % 128
+          if (b < 128) { out = out "." v; v = 0 } }
+        return out }
+      function flush() {
+        if (on && fpr != "" && grip != "" && q != "" && kdf != "")
+          print kid, fpr, grip, curve, q, kdf, (flag == "" ? "-" : flag), created
+        on = 0 }
+      $1 == "sec" || $1 == "ssb" || $1 == "pub" || $1 == "sub" {
+        flush(); on = (($1 == "ssb" || $1 == "sub") && $4 == "18" && $2 != "r")
+        kid = $5; flag = $15; created = $6 + 0; fpr = grip = q = kdf = ""; curve = "-"; next }
+      on && $1 == "fpr" && fpr == "" { fpr = $10 }
+      on && $1 == "grp" && grip == "" { grip = $10 }
+      on && $1 == "pkd" && $2 == "0" && curve == "-" { curve = oid($4) }
+      on && $1 == "pkd" && $2 == "1" && q == "" { q = $4 }
+      on && $1 == "pkd" && $2 == "2" && kdf == "" { kdf = $4 }
+      END { flush() }'
+}
+
+ecdh_misfiled_as() { # ecdh_misfiled_as FILE CURVE KDF: the file GnuPG 2.5 wrote for such a subkey
+  [[ $2 != - ]] || return 1
+  awk -v curve="$2" -v kdf="$3" '
+    BEGIN { RS = "\001" }
+    { data = (NR > 1 ? data RS : "") $0 }
+    END { gsub(/[ \t\r\n]+/, "", data); data = toupper(data)
+          exit !(index(data, "(CURVE\"" curve "\")") && index(data, "(Q#" toupper(kdf) "#)")) }' "$1" 2>/dev/null
+}
+
+ecdh_refile() { # ecdh_refile HOME FILE GRIP Q KDF: the real q back, under the real keygrip
+  local temp=$1/private-keys-v1.d/$3.tmp
+  (umask 077 && awk -v kdf="$5" -v q="$4" -v out="$temp" '
+      BEGIN { RS = "\001"; ws = "[ \t\r\n]*"; re = "\\(q" ws "#" ws
+              for (i = 1; i <= length(kdf); i++) re = re substr(kdf, i, 1) ws
+              re = re "#" ws "\\)" }
+      { data = (NR > 1 ? data RS : "") $0 }
+      END { if (!match(data, re)) exit 1
+            printf "%s(q #%s#)%s", substr(data, 1, RSTART - 1), q, substr(data, RSTART + RLENGTH) > out }' "$2") &&
+    mv -f -- "$temp" "$1/private-keys-v1.d/$3.key" && rm -f -- "$2"
+}
+
+ecdh_decrypts() { # ecdh_decrypts HOME FPR CREATED: encrypts to the subkey alone (an expired one at the time of
+  # its newest binding signature) and decrypts with it
+  local home=$1 msg=$1/ecdh-check.asc bind when plain
+  bind=$(GNUPGHOME=$home gpg --batch --with-colons --fixed-list-mode --list-sigs 2>/dev/null |
+    awk -F: -v fpr="$2" '
+      $1 == "pub" || $1 == "sub" || $1 == "uid" { cur = ($1 == "sub") ? "next" : ""; next }
+      $1 == "fpr" && cur == "next" { cur = $10; next }
+      $1 == "sig" && cur == fpr && $11 ~ /^18/ && $6 + 0 > n { n = $6 + 0 }
+      END { print n + 0 }')
+  when=$(( (bind > $3 ? bind : $3) + 1 ))
+  if ! printf '%s\n' "$ECDH_CHECK" | GNUPGHOME=$home gpg --batch --trust-model always --armor --yes \
+         --output "$msg" --recipient "$2!" --encrypt 2>/dev/null &&
+     ! printf '%s\n' "$ECDH_CHECK" | GNUPGHOME=$home gpg --batch --faked-system-time "$when!" --trust-model always \
+         --armor --yes --output "$msg" --recipient "$2!" --encrypt 2>/dev/null; then
+    return 1
+  fi
+  plain=$(printf '\n' | GNUPGHOME=$home gpg --batch --pinentry-mode loopback --passphrase-fd 0 --decrypt -- "$msg" \
+            2>/dev/null) || plain=""
+  rm -f -- "$msg"
+  [[ $plain == "$ECDH_CHECK" ]]
+}
+
+repair_ecdh_imports() { # repair_ecdh_imports HOME BARE: BARE are the keyids the backup supplies with no passphrase
+  local home=$1 bare_ids=" $2 " keyid fpr grip curve q kdf flag created path line i j fprs
+  local wanted=() files=() matches=() claim_path=() claim_line=() refiled=() dropped=()
+  while read -r keyid fpr grip curve q kdf flag created; do
+    if [[ $flag == "#" || ($flag == "+" && $bare_ids == *" $keyid "*) ]]; then
+      wanted+=("$keyid $fpr $grip $curve $q $kdf $flag $created")
+    fi
+  done < <(ecdh_subkeys "$home")
+  (( ${#wanted[@]} )) || return 0
+  for path in "$home"/private-keys-v1.d/*.key; do
+    if [[ -f $path ]]; then files+=("$path"); fi
+  done
+  for line in "${wanted[@]}"; do
+    read -r keyid fpr grip curve q kdf flag created <<<"$line"
+    matches=()
+    for path in "${files[@]}"; do
+      if ecdh_misfiled_as "$path" "$curve" "$kdf"; then matches+=("${path##*/}"); fi
+    done
+    if (( ${#matches[@]} > 1 )); then
+      die "$EXIT_BACKUP" "several key files could be subkey $fpr misfiled by GnuPG 2.5: ${matches[*]}"
+    fi
+    if (( ${#matches[@]} )); then claim_path+=("$home/private-keys-v1.d/${matches[0]}"); claim_line+=("$line"); fi
+  done
+  for i in "${!claim_path[@]}"; do # a file two subkeys could own: GnuPG dropped one of them
+    fprs=""
+    for j in "${!claim_path[@]}"; do
+      if [[ ${claim_path[j]} == "${claim_path[i]}" ]]; then read -r _ fpr _ <<<"${claim_line[j]}"; fprs+=" $fpr"; fi
+    done
+    # shellcheck disable=SC2059 # the format is GNUPG25_DROPPED
+    if [[ $fprs == " "*" "* ]]; then die "$EXIT_BACKUP" "$(printf "$GNUPG25_DROPPED" "${fprs# }")"; fi
+  done
+  for i in "${!claim_path[@]}"; do
+    read -r keyid fpr grip curve q kdf flag created <<<"${claim_line[i]}"
+    ecdh_refile "$home" "${claim_path[i]}" "$grip" "$q" "$kdf" ||
+      die "$EXIT_BACKUP" "cannot repair the imported subkey $fpr"
+    refiled+=("$fpr $created")
+  done
+  for line in "${refiled[@]}"; do
+    read -r fpr created <<<"$line"
+    ecdh_decrypts "$home" "$fpr" "$created" ||
+      die "$EXIT_BACKUP" "subkey $fpr does not decrypt after undoing GnuPG 2.5's misfiling of it; $ECDH_ADVICE"
+  done
+  if [[ -n ${2:-} ]]; then
+    while read -r keyid fpr _ _ _ _ flag _; do
+      if [[ $flag == "#" && $bare_ids == *" $keyid "* ]]; then dropped+=("$fpr"); fi
+    done < <(ecdh_subkeys "$home")
+    # shellcheck disable=SC2059 # the format is GNUPG25_DROPPED
+    if (( ${#dropped[@]} )) && gnupg_25; then die "$EXIT_BACKUP" "$(printf "$GNUPG25_DROPPED" "${dropped[*]}")"; fi
+  fi
+}
+
 load_candidate() {
   local i=$1 f n=0 source
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
@@ -542,6 +675,7 @@ load_candidate() {
       GNUPGHOME=$STAGING gpg --batch --import -- "$source" 2>"$WORK/import.err" ||
         die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
     done <<<"${CAND_FILES[i]}"
+    repair_ecdh_imports "$STAGING" "${CAND_BARE[i]}"
   fi
   load_bundle "$STAGING"
 }
