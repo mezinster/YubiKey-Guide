@@ -2,11 +2,12 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, _runtime_base, fake_hardware, fixture_info, read_until,
-                           run_impl, short_tempdir, spawn_impl)
+from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, REAL_GPG, _runtime_base, fake_hardware, fixture_info,
+                           read_until, run_impl, short_tempdir, spawn_impl)
 
 S1, S2 = "11111111", "22222222"
 
@@ -217,6 +218,23 @@ class FakeHardwareTests:
         self.assertEqual(len(files), 2)
         for f in files:
             self.assertEqual(stat.S_IMODE(os.stat(f).st_mode) & 0o077, 0, f.name)
+
+    def test_renew_creates_the_missing_auth_subkey(self):
+        info = fixture_info("noauth")
+        result, out, _, state = self.migrate("noauth", ["--mode", "renew"], f"{PASSPHRASE}\ny\ny\n\nRESET {S1}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sign, enc, auth = self.card_fprs(state, S1)
+        self.assertEqual((sign, enc), (info["FPR_S"], info["FPR_E"]))
+        home = short_tempdir(self, "pub")
+        (public,) = out.glob("public-*.asc")
+        env = {**os.environ, "GNUPGHOME": str(home)}
+        subprocess.run([REAL_GPG, "--batch", "--import", str(public)], env=env, check=True, capture_output=True)
+        colons = subprocess.run([REAL_GPG, "--batch", "--with-colons", "--list-keys", info["KEY_FP"]], env=env,
+                                check=True, capture_output=True, text=True).stdout.splitlines()
+        auth_fprs = [colons[i + 1].split(":")[9] for i, line in enumerate(colons)
+                     if line.startswith("sub:") and "a" in line.split(":")[11]]
+        self.assertEqual(auth_fprs, [auth])
+        self.assertNotIn(auth, (info["FPR_S"], info["FPR_E"]))
 
     def test_rotate_writes_new_subkeys(self):
         info = fixture_info("rsa4096")
