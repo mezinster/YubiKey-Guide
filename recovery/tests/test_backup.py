@@ -1,12 +1,13 @@
 import os
+import re
 import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
-                           repeated_key_folder, short_tempdir)
-from ykrecover import EXIT_BACKUP, RecoveryError, backup
-from ykrecover.gpg import Home
+from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, RECOVERY, REAL_GPG, bare_first_folder, bom_crlf_folder,
+                           fixture_info, import_unprotected, repeated_key_folder, short_tempdir)
+from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
+from ykrecover.gpg import Home, gpg_version
 
 COLONS_TWO_KEYS = """\
 sec:u:255:22:D35238B02045AC9D:1791717022:::u:::cESCA:::+::ed25519:::0:
@@ -123,7 +124,7 @@ class InventoryTests(unittest.TestCase):
             subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", *args], input=stdin, text=True,
                            env=env, check=True, capture_output=True)
 
-        gpg("--import", str(FIXTURES / "unprotected" / "key.asc"))
+        import_unprotected(home)
         gpg("--armor", "--output", str(root / "subs.asc"), "--export-secret-subkeys", info["KEY_FP"])
         gpg("--passphrase-fd", "0", "--passwd", info["KEY_FP"], stdin=PASSPHRASE + "\n")
         gpg("--passphrase-fd", "0", "--armor", "--output", str(root / "main.asc"), "--export-secret-keys",
@@ -477,6 +478,77 @@ class LoadTests(unittest.TestCase):
         bundle = self.load("ed25519", "export")
         self.assertFalse(backup.check_passphrase(self.home, bundle, "wrong"))
         self.assertTrue(backup.check_passphrase(self.home, bundle, PASSPHRASE))
+
+    def decrypts_with_the_encrypt_subkey(self, bundle) -> bool:
+        enc = next(k for k in bundle.subkeys if k.usage == "e")
+        ciphertext = self.home.run(["gpg", "--batch", "--trust-model", "always", "--armor", "--recipient",
+                                    enc.fpr + "!", "--encrypt"], ["recovered"])
+        self.assertEqual(ciphertext.returncode, 0, ciphertext.stderr)
+        plain = osdeps.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--decrypt"],
+                           input=ciphertext.stdout, env=self.home.env())
+        return plain.returncode == 0 and plain.stdout.strip() == "recovered"
+
+    def key_files(self) -> set:
+        return {p.stem for p in (self.home.path / "private-keys-v1.d").glob("*.key")}
+
+    def test_unprotected_ecdh_subkey_loads_as_a_secret(self):
+        # GnuPG 2.5 files an imported ECDH subkey that has no passphrase under a wrong keygrip (its KDF
+        # parameters stand in for q) and lists it as a stub; backup.load must put it back.
+        bundle = self.load("unprotected", "")
+        listing = self.home.run([*backup.LIST_SECRET[:-1], "--with-key-data", backup.LIST_SECRET[-1]]).stdout
+        self.assertEqual([k.secret for k in bundle.subkeys], [True] * 3,
+                         f"gpg {'.'.join(map(str, gpg_version()))} staging listing:\n{listing}\n"
+                         f"key files: {sorted(self.key_files())}")
+        self.assertEqual(self.key_files(), {line.split(":")[9] for line in listing.splitlines()
+                                            if line.startswith("grp:")})
+        self.assertTrue(self.decrypts_with_the_encrypt_subkey(bundle))
+
+    def misfile_the_ecdh_key(self) -> set:
+        """The GnuPG 2.5 state, made on any version: the encrypt subkey's agent file holds the KDF parameters as
+        q and sits under another name. Returns the keygrips gpg lists."""
+        self.load("unprotected", "")
+        listing = self.home.run([*backup.LIST_SECRET[:-1], "--with-key-data", backup.LIST_SECRET[-1]]).stdout
+        ((_, grip, q, kdf, _),) = backup.ecdh_subkeys(listing)
+        keys = self.home.path / "private-keys-v1.d"
+        public_q = re.compile(rb"\(q\s*#" + rb"\s*".join(re.escape(c.encode()) for c in q) + rb"#\)")
+        misfiled, n = public_q.subn(f"(q #{kdf}#)".encode(), (keys / f"{grip}.key").read_bytes(), count=1)
+        self.assertEqual(n, 1)
+        self.home.kill_agents()
+        (keys / f"{grip}.key").unlink()
+        (keys / ("0" * 40 + ".key")).write_bytes(misfiled)
+        self.assertEqual([k.secret for k in backup.list_bundles(self.home)[0].subkeys], [True, False, True])
+        return {line.split(":")[9] for line in listing.splitlines() if line.startswith("grp:")}
+
+    def assert_refiled(self, grips: set):
+        # restored q and file name; decryption proves d
+        self.assertEqual(self.key_files(), grips)
+        bundle = backup.list_bundles(self.home)[0]
+        self.assertTrue(all(k.secret for k in bundle.subkeys))
+        self.assertTrue(self.decrypts_with_the_encrypt_subkey(bundle))
+
+    def test_misfiled_ecdh_key_is_refiled(self):
+        grips = self.misfile_the_ecdh_key()
+        backup.repair_ecdh_imports(self.home)
+        self.assert_refiled(grips)
+
+    @unittest.skipUnless(LINUX, "the bash implementation is Linux-only")
+    def test_bash_refiles_a_misfiled_ecdh_key(self):
+        grips = self.misfile_the_ecdh_key()
+        script = (RECOVERY / "recoverCard.sh").read_text()
+        function = script[script.index("repair_ecdh_imports() {"):]
+        function = function[:function.index("\n}\n") + 3]
+        result = subprocess.run(["bash", "-c", 'die() { echo "$2" >&2; exit "$1"; }\n' + function
+                                 + 'set -o nounset -o pipefail -o errexit; repair_ecdh_imports "$1" ""',
+                                 "bash", str(self.home.path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_refiled(grips)
+
+    def test_ecdh_subkeys_parse(self):
+        listing = ("sec:-:255:22:AAAA:1:::-:::cC:::+::ed25519:::0:\npkd:0:80:092B:\n"
+                   "ssb:-:255:18:BBBB:1::::::e:::#::cv25519::\nfpr:::::::::F1:\ngrp:::::::::G1:\n"
+                   "pkd:0:88:0A2B:\npkd:1:263:40AB:\npkd:2:32:03010807:\n"
+                   "ssb:-:255:22:CCCC:1::::::a:::+::ed25519::\ngrp:::::::::G2:\npkd:1:263:40CD:\n")
+        self.assertEqual(backup.ecdh_subkeys(listing), [("BBBB", "G1", "40AB", "03010807", "#")])
 
     def test_source_is_not_modified(self):
         source = FIXTURES / "ed25519" / "gnupghome"

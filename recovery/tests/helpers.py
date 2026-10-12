@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 
 from ykrecover import RecoveryError, osdeps
+from ykrecover.backup import repair_ecdh_imports
+from ykrecover.gpg import Home
 
 RECOVERY = Path(__file__).resolve().parents[1]
 FIXTURES = RECOVERY / "tests" / "fixtures"
@@ -25,6 +27,13 @@ def fixture_info(profile: str) -> dict:
     return dict(line.split("=", 1) for line in text.split())
 
 
+def import_unprotected(home: Path) -> None:
+    """Imports the unprotected fixture key into home as the tool does (GnuPG 2.5 needs the ECDH repair)."""
+    subprocess.run([REAL_GPG, "--batch", "--import", str(FIXTURES / "unprotected" / "key.asc")],
+                   env={**os.environ, "GNUPGHOME": str(home)}, check=True, capture_output=True)
+    repair_ecdh_imports(Home(home))
+
+
 def bare_and_protected_copies(test) -> tuple:
     """The unprotected fixture key exported (binary) twice: with no passphrase, then protected by PASSPHRASE."""
     info, home = fixture_info("unprotected"), short_tempdir(test, "rk")
@@ -34,7 +43,7 @@ def bare_and_protected_copies(test) -> tuple:
         return subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", *args], input=stdin.encode(),
                               env=env, check=True, capture_output=True).stdout
 
-    gpg("--import", str(FIXTURES / "unprotected" / "key.asc"))
+    import_unprotected(home)
     bare = gpg("--export-secret-keys", info["KEY_FP"])
     gpg("--passphrase-fd", "0", "--passwd", info["KEY_FP"], stdin=PASSPHRASE + "\n")
     protected = gpg("--passphrase-fd", "0", "--export-secret-keys", info["KEY_FP"], stdin=PASSPHRASE + "\n")

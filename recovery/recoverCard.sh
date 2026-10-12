@@ -527,6 +527,43 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   done < <(list_keys "$1")
 }
 
+repair_ecdh_imports() { # repair_ecdh_imports HOME BARE: as Python's backup.repair_ecdh_imports
+  # GnuPG 2.5 imports an ECDH secret subkey that has no passphrase with its KDF parameters in place of its public
+  # point q, so gpg-agent files it under a wrong keygrip and gpg lists the subkey as a stub. d is intact: put the
+  # real q back and file the key under its real keygrip. Where the backup supplies the subkey with no passphrase
+  # (BARE keyids) the repaired copy also replaces a later protected copy, as GnuPG 2.4 keeps the first copy.
+  local home=$1 bare_ids=" $2 " keyid flag grip q kdf path temp
+  while read -r keyid flag grip q kdf; do
+    if [[ $flag != "#" && ! ($flag == "+" && $bare_ids == *" $keyid "*) ]]; then continue; fi
+    temp=$home/private-keys-v1.d/$grip.tmp
+    for path in "$home"/private-keys-v1.d/*.key; do
+      [[ -f $path ]] || continue
+      if (umask 077 && awk -v kdf="$kdf" -v q="$q" -v out="$temp" '
+          BEGIN { RS = "\001"; ws = "[ \t\r\n]*"; re = "\\(q" ws "#" ws
+                  for (i = 1; i <= length(kdf); i++) re = re substr(kdf, i, 1) ws
+                  re = re "#" ws "\\)" }
+          { data = (NR > 1 ? data RS : "") $0 }
+          END { if (!match(data, re)) exit 1
+                printf "%s(q #%s#)%s", substr(data, 1, RSTART - 1), q, substr(data, RSTART + RLENGTH) > out }' \
+          "$path" 2>/dev/null); then
+        if ! { mv -f -- "$temp" "$home/private-keys-v1.d/$grip.key" && rm -f -- "$path"; }; then
+          die "$EXIT_BACKUP" "cannot repair the imported key $grip"
+        fi
+        break
+      fi
+    done
+  done < <(GNUPGHOME=$home gpg --batch --with-colons --with-keygrip --with-key-data --fixed-list-mode \
+             --list-secret-keys 2>/dev/null |
+           awk -F: '
+             function flush() { if (on && grip != "" && q != "" && kdf != "") print kid, flag, grip, q, kdf; on = 0 }
+             $1 == "sec" || $1 == "ssb" { flush(); on = ($1 == "ssb" && $4 == "18"); kid = $5; flag = $15
+                                          grip = q = kdf = ""; next }
+             on && $1 == "grp" && grip == "" { grip = $10 }
+             on && $1 == "pkd" && $2 == "1" && q == "" { q = $4 }
+             on && $1 == "pkd" && $2 == "2" && kdf == "" { kdf = $4 }
+             END { flush() }')
+}
+
 load_candidate() {
   local i=$1 f n=0 source
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
@@ -542,6 +579,7 @@ load_candidate() {
       GNUPGHOME=$STAGING gpg --batch --import -- "$source" 2>"$WORK/import.err" ||
         die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
     done <<<"${CAND_FILES[i]}"
+    repair_ecdh_imports "$STAGING" "${CAND_BARE[i]}"
   fi
   load_bundle "$STAGING"
 }

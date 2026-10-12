@@ -363,6 +363,55 @@ def list_bundles(home: Home) -> list:
     return parse_secret_keys(home.run(LIST_SECRET).stdout)
 
 
+def ecdh_subkeys(colons: str) -> list:
+    """(keyid, keygrip, q, kdf, secret flag) of the ECDH subkeys in a --with-key-data listing."""
+    found, sub = [], None
+    for line in colons.splitlines():
+        f = line.split(":")
+        f += [""] * (20 - len(f))
+        if f[0] in ("sec", "ssb"):
+            sub = {"keyid": f[4], "flag": f[14], "grip": "", "pkd": {}} if f[0] == "ssb" and f[3] == "18" else None
+            if sub is not None:
+                found.append(sub)
+        elif sub is not None and f[0] == "grp" and not sub["grip"]:
+            sub["grip"] = f[9]
+        elif sub is not None and f[0] == "pkd":
+            sub["pkd"].setdefault(f[1], f[3])
+    return [(s["keyid"], s["grip"], s["pkd"]["1"], s["pkd"]["2"], s["flag"]) for s in found
+            if s["grip"] and s["pkd"].get("1") and s["pkd"].get("2")]
+
+
+def repair_ecdh_imports(home: Home, bare=()) -> None:
+    """GnuPG 2.5 imports an ECDH secret subkey that has no passphrase with its KDF parameters in place of its
+    public point q (g10/import.c build_mode1003_sexp), so gpg-agent files it under a wrong keygrip and gpg
+    lists the subkey as a stub. d is intact: put the real q back and file the key under its real keygrip.
+
+    The misfiled copy also no longer blocks a later protected copy of the same subkey, so where the backup
+    supplies the subkey with no passphrase (bare keyids, as the inventory chose) the repaired copy replaces it,
+    as GnuPG 2.4 keeps the first copy. GnuPG 2.4 and older never misfile a key, so nothing changes there."""
+    listing = home.run([*LIST_SECRET[:-1], "--with-key-data", LIST_SECRET[-1]])
+    keys = home.path / "private-keys-v1.d"
+    for keyid, grip, q, kdf, flag in ecdh_subkeys(listing.stdout):
+        if flag != "#" and not (flag == "+" and keyid in bare):
+            continue
+        target = keys / f"{grip}.key"
+        bad_q = re.compile(rb"\(q\s*#\s*" + rb"\s*".join(re.escape(c.encode()) for c in kdf) + rb"\s*#\s*\)",
+                           re.IGNORECASE)
+        try:
+            for path in sorted(keys.glob("*.key")):
+                fixed, n = bad_q.subn(b"(q #" + q.encode() + b"#)", path.read_bytes(), count=1)
+                if n:
+                    temp = keys / f"{grip}.tmp"
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+                    with os.fdopen(os.open(temp, flags, 0o600), "wb") as f:
+                        f.write(fixed)
+                    os.replace(temp, target)
+                    path.unlink()
+                    break
+        except OSError as err:
+            raise RecoveryError(f"cannot repair the imported key {grip}: {err}", EXIT_BACKUP) from err
+
+
 def load(candidate: Candidate, staging: Home) -> list:
     if candidate.kind == "gnupghome":
         staging.kill_agents()
@@ -386,6 +435,7 @@ def load(candidate: Candidate, staging: Home) -> list:
             result = staging.run(["gpg", "--batch", "--import", "--", str(source)])
             if result.returncode != 0:
                 raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+        repair_ecdh_imports(staging, candidate.bare)
     bundles = list_bundles(staging)
     if not bundles:
         raise RecoveryError(f"no secret keys in {candidate.path}", EXIT_BACKUP)
