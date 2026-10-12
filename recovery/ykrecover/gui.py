@@ -31,6 +31,8 @@ MODE_HELP = ("clone: write the backed-up subkeys as they are.\n"
 WINDOW_EMS = (84, 32)  # width in "0" widths, height in line heights
 # Core errors name CLI flags; the wizard names its fields instead. Checked in order.
 GUI_WORDS = (
+    ("use --mode renew or --mode rotate", "choose Renew or Rotate on the Mode page"),
+    ("narrow --backup or pass --source or --key", "choose a narrower folder"),
     ("cannot create the --out folder", "cannot create the output folder"),
     ("--algo and --revoke-old need --mode rotate", "a new algorithm and revoking old subkeys need mode rotate"),
     ("--out", "the output folder"), ("--workdir", "the work folder"), ("--mode ", "mode "),
@@ -328,6 +330,9 @@ class App:
         self.ui = TkUI(self)
         self.session = None
         self.candidates = []
+        self.inventory = None
+        self.report_box = None
+        self.pass_entry = None
         self.failures = 0
         self.pins = []  # kept PINs not yet shown
         self.pins_shown = False
@@ -524,8 +529,11 @@ class App:
         frame.columnconfigure(0, weight=1)
         self.cand_error = self.wrapped_label()
         self.cand_error.pack(anchor="w", fill="x", pady=(0, 8))
+        self.report_box = self.readonly_text("", 4)
+        self.cand_list.bind("<<ListboxSelect>>", lambda event: self.update_pass_state())
+        self.pass_entry = self.row("Certify key passphrase",
+                                   lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
         self.refresh_candidates()
-        self.row("Certify key passphrase", lambda f: ttk.Entry(f, textvariable=self.v["passphrase"], show="*"))
         frame = ttk.Frame(self.body)
         frame.pack(fill="x", pady=(8, 0))
         ttk.Label(frame, text="Work folder (optional)", width=26).pack(side="left")
@@ -564,37 +572,69 @@ class App:
             self.v["folder"].set(folder)
             self.refresh_candidates()
 
+    def set_report(self, text):
+        set_text(self.report_box, text)
+
     def refresh_candidates(self):
         self.cand_list.delete(0, "end")
         self.cand_error.configure(text="")
         self.candidates = []
+        self.inventory = None
+        self.set_report("")
+        self.update_pass_state()
         folder = self.v["folder"].get()
         if not folder:
             return
         try:
-            self.candidates = backup_mod.detect(Path(folder))
+            inv = backup_mod.inventory(Path(folder))
         except RecoveryError as err:
             self.cand_error.configure(text=gui_wording(err))
             return
+        self.inventory = inv
+        self.candidates = list(inv.candidates)
+        self.set_report(backup_mod.report(inv))
         for c in self.candidates:
-            self.cand_list.insert("end", f"{c.kind}: {c.path}")
+            self.cand_list.insert("end", f"{c.kind}: {c.path}" + (f"  key {c.key_id}" if c.key_id else "")
+                                  + ("  (no passphrase)" if c.unprotected else ""))
         if len(self.candidates) == 1:
             self.cand_list.selection_set(0)
+            self.update_pass_state()
 
-    def leave_backup(self):
+    def selected_candidate(self):
         chosen = self.cand_list.curselection()
         if not chosen or chosen[0] >= len(self.candidates):
+            return None
+        return self.candidates[chosen[0]]
+
+    def update_pass_state(self):
+        """No passphrase to ask for a backup whose keys have none."""
+        if self.pass_entry is None or not self.pass_entry.winfo_exists():
+            return
+        candidate = self.selected_candidate()
+        if candidate is not None and candidate.unprotected:
+            self.v["passphrase"].set("")
+            self.pass_entry.state(["disabled"])
+        else:
+            self.pass_entry.state(["!disabled"])
+
+    def leave_backup(self):
+        candidate = self.selected_candidate()
+        if candidate is None:
             self.alert("Select a detected backup.")
             return False
-        candidate = self.candidates[chosen[0]]
         text = self.v["workdir"].get().strip()
         workdir = Path(text) if text else None
+        # A key found in files may span folders, so it loads from the chosen folder by its ID; a GnuPG home
+        # loads from its own path.
+        opts = Options(backup=candidate.path if candidate.kind == "gnupghome" else Path(self.v["folder"].get()),
+                       source=candidate.kind, key=candidate.key_id or "", workdir=workdir)
         s = self.session
-        if (s and s.passphrase and s.bundle and (s.opts.backup, s.opts.source) == (candidate.path, candidate.kind)
-                and s.opts.workdir == workdir):
+        # With no key given, the session's key is the one chosen from several when it loaded.
+        if (s and s.bundle and (s.opts.backup, s.opts.source, s.opts.key, s.opts.workdir)
+                == (opts.backup, opts.source, opts.key or s.opts.key, opts.workdir) and (s.passphrase or s.unprotected)):
             self.v["passphrase"].set("")
             return True  # already loaded and unlocked (the user went Back): keep it
-        new = Session(Options(backup=candidate.path, source=candidate.kind, workdir=workdir), self.ui)
+        new = Session(opts, self.ui)
         try:
             new.validate_workdir(apply=False)
         except RecoveryError as err:
@@ -620,6 +660,11 @@ class App:
             except RecoveryError as err:
                 self.alert(gui_wording(err))
                 return False
+        if self.session.unprotected:
+            if not self.session.unlock(""):
+                self.alert("The backup's secret keys could not be used.")
+                return False
+            return True
         if not self.session.unlock(self.v["passphrase"].get()):
             self.failures += 1
             if self.failures >= 3:
