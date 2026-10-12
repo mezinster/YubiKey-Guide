@@ -26,6 +26,17 @@ jobs:
       - name: shellcheck
         run: shellcheck --severity=error scripts/*.sh piv/*.sh recovery/recoverCard.sh recovery/tests/fixtures/make_fixtures.sh
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: docs site (unit tests and strict build)
+        run: |
+          python3 -m unittest discover -s site -v
+          pip install -r site/requirements.txt
+          python3 site/build.py
+          mkdocs build --strict -f site/mkdocs.yml
+
   recovery:
     runs-on: ubuntu-latest
     steps:
