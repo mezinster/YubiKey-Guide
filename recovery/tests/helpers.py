@@ -25,6 +25,23 @@ def fixture_info(profile: str) -> dict:
     return dict(line.split("=", 1) for line in text.split())
 
 
+def repeated_key_folder(test) -> Path:
+    """A folder with one file holding the unprotected fixture key twice: protected first, then with no passphrase."""
+    info, home, root = fixture_info("unprotected"), short_tempdir(test, "rk"), short_tempdir(test, "rep")
+    env = {**os.environ, "GNUPGHOME": str(home)}
+
+    def gpg(*args, stdin=""):
+        return subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", *args], input=stdin.encode(),
+                              env=env, check=True, capture_output=True).stdout
+
+    gpg("--import", str(FIXTURES / "unprotected" / "key.asc"))
+    bare = gpg("--export-secret-keys", info["KEY_FP"])
+    gpg("--passphrase-fd", "0", "--passwd", info["KEY_FP"], stdin=PASSPHRASE + "\n")
+    protected = gpg("--passphrase-fd", "0", "--export-secret-keys", info["KEY_FP"], stdin=PASSPHRASE + "\n")
+    (root / "both.gpg").write_bytes(protected + bare)
+    return root
+
+
 def _runtime_base() -> Path:
     return osdeps.default_work_base()
 

@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import FIXTURES, PASSPHRASE, REAL_GPG, fixture_info, short_tempdir
+from tests.helpers import FIXTURES, PASSPHRASE, REAL_GPG, fixture_info, repeated_key_folder, short_tempdir
 from ykrecover import EXIT_BACKUP, RecoveryError, backup
 from ykrecover.gpg import Home
 
@@ -131,6 +131,11 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual((c.kind, sorted(f.name for f in c.files)), ("export", ["main.asc", "subs.asc"]))
         self.assertFalse(c.unprotected)
         self.assertEqual(sorted(c.bare), sorted(info[k][-16:] for k in ("FPR_S", "FPR_E", "FPR_A")))
+
+    def test_repeated_key_keeps_the_strongest_secret(self):
+        # one file holding the same key protected and then with no passphrase: the passphrase is still needed
+        (c,) = backup.detect(repeated_key_folder(self))
+        self.assertEqual(([f.name for f in c.files], c.unprotected, c.bare), (["both.gpg"], False, ()))
 
     def test_gnupg1_home(self):
         (c,) = backup.detect(FIXTURES / "gnupg1")

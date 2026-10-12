@@ -198,8 +198,8 @@ def _select(key: str, rows: list) -> tuple:
         better = [p for p in parts if RANK.get(p.state, 0) > supplied.get(p.keyid, 0)]
         if better:
             used.append(path)
-            for p in better:
-                supplied[p.keyid] = RANK[p.state]
+            for p in better:  # a file may repeat a key: the strongest secret wins
+                supplied[p.keyid] = max(supplied.get(p.keyid, 0), RANK[p.state])
     return used, supplied
 
 
