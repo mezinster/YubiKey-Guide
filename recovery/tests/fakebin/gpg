@@ -70,7 +70,8 @@ def main():
         if not keys.exists():
             shutil.copytree(os.environ["GNUPGHOME"], keys, ignore=shutil.ignore_patterns("S.*", "*.lock"))
         return 0
-    if "--detach-sign" in ARGS or "--decrypt" in ARGS:
+    # the GnuPG 2.5 ECDH repair proves a refiled subkey by decrypting in the staging home: not a card operation
+    if "--detach-sign" in ARGS or ("--decrypt" in ARGS and not ARGS[-1].endswith("ecdh-check.asc")):
         kind = "sign" if "--detach-sign" in ARGS else "decrypt"
         sys.stdin.read()
         log(kind)

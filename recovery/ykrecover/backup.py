@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import EXIT_BACKUP, RecoveryError
-from .gpg import Home
+from .gpg import Home, gpg_version
 
 KINDS = ("export", "subkeys-only", "gnupghome")
 PUBRINGS = ("pubring.kbx", "pubring.gpg")
@@ -363,53 +363,165 @@ def list_bundles(home: Home) -> list:
     return parse_secret_keys(home.run(LIST_SECRET).stdout)
 
 
+# GnuPG 2.5 imports an ECDH secret subkey that has no passphrase through build_mode1003_sexp (g10/import.c), which
+# passes pkey[2], the KDF parameters, where the public point q (pkey[1]) belongs; GnuPG master passes pkey[1].
+# gpg-agent then files the key under the keygrip of that wrong q: one fixed name per curve and KDF, so a second
+# such subkey with the same curve and KDF finds the name taken and is dropped ("secret key already exists").
+# gpg lists a misfiled or dropped subkey as having no secret. d is intact, so the repair below puts the real q
+# back and files the key under its real keygrip, then proves the pair with a decryption. GnuPG 2.4 and a fixed
+# GnuPG never misfile a key: there the repair finds nothing to do.
+GNUPG25_DROPPED = ("GnuPG 2.5 drops additional unprotected ECDH subkeys on import ({}); use GnuPG 2.4, or add a "
+                   "passphrase to the backup's keys first (gpg --passwd)")
+CHECK_TEXT = "ykrecover ECDH check"
+
+
+@dataclass(frozen=True)
+class EcdhSubkey:
+    keyid: str
+    fpr: str
+    grip: str
+    curve: str  # dotted OID, as build_mode1003_sexp writes it
+    q: str
+    kdf: str
+    flag: str  # colon field 15: + secret, # none
+    validity: str
+    created: int
+
+
+def oid_text(hexstr: str) -> str:
+    """Dotted form of a --with-key-data curve OID (a length byte, then the DER content)."""
+    try:
+        raw = bytes.fromhex(hexstr)
+    except ValueError:
+        return ""
+    if not raw or raw[0] != len(raw) - 1 or len(raw) < 2:
+        return ""
+    arcs, value = [min(raw[1] // 40, 2), raw[1] - 40 * min(raw[1] // 40, 2)], 0
+    for byte in raw[2:]:
+        value = value << 7 | byte & 0x7F
+        if not byte & 0x80:
+            arcs.append(value)
+            value = 0
+    return ".".join(map(str, arcs))
+
+
 def ecdh_subkeys(colons: str) -> list:
-    """(keyid, keygrip, q, kdf, secret flag) of the ECDH subkeys in a --with-key-data listing."""
+    """The ECDH subkeys in a --with-keygrip --with-key-data listing."""
     found, sub = [], None
     for line in colons.splitlines():
         f = line.split(":")
         f += [""] * (20 - len(f))
-        if f[0] in ("sec", "ssb"):
-            sub = {"keyid": f[4], "flag": f[14], "grip": "", "pkd": {}} if f[0] == "ssb" and f[3] == "18" else None
-            if sub is not None:
+        if f[0] in ("sec", "ssb", "pub", "sub"):
+            sub = None
+            if f[0] in ("ssb", "sub") and f[3] == "18":
+                sub = {"keyid": f[4], "flag": f[14], "validity": f[1], "created": int(f[5] or 0), "fpr": "",
+                       "grip": "", "pkd": {}}
                 found.append(sub)
+        elif sub is not None and f[0] == "fpr" and not sub["fpr"]:
+            sub["fpr"] = f[9]
         elif sub is not None and f[0] == "grp" and not sub["grip"]:
             sub["grip"] = f[9]
         elif sub is not None and f[0] == "pkd":
             sub["pkd"].setdefault(f[1], f[3])
-    return [(s["keyid"], s["grip"], s["pkd"]["1"], s["pkd"]["2"], s["flag"]) for s in found
-            if s["grip"] and s["pkd"].get("1") and s["pkd"].get("2")]
+    return [EcdhSubkey(s["keyid"], s["fpr"], s["grip"], oid_text(s["pkd"].get("0", "")), s["pkd"].get("1", ""),
+                       s["pkd"].get("2", ""), s["flag"], s["validity"], s["created"])
+            for s in found if s["fpr"] and s["grip"] and s["pkd"].get("1") and s["pkd"].get("2")]
+
+
+def _misfiled_as(data: bytes, sub: EcdhSubkey) -> bool:
+    """A key file that build_mode1003_sexp wrote for this subkey: its curve, and its KDF parameters as q."""
+    flat = re.sub(rb"\s+", b"", data)
+    return (sub.curve != "" and f'(curve"{sub.curve}")'.encode() in flat
+            and re.search(rb"\(q#" + re.escape(sub.kdf.encode()) + rb"#\)", flat, re.IGNORECASE) is not None)
+
+
+def _bindings(home: Home) -> dict:
+    """Newest subkey binding signature time by subkey fingerprint."""
+    newest, current = {}, ""
+    for line in home.run(["gpg", "--batch", "--with-colons", "--fixed-list-mode", "--list-sigs"]).stdout.splitlines():
+        f = line.split(":")
+        f += [""] * (20 - len(f))
+        if f[0] in ("pub", "sub", "uid"):
+            current = "" if f[0] != "sub" else "next"
+        elif f[0] == "fpr" and current == "next":
+            current = f[9]
+        elif f[0] == "sig" and current and current != "next" and f[10].startswith("18"):
+            newest[current] = max(newest.get(current, 0), int(f[5] or 0))
+    return newest
+
+
+def decrypts(home: Home, sub: EcdhSubkey, bindings: dict) -> bool:
+    """Encrypts to the subkey alone and decrypts with it. An expired subkey is encrypted to at the time of its
+    newest binding signature."""
+    message = home.path / "ecdh-check.asc"
+    for when in (None, max(sub.created, bindings.get(sub.fpr, 0)) + 1):
+        faked = ["--faked-system-time", f"{when}!"] if when else []
+        made = home.run(["gpg", "--batch", *faked, "--trust-model", "always", "--armor", "--yes", "--output",
+                         str(message), "--recipient", sub.fpr + "!", "--encrypt"], [CHECK_TEXT])
+        if made.returncode == 0:
+            break
+    else:
+        return False
+    try:
+        plain = home.run(["gpg", "--batch", "--pinentry-mode", "loopback", "--passphrase-fd", "0", "--decrypt",
+                          "--", str(message)], [""])
+    finally:
+        message.unlink(missing_ok=True)
+    return plain.returncode == 0 and plain.stdout == CHECK_TEXT + "\n"
 
 
 def repair_ecdh_imports(home: Home, bare=()) -> None:
-    """GnuPG 2.5 imports an ECDH secret subkey that has no passphrase with its KDF parameters in place of its
-    public point q (g10/import.c build_mode1003_sexp), so gpg-agent files it under a wrong keygrip and gpg
-    lists the subkey as a stub. d is intact: put the real q back and file the key under its real keygrip.
+    """Undoes GnuPG 2.5's misfiling of imported ECDH subkeys that have no passphrase (see GNUPG25_DROPPED).
 
-    The misfiled copy also no longer blocks a later protected copy of the same subkey, so where the backup
-    supplies the subkey with no passphrase (bare keyids, as the inventory chose) the repaired copy replaces it,
-    as GnuPG 2.4 keeps the first copy. GnuPG 2.4 and older never misfile a key, so nothing changes there."""
-    listing = home.run([*LIST_SECRET[:-1], "--with-key-data", LIST_SECRET[-1]])
+    Repaired: subkeys gpg lists with no secret, and those the backup supplies with no passphrase (bare keyids,
+    as the inventory chose; the misfiled copy no longer blocked a later protected copy, and GnuPG 2.4 keeps the
+    first). A misfiled file is claimed only by the one subkey of its curve and KDF that needs it; two claimants
+    mean GnuPG dropped one of them. Revoked subkeys never go to a card and are left alone."""
+    def ecdh():
+        listing = home.run([*LIST_SECRET[:-1], "--with-key-data", LIST_SECRET[-1]]).stdout
+        return [s for s in ecdh_subkeys(listing) if s.validity != "r"]
+
+    wanted = [s for s in ecdh() if s.flag == "#" or (s.flag == "+" and s.keyid in bare)]
     keys = home.path / "private-keys-v1.d"
-    for keyid, grip, q, kdf, flag in ecdh_subkeys(listing.stdout):
-        if flag != "#" and not (flag == "+" and keyid in bare):
-            continue
-        target = keys / f"{grip}.key"
-        bad_q = re.compile(rb"\(q\s*#\s*" + rb"\s*".join(re.escape(c.encode()) for c in kdf) + rb"\s*#\s*\)",
+    try:
+        files = {p: p.read_bytes() for p in sorted(keys.glob("*.key"))} if wanted else {}
+    except OSError as err:
+        raise RecoveryError(f"cannot read the imported keys: {err}", EXIT_BACKUP) from err
+    claims = {}
+    for sub in wanted:
+        matches = [p for p, data in files.items() if _misfiled_as(data, sub)]
+        if len(matches) > 1:
+            raise RecoveryError(f"several key files could be subkey {sub.fpr} misfiled by GnuPG 2.5: "
+                                f"{' '.join(p.name for p in matches)}", EXIT_BACKUP)
+        if matches:
+            claims.setdefault(matches[0], []).append(sub)
+    refiled = []
+    for path, subs in claims.items():
+        if len(subs) > 1:
+            raise RecoveryError(GNUPG25_DROPPED.format(" ".join(s.fpr for s in subs)), EXIT_BACKUP)
+        sub = subs[0]
+        bad_q = re.compile(rb"\(q\s*#\s*" + rb"\s*".join(re.escape(c.encode()) for c in sub.kdf) + rb"\s*#\s*\)",
                            re.IGNORECASE)
         try:
-            for path in sorted(keys.glob("*.key")):
-                fixed, n = bad_q.subn(b"(q #" + q.encode() + b"#)", path.read_bytes(), count=1)
-                if n:
-                    temp = keys / f"{grip}.tmp"
-                    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
-                    with os.fdopen(os.open(temp, flags, 0o600), "wb") as f:
-                        f.write(fixed)
-                    os.replace(temp, target)
-                    path.unlink()
-                    break
+            temp = keys / f"{sub.grip}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+            with os.fdopen(os.open(temp, flags, 0o600), "wb") as f:
+                f.write(bad_q.sub(b"(q #" + sub.q.encode() + b"#)", files[path], count=1))
+            os.replace(temp, keys / f"{sub.grip}.key")
+            path.unlink()
         except OSError as err:
-            raise RecoveryError(f"cannot repair the imported key {grip}: {err}", EXIT_BACKUP) from err
+            raise RecoveryError(f"cannot repair the imported subkey {sub.fpr}: {err}", EXIT_BACKUP) from err
+        refiled.append(sub)
+    bindings = _bindings(home) if refiled else {}
+    for sub in refiled:
+        if not decrypts(home, sub, bindings):
+            raise RecoveryError(f"subkey {sub.fpr} does not decrypt after undoing GnuPG 2.5's misfiling of it; "
+                                "use GnuPG 2.4, or add a passphrase to the backup's keys first (gpg --passwd)",
+                                EXIT_BACKUP)
+    if bare and wanted:
+        dropped = [s.fpr for s in ecdh() if s.flag == "#" and s.keyid in bare]
+        if dropped and gpg_version() == (2, 5):
+            raise RecoveryError(GNUPG25_DROPPED.format(" ".join(dropped)), EXIT_BACKUP)
 
 
 def load(candidate: Candidate, staging: Home) -> list:
