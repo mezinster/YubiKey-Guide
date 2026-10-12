@@ -2,7 +2,7 @@ import os
 import subprocess
 import unittest
 
-from tests.helpers import FIXTURES, REAL_GPG, fixture_info, short_tempdir
+from tests.helpers import FIXTURES, LINUX, REAL_GPG, fixture_info, short_tempdir
 
 
 class FixtureTests(unittest.TestCase):
@@ -20,6 +20,16 @@ class FixtureTests(unittest.TestCase):
                 self.assertTrue((root / "gnupghome" / "pubring.kbx").is_file())
                 self.assertFalse(list((root / "subkeys-only").glob("*Certify*")))
 
+
+    @unittest.skipUnless(LINUX, "the fixture script is bash")
+    def test_make_fixtures_without_profiles_prints_usage(self):
+        result = subprocess.run(["bash", str(FIXTURES / "make_fixtures.sh")], capture_output=True, text=True,
+                                check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage: make_fixtures.sh PROFILE...", result.stderr)
+        self.assertIn("profiles: ed25519 rsa4096 expired flexible noauth split unprotected mixed gnupg1 multikey",
+                      result.stderr)
 
 class NewFixtureShapeTests(unittest.TestCase):
     def packets(self, path):

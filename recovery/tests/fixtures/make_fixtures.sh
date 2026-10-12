@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates the throwaway test keys in this folder. Outputs are committed.
-# Rerun only for the profiles you need, e.g. `./make_fixtures.sh flexible`;
+# Usage: ./make_fixtures.sh PROFILE... (e.g. `./make_fixtures.sh flexible`; no arguments lists the profiles);
 # rebuilding ed25519, rsa4096 or expired changes the golden plans. Passphrase: test-certify-pass
 
 set -o errtrace -o nounset -o pipefail -o errexit
@@ -215,8 +215,9 @@ build() {
   esac
 }
 
-# Usage: make_fixtures.sh [PROFILE...]; without arguments every profile is rebuilt (this changes the goldens).
-if (($# == 0)); then
-  set -- ed25519 rsa4096 expired flexible noauth split unprotected mixed gnupg1 multikey
+PROFILES="ed25519 rsa4096 expired flexible noauth split unprotected mixed gnupg1 multikey"
+if (($# == 0)); then # rebuilding everything would change the goldens: name the profiles you need
+  printf 'usage: %s PROFILE...\nprofiles: %s\n' "${0##*/}" "$PROFILES" >&2
+  exit 2
 fi
 for profile in "$@"; do build "$profile"; done
