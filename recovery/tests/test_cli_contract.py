@@ -164,10 +164,6 @@ class PythonContractTests(ContractTests, unittest.TestCase):
 class BashContractTests(ContractTests, unittest.TestCase):
     IMPL = "bash"
 
-    @unittest.expectedFailure  # bash still prints the old message; Task 8 removes this marker
-    def test_ambiguous_backup_needs_source(self):
-        super().test_ambiguous_backup_needs_source()
-
 
 if __name__ == "__main__":
     unittest.main()

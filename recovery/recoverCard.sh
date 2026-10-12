@@ -20,7 +20,8 @@ SOURCE="" KEY="" WORKDIR="" DRY_RUN=0 YES=0
 RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS=""
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
 KEY_FP="" KEY_ID="" HAS_SECRET=0
-CAND_KIND=() CAND_PATH=() CAND_FILES=()
+CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
+KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0
 UIDS=() SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
 declare -A TARGET=() TOKENS=()
 
@@ -231,53 +232,242 @@ trap 'exit "$EXIT_INTERRUPT"' INT TERM HUP
 
 # --- backup detection and loading (sources are only read)
 
-add_candidate() { # add_candidate KIND DIR FILE...
+add_candidate() { # add_candidate KIND DIR KEY UNPROT BARE FILE...
   CAND_KIND+=("$1")
   CAND_PATH+=("$2")
-  shift 2
+  CAND_KEY+=("$3")
+  CAND_UNPROT+=("$4")
+  CAND_BARE+=("$5")
+  shift 5
   local IFS=$'\n'
   CAND_FILES+=("$*")
 }
 
-detect_dir() {
-  local dir=$1 f files=() certify=() subkeys=()
-  if [[ -d $dir/private-keys-v1.d ]] && { [[ -f $dir/pubring.kbx ]] || [[ -f $dir/pubring.gpg ]]; }; then
+looks_like_key_file() { # looks_like_key_file PATH: an armored key block or a binary key packet, at most 1 MiB
+  local f=$1 head byte tag
+  [[ -f $f && -r $f && ! -L $f ]] || return 1
+  (( $(stat -c %s -- "$f") <= 1048576 )) || return 1
+  head=$(head -c 64 -- "$f" | tr '\000' '\001')
+  head=${head#$'\xef\xbb\xbf'}
+  head=${head#"${head%%[![:space:]]*}"}
+  if [[ $head == '-----BEGIN PGP PRIVATE KEY BLOCK-----'* || $head == '-----BEGIN PGP PUBLIC KEY BLOCK-----'* ]]; then
+    return 0
+  fi
+  byte=$(od -An -tu1 -N1 -- "$f" | tr -d ' \n')
+  [[ -n $byte ]] && (( byte & 0x80 )) || return 1
+  if (( byte & 0x40 )); then tag=$((byte & 0x3F)); else tag=$(((byte >> 2) & 0x0F)); fi
+  [[ $tag == 5 || $tag == 6 || $tag == 7 || $tag == 14 ]]
+}
+
+is_gnupg2_home() { [[ -d $1/private-keys-v1.d ]] && { [[ -f $1/pubring.kbx ]] || [[ -f $1/pubring.gpg ]]; }; }
+
+walk_dir() { # walk_dir DIR DEPTH: GnuPG homes become candidates, key files go to KEY_FILES (byte order)
+  local dir=$1 depth=$2 entry name home=0 f files=()
+  if is_gnupg2_home "$dir"; then
+    home=1
     for f in private-keys-v1.d pubring.kbx pubring.gpg trustdb.gpg; do
       if [[ -e $dir/$f ]]; then files+=("$dir/$f"); fi
     done
-    add_candidate gnupghome "$dir" "${files[@]}"
+    add_candidate gnupghome "$dir" "" 0 "" "${files[@]}"
   fi
-  shopt -s nullglob
-  certify=("$dir"/secret-*-Certify.key)
-  subkeys=("$dir"/secret-*-Subkeys.key)
-  shopt -u nullglob
-  if (( ${#certify[@]} )); then
-    add_candidate export "$dir" "${certify[@]}"
-  elif (( ${#subkeys[@]} )); then
-    add_candidate subkeys-only "$dir" "${subkeys[@]}"
-  fi
-}
-
-detect() {
-  local root=${BACKUP%/} sub
-  [[ -d $root ]] || die "$EXIT_BACKUP" "backup folder not found: $BACKUP"
-  detect_dir "$root"
-  for sub in "$root"/*/; do
-    sub=${sub%/}
-    if [[ -d $sub && ${sub##*/} != private-keys-v1.d ]]; then detect_dir "$sub"; fi
+  for entry in "$dir"/*; do # LC_ALL=C: byte order; hidden names are not matched
+    [[ -e $entry || -L $entry ]] || continue
+    name=${entry##*/}
+    # random_seed is random bytes that can pass the packet-tag sniff
+    if [[ -L $entry || $name == random_seed ]]; then continue; fi
+    if [[ -d $entry ]]; then
+      if [[ $name != private-keys-v1.d ]] && (( depth < 3 )); then walk_dir "$entry" $((depth + 1)); fi
+    elif (( home )) && [[ $name == pubring.kbx || $name == pubring.gpg || $name == trustdb.gpg ]]; then
+      continue
+    elif looks_like_key_file "$entry"; then
+      KEY_FILES+=("$entry")
+    fi
   done
 }
 
-choose_candidate() {
-  local i matches=() listing=""
+classify_file() { # classify_file PATH → lines "MAINKID KEYID ROLE STATE"; non-zero when unreadable
+  local out
+  out=$(GNUPGHOME=$WORK gpg --batch --list-packets -- "$1" 2>/dev/null) || return 1
+  awk '
+    function close_part() {
+      if (inpkt && kid != "") { if (state == "") state = "missing"; print main, kid, role, state }
+      inpkt = 0; kid = ""
+    }
+    /^:/ {
+      close_part()
+      if ($0 ~ /^:(secret|public)( sub)? key packet:/) {
+        inpkt = 1; role = ($0 ~ /^:[a-z]+ sub key packet:/) ? "sub" : "main"
+        state = ($0 ~ /^:public/) ? "public" : ""
+      }
+      next
+    }
+    !inpkt { next }
+    {
+      t = $0; sub(/^[ \t\r\n\v\f]+/, "", t); sub(/[ \t\r\n\v\f]+$/, "", t)
+      if (index(t, "gnu-divert-to-card")) state = "card-stub"
+      else if (state != "") { }
+      else if (index(t, "gnu-dummy")) state = "missing"
+      else if (index(t, "S2K") || (t ~ /^skey\[/ && t ~ /protected\]$/)) state = "secret"
+      else if (t ~ /^skey\[/ && t ~ /bits\]$/) state = "secret-unprotected"
+      if (t ~ /^keyid:/) { split(t, w, /[ \t]+/); kid = w[2]; if (role == "main") main = kid }
+    }
+    END { close_part() }' <<<"$out" | grep . || return 1
+}
+
+rank() { case $1 in secret) printf 2 ;; secret-unprotected) printf 1 ;; *) printf 0 ;; esac; }
+
+state_word() {
+  case $1 in secret) printf secret ;; secret-unprotected) printf 'secret (no passphrase)' ;;
+    missing) printf missing ;; card-stub) printf 'card stub' ;; public) printf public ;; esac
+}
+
+describe_parts() { # describe_parts "ROLE STATE KEYID"... → "main secret, 2 subkeys secret"
+  local line role state n s out="" sep=""
+  for line in "$@"; do
+    read -r role state _ <<<"$line"
+    if [[ $role == main ]]; then out+="${sep}main $(state_word "$state")"; sep=", "; fi
+  done
+  for s in secret secret-unprotected missing card-stub public; do
+    n=0
+    for line in "$@"; do
+      read -r role state _ <<<"$line"
+      if [[ $role == sub && $state == "$s" ]]; then n=$((n + 1)); fi
+    done
+    if (( n == 1 )); then out+="${sep}1 subkey $(state_word "$s")"; sep=", "
+    elif (( n > 1 )); then out+="${sep}$n subkeys $(state_word "$s")"; sep=", "; fi
+  done
+  printf '%s' "$out"
+}
+
+select_files() { # select_files KEY: the files that supply KEY's secrets best (as Python's _select)
+  local key=$1 i line role state kid secret main_secret better kind unprot bare=""
+  local rows=() sorted=() used=() supplied_order=()
+  local -A supplied=()
+  for i in "${!KEY_FILES[@]}"; do
+    [[ -n ${parts_of[$i,$key]+set} ]] || continue
+    secret=0 main_secret=0
+    while read -r role state kid; do
+      if (( $(rank "$state") )); then
+        secret=$((secret + 1))
+        if [[ $role == main ]]; then main_secret=1; fi
+      fi
+    done <<<"${parts_of[$i,$key]%$'\n'}"
+    rows+=("$secret $main_secret $i")
+  done
+  mapfile -t sorted < <(printf '%s\n' "${rows[@]}" | sort -k1,1nr -k2,2nr -k3,3n | cut -d' ' -f3)
+  for i in "${sorted[@]}"; do
+    better=0
+    while read -r role state kid; do
+      if (( $(rank "$state") > ${supplied[$kid]:-0} )); then
+        if [[ -z ${supplied[$kid]+set} ]]; then supplied_order+=("$kid"); fi
+        supplied[$kid]=$(rank "$state")
+        better=1
+      fi
+    done <<<"${parts_of[$i,$key]%$'\n'}"
+    if (( better )); then used+=("$i"); fi
+  done
+  for i in "${sorted[@]}"; do
+    if [[ " ${used[*]} " == *" $i "* ]]; then status[$i,$key]=used; continue; fi
+    status[$i,$key]=ignored
+    while read -r role state kid; do
+      if (( $(rank "$state") )); then status[$i,$key]="not needed"; fi
+    done <<<"${parts_of[$i,$key]%$'\n'}"
+  done
+  if (( ${#used[@]} == 0 )); then INV_UNRECOVERABLE+=("$key"); return 0; fi
+  kind=subkeys-only
+  if (( ${supplied[$key]:-0} )); then kind="export"; fi
+  unprot=1
+  for kid in "${supplied_order[@]}"; do
+    if (( supplied[$kid] == 1 )); then bare+="${bare:+ }$kid"; else unprot=0; fi
+  done
+  local paths=()
+  for i in "${used[@]}"; do paths+=("${KEY_FILES[i]}"); done
+  add_candidate "$kind" "${paths[0]%/*}" "$key" "$unprot" "$bare" "${paths[@]}"
+}
+
+build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() writes it
+  local root=$1 i key rel
+  local -a parts
+  INV_REPORT=""
+  (( ${#KEY_FILES[@]} )) || return 0
+  INV_REPORT="Backup files in $root:"
+  for i in "${!KEY_FILES[@]}"; do
+    rel=${KEY_FILES[i]#"$root"/}
+    if [[ -n ${unreadable[$i]+set} ]]; then
+      INV_REPORT+=$'\n'"  $rel: not a readable key file (ignored)"
+      continue
+    fi
+    for key in "${order[@]}"; do
+      [[ -n ${parts_of[$i,$key]+set} ]] || continue
+      mapfile -t parts <<<"${parts_of[$i,$key]%$'\n'}"
+      INV_REPORT+=$'\n'"  $rel: key $key: $(describe_parts "${parts[@]}") (${status[$i,$key]})"
+    done
+  done
+  for key in "${INV_UNRECOVERABLE[@]}"; do
+    INV_REPORT+=$'\n'"  key $key: not recoverable from this folder (card stubs / public key only)"
+  done
+}
+
+sort_candidates() { # by path bytes, then gnupghome, export, subkeys-only; ties keep their order
+  local i n order_of=() kind=() path=() files=() key=() unprot=() bare=()
   for i in "${!CAND_KIND[@]}"; do
-    if [[ -z $SOURCE || ${CAND_KIND[i]} == "$SOURCE" ]]; then matches+=("$i"); fi
+    case ${CAND_KIND[i]} in gnupghome) n=0 ;; export) n=1 ;; *) n=2 ;; esac
+    order_of+=("${CAND_PATH[i]}"$'\t'"$n"$'\t'"$i")
+  done
+  (( ${#order_of[@]} )) || return 0
+  while IFS=$'\t' read -r _ _ i; do
+    kind+=("${CAND_KIND[i]}"); path+=("${CAND_PATH[i]}"); files+=("${CAND_FILES[i]}")
+    key+=("${CAND_KEY[i]}"); unprot+=("${CAND_UNPROT[i]}"); bare+=("${CAND_BARE[i]}")
+  done < <(printf '%s\n' "${order_of[@]}" | sort -t $'\t' -k1,1 -k2,2n -k3,3n)
+  CAND_KIND=("${kind[@]}") CAND_PATH=("${path[@]}") CAND_FILES=("${files[@]}")
+  CAND_KEY=("${key[@]}") CAND_UNPROT=("${unprot[@]}") CAND_BARE=("${bare[@]}")
+}
+
+detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and INV_FILES_FOUND
+  local root=${BACKUP%/} i out main kid role state order=()
+  local -A parts_of=() seen_key=() status=() unreadable=()
+  [[ -d $root ]] || die "$EXIT_BACKUP" "backup folder not found: $root"
+  KEY_FILES=() INV_UNRECOVERABLE=()
+  walk_dir "$root" 0
+  INV_FILES_FOUND=${#KEY_FILES[@]}
+  for i in "${!KEY_FILES[@]}"; do
+    if ! out=$(classify_file "${KEY_FILES[i]}"); then unreadable[$i]=1; continue; fi
+    while read -r main kid role state; do
+      parts_of[$i,$main]+="$role $state $kid"$'\n'
+      if [[ -z ${seen_key[$main]+set} ]]; then seen_key[$main]=1; order+=("$main"); fi
+    done <<<"$out"
+  done
+  for main in "${order[@]}"; do
+    select_files "$main"
+  done
+  build_report "$root"
+  sort_candidates
+}
+
+choose_candidate() { # as Python's backup.choose
+  local i matches=() want=${KEY^^} k
+  want=${want// /}
+  for i in "${!CAND_KIND[@]}"; do
+    [[ -z $SOURCE || ${CAND_KIND[i]} == "$SOURCE" ]] || continue
+    k=${CAND_KEY[i]}
+    if [[ -n $want && -n $k && $want != *"$k" && $k != *"$want" ]]; then continue; fi
+    matches+=("$i")
   done
   if (( ${#matches[@]} == 1 )); then CHOSEN=${matches[0]}; return 0; fi
-  (( ${#matches[@]} )) ||
+  (( ${#CAND_KIND[@]} )) ||
     die "$EXIT_BACKUP" "no backup found (expected secret-*-Certify.key, secret-*-Subkeys.key or a GnuPG home)"
-  for i in "${matches[@]}"; do listing+=$'\n'"  ${CAND_KIND[i]}: ${CAND_PATH[i]}"; done
-  die "$EXIT_BACKUP" "several backups found; narrow --backup or pass --source:$listing"
+  if (( ${#matches[@]} == 0 )); then
+    die "$EXIT_BACKUP" "no backup matches --source or --key; found:$(candidate_listing "${!CAND_KIND[@]}")"
+  fi
+  die "$EXIT_BACKUP" "several backups found; narrow --backup or pass --source or --key:$(candidate_listing "${matches[@]}")"
+}
+
+candidate_listing() { # candidate_listing INDEX...: "\n  <kind>: <path> (key <KEYID>)" per candidate
+  local i
+  for i in "$@"; do
+    printf '\n  %s: %s' "${CAND_KIND[i]}" "${CAND_PATH[i]}"
+    if [[ -n ${CAND_KEY[i]} ]]; then printf ' (key %s)' "${CAND_KEY[i]}"; fi
+  done
 }
 
 list_keys() { # list_keys HOME → "sec FPR KEYID SECRET" | "uid TEXT" | "ssb FPR USAGE CREATED EXPIRES VALIDITY ALGO SECRET"
@@ -292,7 +482,8 @@ list_keys() { # list_keys HOME → "sec FPR KEYID SECRET" | "uid TEXT" | "ssb FP
 }
 
 load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and SUB_* arrays
-  local kind a b c d e f g line current="" want=${KEY^^} fps=() matches=() listing=""
+  local kind a b c d e f g line current="" raw=${KEY:-${CAND_KEY[CHOSEN]:-}} want fps=() matches=() listing=""
+  want=${raw^^}
   want=${want// /}
   while read -r kind a _; do
     if [[ $kind == sec ]]; then fps+=("$a"); fi
@@ -301,7 +492,7 @@ load_bundle() { # load_bundle HOME: chooses the key (--key) and fills KEY_* and 
   for a in "${fps[@]}"; do
     if [[ -z $want || $a == *"$want" ]]; then matches+=("$a"); fi
   done
-  if [[ -n $want ]] && (( ${#matches[@]} == 0 )); then die "$EXIT_BACKUP" "no key matches --key $KEY"; fi
+  if [[ -n $want ]] && (( ${#matches[@]} == 0 )); then die "$EXIT_BACKUP" "no key matches --key $raw"; fi
   if (( ${#matches[@]} != 1 )); then
     for a in "${matches[@]}"; do listing+=$'\n'"  $a"; done
     die "$EXIT_BACKUP" "several keys found; choose one with --key:$listing"
@@ -332,7 +523,7 @@ load_candidate() {
     chmod -R u+rwX,go-rwx "$STAGING"
   else
     while IFS= read -r f; do
-      GNUPGHOME=$STAGING gpg --batch --import "$f" 2>"$WORK/import.err" ||
+      GNUPGHOME=$STAGING gpg --batch --import -- "$f" 2>"$WORK/import.err" ||
         die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
     done <<<"${CAND_FILES[i]}"
   fi
@@ -565,6 +756,13 @@ main() {
   new_home work WORK || die "$EXIT_BACKUP" "cannot create a temporary GnuPG home in $(runtime_base)"
   new_home staging STAGING || die "$EXIT_BACKUP" "cannot create a temporary GnuPG home in $(runtime_base)"
   detect
+  if [[ -n $INV_REPORT ]]; then info "$INV_REPORT"; fi
+  if (( ${#CAND_KIND[@]} == 0 )); then
+    if (( INV_FILES_FOUND )); then
+      die "$EXIT_BACKUP" "no secret keys in ${BACKUP%/}: only card stubs or public keys"
+    fi
+    die "$EXIT_BACKUP" "no backup found in ${BACKUP%/} (looked for OpenPGP key files and GnuPG homes)"
+  fi
   choose_candidate
   load_candidate "$CHOSEN"
   select_targets
