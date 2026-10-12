@@ -3,8 +3,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info, repeated_key_folder,
-                           short_tempdir)
+from tests.helpers import (FIXTURES, PASSPHRASE, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
+                           repeated_key_folder, short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup
 from ykrecover.gpg import Home
 

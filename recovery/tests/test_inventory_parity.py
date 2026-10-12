@@ -2,7 +2,8 @@
 
 import unittest
 
-from tests.helpers import FIXTURES, LINUX, bare_first_folder, bom_crlf_folder, repeated_key_folder, run_impl, short_tempdir
+from tests.helpers import (FIXTURES, LINUX, bare_first_folder, bom_crlf_folder, repeated_key_folder, run_impl,
+                           short_tempdir)
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
