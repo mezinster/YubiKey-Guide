@@ -36,6 +36,7 @@ class Candidate:
     unprotected: bool = False  # every secret part it supplies has no passphrase
     bare: tuple = ()  # keyids of the parts it supplies with no passphrase
     attached: tuple = ()  # files holding a subkey saved as a key of its own (see attach_loose)
+    public: tuple = ()  # files holding only public copies of the key: imported for revocations made since
 
 
 @dataclass(frozen=True)
@@ -301,6 +302,10 @@ def inventory(folder: Path) -> Inventory:
     for key in order:
         used, supplied = _select(key, rows_by_key[key])
         used = _with_public(key, rows_by_key[key], used, loose)
+        if used:  # public copies too, after the secrets: revocations made since the backup merge in
+            only_public = [path for _, path, parts in sorted(rows_by_key[key], key=lambda row: row[0])
+                           if all(p.state == "public" for p in parts)]
+            used += [path for path in only_public if path not in used]
         for _, path, parts in rows_by_key[key]:
             if path in used:
                 status[(path, key)] = "used"
@@ -312,8 +317,9 @@ def inventory(folder: Path) -> Inventory:
         kind = "export" if supplied.get(key, 0) else "subkeys-only"
         bare = tuple(keyid for keyid, rank in supplied.items() if rank == 1)
         attached = tuple(path for path in used if (path, key) in loose)
+        public = tuple(path for path in used if path in only_public)
         candidates.append(Candidate(kind, used[0].parent, tuple(used), key, len(bare) == len(supplied), bare,
-                                    attached))
+                                    attached, public))
     for path in paths:
         if path in unreadable:
             reports.append(FileReport(path, "", (), "unreadable"))
@@ -706,6 +712,9 @@ def load(candidate: Candidate, staging: Home, warn) -> list:
             result = staging.run(["gpg", "--batch", "--allow-non-selfsigned-uid", "--status-fd", "1", "--import",
                                   "--", str(source)])
             if result.returncode != 0:
+                if src in candidate.public:  # it brings no secret: what gpg took of it is enough
+                    warn(f"gpg skipped part of {src}: {skipped_line(result.stderr, result.returncode)}")
+                    continue
                 if not secret_keys_imported(result.stdout):
                     loose = _loose_key(src, staging)
                     if loose:

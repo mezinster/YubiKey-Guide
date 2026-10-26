@@ -7,9 +7,11 @@ from pathlib import Path
 
 from tests.helpers import (FIXTURES, LINUX, MALLORY, PASSPHRASE, RECOVERY, REAL_GPG, REVOKED_UID,
                            bare_first_folder, bom_crlf_folder, fixture_info, import_unprotected, loose_subkey_folder,
-                           partial_import_folder, repeated_key_folder, revoked_uid_folder, short_tempdir)
+                           partial_import_folder, repeated_key_folder, revoked_later_folder, revoked_uid_folder,
+                           short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
 from ykrecover.gpg import Home, gpg_version
+from ykrecover.migrate import REVOCATION_NOTE, Options, Session
 
 COLONS_TWO_KEYS = """\
 sec:u:255:22:D35238B02045AC9D:1791717022:::u:::cESCA:::+::ed25519:::0:
@@ -86,11 +88,11 @@ class InventoryTests(unittest.TestCase):
         inv = backup.inventory(root)
         kid = fixture_info("flexible")["KEY_ID"]
         self.assertEqual([(c.kind, c.key_id, [f.name for f in c.files]) for c in inv.candidates],
-                         [("export", kid, ["flex.priv.asc"])])
+                         [("export", kid, ["flex.priv.asc", "flex.pub.asc"])])
         self.assertEqual(backup.report(inv), "\n".join([
             f"Backup files in {root}:",
             f"  private/flex.priv.asc: key {kid}: main secret, 2 subkeys secret (used)",
-            f"  pub/flex.pub.asc: key {kid}: main public, 2 subkeys public (ignored)",
+            f"  pub/flex.pub.asc: key {kid}: main public, 2 subkeys public (used)",
             f"  stub/flex.priv_stub.asc: key {kid}: main card stub, 2 subkeys card stub (ignored)",
             f"  stub/flex.sub_priv_stub.asc: key {kid}: main missing, 2 subkeys card stub (ignored)",
             f"  subkeys/flex.sub_priv.asc: key {kid}: main missing, 2 subkeys secret (not needed)",
@@ -99,7 +101,10 @@ class InventoryTests(unittest.TestCase):
     def test_guide_export_folder_is_unchanged(self):
         inv = backup.inventory(FIXTURES / "ed25519" / "export")
         (c,) = inv.candidates
-        self.assertEqual((c.kind, [f.name for f in c.files]), ("export", [f"secret-{fixture_info('ed25519')['KEY_ID']}-Certify.key"]))
+        kid = fixture_info("ed25519")["KEY_ID"]
+        self.assertEqual((c.kind, [f.name for f in c.files]),
+                         ("export", [f"secret-{kid}-Certify.key", f"public-{kid}-2026-10-11.asc"]))
+        self.assertEqual(c.public, (FIXTURES / "ed25519" / "export" / f"public-{kid}-2026-10-11.asc",))
         self.assertEqual(c.path, FIXTURES / "ed25519" / "export")
 
     def test_same_key_in_two_folders_is_one_candidate(self):
@@ -181,7 +186,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_gnupg1_home(self):
         (c,) = backup.detect(FIXTURES / "gnupg1")
-        self.assertEqual((c.kind, [f.name for f in c.files]), ("export", ["secring.gpg"]))
+        self.assertEqual((c.kind, [f.name for f in c.files]), ("export", ["secring.gpg", "pubring.gpg"]))
 
     def test_multi_key_file_gives_one_candidate_per_key(self):
         info = fixture_info("multikey")
@@ -442,6 +447,60 @@ class LooseSubkeyTests(unittest.TestCase):
             backup.load(candidate, staging, self.fail)
         self.assertEqual((ctx.exception.code, str(ctx.exception)), (EXIT_BACKUP, backup.LOOSE_KEY.format(
             root / self.loose, self.info["FPR_E"][-16:])))
+
+
+class PublicCopyTests(unittest.TestCase):
+    """Public copies of the chosen key in the folder are imported after its secrets, for revocations made since."""
+
+    def setUp(self):
+        self.info = fixture_info("rsa4096")
+
+    def session(self, root):
+        session = Session(Options(backup=root), None)
+        self.addCleanup(session.cleanup)
+        session.load()
+        return session
+
+    def test_inventory_uses_public_copies(self):
+        root, _ = revoked_later_folder(self)
+        inv = backup.inventory(root)
+        (candidate,) = inv.candidates
+        self.assertEqual(candidate.files, (root / "secret.asc", root / "public.asc"))
+        self.assertEqual(candidate.public, (root / "public.asc",))
+        self.assertIn(f"  public.asc: key {self.info['KEY_ID']}: main public, 4 subkeys public (used)",
+                      backup.report(inv))
+
+    def test_subkey_revoked_after_the_backup_is_not_chosen(self):
+        root, newer = revoked_later_folder(self)
+        session = self.session(root)
+        self.assertEqual(session.targets["e"], self.info["FPR_E"])
+        self.assertEqual(session.load_warnings, [])
+        lines = session.describe().splitlines()
+        self.assertIn(f"  [E] rsa2048 {newer} expires 2099-12-31 (revoked)", lines)
+        self.assertIn(f"  [E] rsa4096 {self.info['FPR_E']} expires 2099-12-31 <- card", lines)
+
+    def test_summary_says_where_revocations_come_from(self):
+        root, newer = revoked_later_folder(self, public=False)
+        session = self.session(root)
+        self.assertEqual(session.targets["e"], newer)  # the backup alone cannot know
+        self.assertEqual(session.describe().splitlines()[-1],
+                         REVOCATION_NOTE.format(self.info["KEY_ID"]))
+
+    def test_public_copy_gpg_rejects_is_a_warning(self):
+        root, _ = revoked_later_folder(self)
+        real = Home.run
+
+        def failing_public(home, argv, stdin_lines=()):
+            result = real(home, argv, stdin_lines)
+            if argv[-1] == str(root / "public.asc") and "--import" in argv:
+                result.returncode, result.stderr = 2, "gpg: key 1111111111111111: no user ID\n"
+            return result
+
+        with mock.patch.object(Home, "run", failing_public):
+            session = self.session(root)
+        self.assertEqual(session.load_warnings,
+                         [f"gpg skipped part of {root / 'public.asc'}: key 1111111111111111: no user ID"])
+        self.assertEqual(session.targets["e"], self.info["FPR_E"])
 
 
 class HomeRegistryTests(unittest.TestCase):
