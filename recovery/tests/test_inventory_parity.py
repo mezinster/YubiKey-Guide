@@ -4,10 +4,11 @@ import os
 import subprocess
 import unittest
 
-from tests.helpers import (FIXTURES, LINUX, MALLORY, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
-                           loose_subkey_folder, partial_import_folder, repeated_key_folder, revoked_uid_folder,
-                           run_impl, short_tempdir)
+from tests.helpers import (FIXTURES, LINUX, MALLORY, REAL_GPG, bare_first_folder, bom_crlf_folder, fake_hardware,
+                           fixture_info, loose_subkey_folder, partial_import_folder, repeated_key_folder,
+                           revoked_later_folder, revoked_uid_folder, run_impl, short_tempdir)
 from ykrecover.backup import LOOSE_KEY
+from ykrecover.migrate import REVOCATION_NOTE
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -156,6 +157,30 @@ class InventoryParityTests(unittest.TestCase):
         py = self.assert_same_run(root)
         self.assertEqual(py.returncode, 2, py.stderr)
         self.assertTrue(py.stderr.endswith(f"error: {LOOSE_KEY.format(root / f'sk_{kid}.gpg', kid)}\n"), py.stderr)
+
+    def test_subkey_revoked_in_a_public_copy_is_not_written(self):
+        info = fixture_info("rsa4096")
+        root, newer = revoked_later_folder(self)
+        py = self.assert_same_run(root)
+        self.assertEqual(py.returncode, 0, py.stderr)
+        self.assertIn(f"  public.asc: key {info['KEY_ID']}: main public, 4 subkeys public (used)\n", py.stderr)
+        keytocard = [line for line in py.stdout.splitlines() if line.startswith("STDIN key ")]
+        self.assertEqual(keytocard, [f"STDIN key {info[f]}" for f in ("FPR_S", "FPR_E", "FPR_A")])
+        self.assertNotIn(newer, py.stdout)
+
+    def test_key_summary_matches(self):
+        """The summary shown before the passphrase prompt; no passphrase comes, so both stop there."""
+        root, newer = revoked_later_folder(self)
+        out, env = short_tempdir(self, "out"), fake_hardware(self, ["11111111"])
+        py = run_impl("python", ["--backup", str(root), "--out", str(out)], env=env)
+        sh = run_impl("bash", ["--backup", str(root), "--out", str(out)], env=env)
+        note = REVOCATION_NOTE.format(fixture_info("rsa4096")["KEY_ID"])
+
+        def summary(stderr):  # from "Key <fingerprint>" to the note; other warnings depend on the machine
+            return stderr[stderr.index("\nKey "):stderr.index(note) + len(note)]
+
+        self.assertEqual((sh.returncode, summary(sh.stderr)), (py.returncode, summary(py.stderr)))
+        self.assertIn(f"  [E] rsa2048 {newer} expires 2099-12-31 (revoked)\n", summary(py.stderr))
 
     def test_repeated_key_first_copy_wins(self):
         py = self.assert_same_run(repeated_key_folder(self))

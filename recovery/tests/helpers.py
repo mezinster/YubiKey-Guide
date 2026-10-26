@@ -196,6 +196,29 @@ def loose_subkey_folder(test, armored: bool = False, public: bool = True, stubs:
     return root
 
 
+def revoked_later_folder(test, public: bool = True) -> tuple:
+    """(folder, fingerprint): the rsa4096 fixture key with a second, newer encryption subkey (that fingerprint),
+    saved in secret.asc; then that subkey revoked and the key's public part saved in public.asc (left out when
+    not public). The backup's secret copy predates the revocation, as a backup made before it does."""
+    info, home, root = fixture_info("rsa4096"), short_tempdir(test, "rl"), short_tempdir(test, "later")
+    env = {**os.environ, "GNUPGHOME": str(home)}
+
+    def gpg(*args, stdin=""):
+        return subprocess.run([REAL_GPG, "--batch", "--pinentry-mode", "loopback", "--passphrase", PASSPHRASE, *args],
+                              input=stdin.encode(), env=env, check=True, capture_output=True).stdout
+
+    export = FIXTURES / "rsa4096" / "export"
+    gpg("--import", str(export / f"secret-{info['KEY_ID']}-Certify.key"))
+    gpg("--quick-add-key", info["KEY_FP"], "rsa2048", "encr", "2099-12-31")
+    listing = gpg("--with-colons", "--list-keys", info["KEY_FP"]).decode().splitlines()
+    newest = [line.split(":")[9] for line in listing if line.startswith("fpr:")][-1]
+    (root / "secret.asc").write_bytes(gpg("--armor", "--export-secret-keys", info["KEY_FP"]))
+    gpg("--command-fd", "0", "--edit-key", info["KEY_FP"], stdin="key 4\nrevkey\ny\n0\n\ny\nsave\n")
+    if public:
+        (root / "public.asc").write_bytes(gpg("--armor", "--export", info["KEY_FP"]))
+    return root, newest
+
+
 def _runtime_base() -> Path:
     return osdeps.default_work_base()
 

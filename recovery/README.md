@@ -114,7 +114,7 @@ A backup made with the main guide often holds both the exported key files (`secr
 
 A GnuPG 2.1+ home migrated from 1.x that still contains `secring.gpg` shows two candidates: the home itself and the old `secring.gpg` as an export of the same key. Pick one with `--source gnupghome` or `--source export`.
 
-Card stubs and public keys are reported but never used: a stub holds no secret key. Revocation certificate files (`.rev`) are ignored. A key that exists only as stubs or a public key is listed as "not recoverable from this folder".
+Card stubs are reported but never used: a stub holds no secret key. Public key files of the chosen key are imported after its secrets, so that revocations and other signatures made since the backup count (see [Revoked subkeys](#revoked-subkeys)). Revocation certificate files (`.rev`) are ignored. A key that exists only as stubs or a public key is listed as "not recoverable from this folder".
 
 Before anything else the tool prints a report of every file it found on stderr (plans go to stdout). This is the real output for the `flexible` test fixture; the key ID belongs to a test key:
 
@@ -122,13 +122,13 @@ Before anything else the tool prints a report of every file it found on stderr (
 $ python3 -m ykrecover --cli --backup "tests/fixtures/flexible/asc backup" --mode renew --dry-run
 Backup files in tests/fixtures/flexible/asc backup:
   private/flex.priv.asc: key 5B21983A476B3572: main secret, 2 subkeys secret (used)
-  pub/flex.pub.asc: key 5B21983A476B3572: main public, 2 subkeys public (ignored)
+  pub/flex.pub.asc: key 5B21983A476B3572: main public, 2 subkeys public (used)
   stub/flex.priv_stub.asc: key 5B21983A476B3572: main card stub, 2 subkeys card stub (ignored)
   stub/flex.sub_priv_stub.asc: key 5B21983A476B3572: main missing, 2 subkeys card stub (ignored)
   subkeys/flex.sub_priv.asc: key 5B21983A476B3572: main missing, 2 subkeys secret (not needed)
 ```
 
-"used" files supply the key. "not needed" files hold secrets that another file already provides. When several files hold the same key, the tool prefers a copy protected by a passphrase. Within one file the first copy counts, as it does for `gpg --import`. When one folder holds several backups, or several keys, the tool lists them and asks you to narrow `--backup` or pass `--source` or `--key`.
+"used" files supply the key, or public copies of it. "not needed" files hold secrets that another file already provides. When several files hold the same key, the tool prefers a copy protected by a passphrase. Within one file the first copy counts, as it does for `gpg --import`. When one folder holds several backups, or several keys, the tool lists them and asks you to narrow `--backup` or pass `--source` or `--key`.
 
 A backup can mix protection: a passphrase-protected main key with subkeys that have no passphrase. The tool still asks for the passphrase, and sends it to `keytocard` only for the subkeys that have one.
 
@@ -150,6 +150,23 @@ Exit codes:
 | 2 | backup or passphrase problem |
 | 3 | a card failed or was skipped |
 | 130 | aborted |
+
+### Revoked subkeys
+
+For each card slot the tool writes the newest subkey of that use that is not revoked. It knows only the revocations in the backup folder, and a backup saved before you revoked a subkey still shows that subkey as valid. The tool would then write the revoked subkey to the card, and the card could not decrypt messages sent to your current encryption subkey.
+
+Before running, export your current public key from your daily keyring into the backup folder (or a copy of it):
+
+```bash
+gpg --armor --export $KEY_ID > current-public.asc
+```
+
+The key summary shown before the passphrase prompt marks revoked subkeys and the ones going to the card:
+
+```console
+  [E] rsa4096 F241E7C544471FAC38BD59880CC921BA8DF63E26 expires 2099-12-31 <- card
+  [E] rsa2048 4259762594B44FC752928ABD7808F799BE67AF46 expires 2099-12-31 (revoked)
+```
 
 ### Subkey saved as a key of its own
 

@@ -23,7 +23,7 @@ RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS="
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
 KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" KEY_VALIDITY="" UNPROTECTED=0 NOW=0
 LOADED_FPRS=()
-CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=() CAND_ATTACH=()
+CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=() CAND_ATTACH=() CAND_PUBLIC=()
 KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
 UIDS=() UIDS_UNSIGNED=()
 SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
@@ -236,14 +236,16 @@ trap 'exit "$EXIT_INTERRUPT"' INT TERM HUP
 
 # --- backup detection and loading (sources are only read)
 
-add_candidate() { # add_candidate KIND DIR KEY UNPROT BARE ATTACH FILE...; ATTACH: loose subkey files, one per line
+add_candidate() { # add_candidate KIND DIR KEY UNPROT BARE ATTACH PUBLIC FILE...; ATTACH: loose subkey files and
+  # PUBLIC: files holding only public copies of the key, one per line
   CAND_KIND+=("$1")
   CAND_PATH+=("$2")
   CAND_KEY+=("$3")
   CAND_UNPROT+=("$4")
   CAND_BARE+=("$5")
   CAND_ATTACH+=("$6")
-  shift 6
+  CAND_PUBLIC+=("$7")
+  shift 7
   local IFS=$'\n'
   CAND_FILES+=("$*")
 }
@@ -273,7 +275,7 @@ walk_dir() { # walk_dir DIR DEPTH: GnuPG homes become candidates, key files go t
     for f in private-keys-v1.d pubring.kbx pubring.gpg trustdb.gpg; do
       if [[ -e $dir/$f ]]; then files+=("$dir/$f"); fi
     done
-    add_candidate gnupghome "$dir" "" 0 "" "" "${files[@]}"
+    add_candidate gnupghome "$dir" "" 0 "" "" "" "${files[@]}"
   fi
   for entry in "$dir"/*; do # LC_ALL=C: byte order; hidden names are not matched
     [[ -e $entry || -L $entry ]] || continue
@@ -435,6 +437,15 @@ select_files() { # select_files KEY: the files that supply KEY's secrets (as Pyt
     first=${first_public:-$first_other}
     if (( ! main_used )) && [[ -n $first ]]; then used=("$first" "${used[@]}"); fi
   fi
+  local public=""
+  if (( ${#used[@]} )); then # public copies too, after the secrets: revocations made since the backup merge in
+    for i in "${!KEY_FILES[@]}"; do
+      [[ -n ${parts_of[$i,$key]+set} ]] || continue
+      if [[ $'\n'${parts_of[$i,$key]} =~ $'\n'[a-z]+\ [^p] ]]; then continue; fi # a part that is not public
+      public+="${public:+$'\n'}${KEY_FILES[i]}"
+      if [[ " ${used[*]} " != *" $i "* ]]; then used+=("$i"); fi
+    done
+  fi
   for i in "${sorted[@]}"; do
     if [[ " ${used[*]} " == *" $i "* ]]; then status[$i,$key]=used; continue; fi
     status[$i,$key]=ignored
@@ -451,7 +462,7 @@ select_files() { # select_files KEY: the files that supply KEY's secrets (as Pyt
   done
   local paths=()
   for i in "${used[@]}"; do paths+=("${KEY_FILES[i]}"); done
-  add_candidate "$kind" "${paths[0]%/*}" "$key" "$unprot" "$bare" "$attach" "${paths[@]}"
+  add_candidate "$kind" "${paths[0]%/*}" "$key" "$unprot" "$bare" "$attach" "$public" "${paths[@]}"
 }
 
 build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() writes it
@@ -480,7 +491,7 @@ build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() wri
 }
 
 sort_candidates() { # by path bytes, then gnupghome, export, subkeys-only; ties keep their order
-  local i n order_of=() kind=() path=() files=() key=() unprot=() bare=() attach=()
+  local i n order_of=() kind=() path=() files=() key=() unprot=() bare=() attach=() public=()
   for i in "${!CAND_KIND[@]}"; do
     case ${CAND_KIND[i]} in gnupghome) n=0 ;; export) n=1 ;; *) n=2 ;; esac
     order_of+=("${CAND_PATH[i]}"$'\t'"$n"$'\t'"$i")
@@ -488,10 +499,10 @@ sort_candidates() { # by path bytes, then gnupghome, export, subkeys-only; ties 
   (( ${#order_of[@]} )) || return 0
   while IFS=$'\t' read -r _ _ i; do
     kind+=("${CAND_KIND[i]}"); path+=("${CAND_PATH[i]}"); files+=("${CAND_FILES[i]}")
-    key+=("${CAND_KEY[i]}"); unprot+=("${CAND_UNPROT[i]}"); bare+=("${CAND_BARE[i]}"); attach+=("${CAND_ATTACH[i]}")
+    key+=("${CAND_KEY[i]}"); unprot+=("${CAND_UNPROT[i]}"); bare+=("${CAND_BARE[i]}"); attach+=("${CAND_ATTACH[i]}"); public+=("${CAND_PUBLIC[i]}")
   done < <(printf '%s\n' "${order_of[@]}" | sort -t $'\t' -k1,1 -k2,2n -k3,3n)
   CAND_KIND=("${kind[@]}") CAND_PATH=("${path[@]}") CAND_FILES=("${files[@]}")
-  CAND_KEY=("${key[@]}") CAND_UNPROT=("${unprot[@]}") CAND_BARE=("${bare[@]}") CAND_ATTACH=("${attach[@]}")
+  CAND_KEY=("${key[@]}") CAND_UNPROT=("${unprot[@]}") CAND_BARE=("${bare[@]}") CAND_ATTACH=("${attach[@]}") CAND_PUBLIC=("${public[@]}")
 }
 
 detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and INV_FILES_FOUND
@@ -796,11 +807,13 @@ attach_loose() { # attach_loose FILE: as Python's backup.attach_loose
   destroy_home "$scratch"
 }
 
-is_attached() { # is_attached FILE: FILE is one of the chosen candidate's loose subkey files
+is_attached() { in_lines "$1" "${CAND_ATTACH[CHOSEN]}"; } # one of the chosen candidate's loose subkey files
+
+in_lines() { # in_lines TEXT LINES: TEXT is one of LINES
   local a
   while IFS= read -r a; do
     if [[ -n $a && $a == "$1" ]]; then return 0; fi
-  done <<<"${CAND_ATTACH[CHOSEN]}"
+  done <<<"$2"
   return 1
 }
 
@@ -820,7 +833,9 @@ load_candidate() {
       rc=0
       GNUPGHOME=$STAGING gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$source" \
         >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
-      if (( rc )); then
+      if (( rc )) && in_lines "$f" "${CAND_PUBLIC[i]}"; then # it brings no secret: what gpg took of it is enough
+        warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"
+      elif (( rc )); then
         if ! secret_keys_imported "$WORK/import.status"; then
           if kid=$(loose_key "$f"); then
             die "$EXIT_BACKUP" "cannot import $f: it holds only the secret key $kid, $LOOSE_KEY"
@@ -1237,7 +1252,8 @@ describe_key() {
   for i in "${!UIDS[@]}"; do info "  uid ${UIDS[i]}"; done
   for i in "${!SUB_FPR[@]}"; do
     mark=""
-    if [[ $targets == *" ${SUB_FPR[i]} "* ]]; then mark=" <- card"; fi
+    if [[ ${SUB_VALIDITY[i]} == r ]]; then mark=" (revoked)"; fi
+    if [[ $targets == *" ${SUB_FPR[i]} "* ]]; then mark+=" <- card"; fi
     expires=never
     if (( SUB_EXPIRES[i] > 0 )); then expires=$(date -d "@${SUB_EXPIRES[i]}" +%F); fi
     info "  [${SUB_USAGE[i]^^}] ${SUB_ALGO[i]} ${SUB_FPR[i]} expires $expires$mark"
@@ -1251,6 +1267,8 @@ describe_key() {
       info "  [${u^^}] none (clone leaves it empty; renew and rotate create one)"
     fi
   done
+  info "Subkeys revoked after this backup was saved show as revoked only if the backup folder also holds your \
+current public key (gpg --armor --export $KEY_ID > current-public.asc)."
 }
 
 check_passphrase() { # check_passphrase PASS → status

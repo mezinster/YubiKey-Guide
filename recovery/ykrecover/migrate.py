@@ -263,7 +263,8 @@ class Session:
         b = self.bundle
         lines = [f"Key {b.key_fp}", *(f"  uid {u}" for u in b.uids)]
         for k in b.subkeys:
-            mark = " <- card" if k.fpr in self.targets.values() else ""
+            mark = " (revoked)" if k.validity == "r" else ""
+            mark += " <- card" if k.fpr in self.targets.values() else ""
             expires = datetime.date.fromtimestamp(k.expires).isoformat() if k.expires else "never"
             lines.append(f"  [{k.usage.upper()}] {k.algo} {k.fpr} expires {expires}{mark}")
         held = modes.select_targets(b)
@@ -272,6 +273,7 @@ class Session:
                 lines.append(f"  [{u.upper()}] no secret in the backup (clone leaves it empty)")
             else:
                 lines.append(f"  [{u.upper()}] none (clone leaves it empty; renew and rotate create one)")
+        lines.append(REVOCATION_NOTE.format(b.key_id))
         return "\n".join(lines)
 
     def unlock(self, passphrase: str) -> bool:
@@ -526,6 +528,10 @@ class Session:
             self._destroy(self.staging)
             self.staging = None
         self.passphrase = ""
+
+
+REVOCATION_NOTE = ("Subkeys revoked after this backup was saved show as revoked only if the backup folder also holds "
+                   "your current public key (gpg --armor --export {} > current-public.asc).")
 
 
 def run(opts: Options, ui) -> int:
