@@ -194,7 +194,11 @@ On your daily machine, point GnuPG at the new cards and move aside the stubs for
 recoverCard.sh update-stubs --import /mnt/new-backup/public-KEYID-DATE.asc --remove-serial OLD_SERIAL --cards 2
 ```
 
-`--remove-serial` takes the decimal YubiKey serial (digits only, as printed on the card or by `ykman list`) and matches it against the serial field of each stub's card ID. Matching stubs are moved into a new `stub-backup-*` folder in the GnuPG home, never deleted. The command exits with 3 if `learn` fails for a card.
+`--remove-serial` takes the decimal YubiKey serial (digits only, as printed on the card or by `ykman list`) and matches it against the serial field of each stub's card ID. Matching stubs are moved into a new `stub-backup-*` folder in the GnuPG home, never deleted. Pass it only for a card you no longer use: to keep using a second copy of the card, leave it out and switch between the cards with `gpg-connect-agent "scd serialno" "learn --force" /bye`.
+
+For each inserted card, the command also asks the card which keys it holds and offers to move aside the stubs that name only that card but are for keys it no longer holds. GnuPG never removes those: when a slot is written over, for example to replace a revoked encryption subkey, the old key's stub stays, and Kleopatra keeps listing that key as stored on the card. They go to a `stub-backup-*` folder too.
+
+The command exits with 3 if `learn` fails for a card.
 
 If you renewed or rotated, also publish the new public key wherever you published the old one.
 

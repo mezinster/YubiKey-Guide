@@ -853,7 +853,8 @@ class App:
         # The command stays one line, so it can be copied; the text widget wraps it for display.
         lines += ["", f"Files are in {o.out}.", "", "On your daily machine run:",
                   f"  {update_stubs_command()} --import <public key file> --remove-serial <old serial> "
-                  f"--cards {o.cards}"]
+                  f"--cards {o.cards}",
+                  "Pass --remove-serial only for a card you no longer use; leave it out to keep using the old card."]
         if update_stubs_where():
             lines.append(update_stubs_where())
         if self.pins:
