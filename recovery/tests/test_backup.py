@@ -405,6 +405,16 @@ class LooseSubkeyTests(unittest.TestCase):
             f"  public.asc: key {self.info['KEY_ID']}: main public, 3 subkeys public (used)",
             f"  {self.loose}: key {self.info['KEY_ID']}: 1 subkey secret, saved without its key (used)"]))
 
+    def test_public_copy_of_its_key_is_preferred_to_card_stubs(self):
+        root = loose_subkey_folder(self, stubs=True)
+        inv = backup.inventory(root)
+        (candidate,) = inv.candidates
+        self.assertEqual(candidate.files, (root / "public.asc", root / self.loose))
+        self.assertIn(f"  a-stub.asc: key {self.info['KEY_ID']}: main card stub, 3 subkeys card stub (ignored)",
+                      backup.report(inv))
+        _, bundle = self.load(root)
+        self.assertFalse(bundle.has_certify_secret)
+
     def test_loads_as_the_subkey_of_its_key(self):
         for armored in (False, True):
             with self.subTest(armored=armored):

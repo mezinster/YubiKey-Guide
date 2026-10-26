@@ -265,13 +265,15 @@ def _rehome_loose(rows_by_key: dict, order: list) -> set:
 
 
 def _with_public(key: str, rows: list, used: list, loose: set) -> list:
-    """used, led by a file with the key's main key when a loose subkey needs it and no used file has one."""
+    """used, led by a file with the key's main key when a loose subkey needs it and no used file has one; a public
+    copy first, as a card stub of the main key would pass for its secret."""
     if not any((path, key) in loose for path in used):
         return used
-    mains = [(index, path) for index, path, parts in rows if any(p.role == "main" for p in parts)]
-    if any(path in used for _, path in mains):
+    mains = [(any(p.role == "main" and p.state != "public" for p in parts), index, path)
+             for index, path, parts in rows if any(p.role == "main" for p in parts)]
+    if any(path in used for _, _, path in mains):
         return used
-    return [min(mains)[1], *used] if mains else used
+    return [min(mains)[2], *used] if mains else used
 
 
 def inventory(folder: Path) -> Inventory:

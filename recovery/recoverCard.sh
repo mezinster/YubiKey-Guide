@@ -418,16 +418,21 @@ select_files() { # select_files KEY: the files that supply KEY's secrets (as Pyt
     done <<<"${parts_of[$i,$key]%$'\n'}"
     if (( new )); then used+=("$i"); fi
   done
-  local attach="" first="" main_used=0
+  local attach="" first first_public="" first_other="" main_used=0
   for i in "${used[@]}"; do
     if [[ -n ${loose[$i,$key]+set} ]]; then attach+="${attach:+$'\n'}${KEY_FILES[i]}"; fi
   done
-  if [[ -n $attach ]]; then # as Python's _with_public: the loose subkey needs its main key's public key
+  if [[ -n $attach ]]; then # as Python's _with_public: the loose subkey needs its main key, a public copy first
     for i in "${!KEY_FILES[@]}"; do
       [[ -n ${parts_of[$i,$key]+set} && $'\n'${parts_of[$i,$key]} == *$'\n'main\ * ]] || continue
-      if [[ -z $first ]]; then first=$i; fi
+      if [[ $'\n'${parts_of[$i,$key]} == *$'\n'main\ public\ * ]]; then
+        if [[ -z $first_public ]]; then first_public=$i; fi
+      elif [[ -z $first_other ]]; then
+        first_other=$i
+      fi
       if [[ " ${used[*]} " == *" $i "* ]]; then main_used=1; fi
     done
+    first=${first_public:-$first_other}
     if (( ! main_used )) && [[ -n $first ]]; then used=("$first" "${used[@]}"); fi
   fi
   for i in "${sorted[@]}"; do

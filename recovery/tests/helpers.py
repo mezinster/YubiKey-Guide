@@ -166,11 +166,11 @@ def partial_import_folder(test, shape: str) -> Path:
     return root
 
 
-def loose_subkey_folder(test, armored: bool = False, public: bool = True) -> Path:
+def loose_subkey_folder(test, armored: bool = False, public: bool = True, stubs: bool = False) -> Path:
     """The rsa4096 fixture key as a backup that never held its main key's secret: public.asc (the public key, as
     exported) and sk_<KEYID>.gpg, the encryption subkey's secret saved as a key of its own (a secret-key packet
     with no user ID, signature or subkey). The file is armored with armored, and public.asc is left out when not
-    public."""
+    public. With stubs, a-stub.asc (first in walk order) holds the whole key as card stubs."""
     info, packets, root = fixture_info("rsa4096"), _packets(), short_tempdir(test, "loose")
     export = FIXTURES / "rsa4096" / "export"
     subkeys = dearmor((export / f"secret-{info['KEY_ID']}-Subkeys.key").read_bytes())
@@ -188,6 +188,11 @@ def loose_subkey_folder(test, armored: bool = False, public: bool = True) -> Pat
     (root / name).write_bytes(packets.armor(loose).encode() if armored else loose)
     if public:
         shutil.copy(next(export.glob("public-*.asc")), root / "public.asc")
+    if stubs:
+        whole = dearmor((export / f"secret-{info['KEY_ID']}-Certify.key").read_bytes())
+        carded = b"".join(packets.write_packet(tag, packets.stub(body, "card") if tag in (5, 7) else body)
+                          for tag, body in packets.read_packets(whole))
+        (root / "a-stub.asc").write_text(packets.armor(carded))
     return root
 
 

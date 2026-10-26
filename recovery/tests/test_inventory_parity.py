@@ -140,9 +140,9 @@ class InventoryParityTests(unittest.TestCase):
 
     def test_loose_subkey_is_cloned_with_its_key(self):
         info = fixture_info("rsa4096")
-        for armored in (False, True):
-            with self.subTest(armored=armored):
-                py = self.assert_same_run(loose_subkey_folder(self, armored=armored))
+        for armored, stubs in ((False, False), (True, False), (False, True)):
+            with self.subTest(armored=armored, stubs=stubs):
+                py = self.assert_same_run(loose_subkey_folder(self, armored=armored, stubs=stubs))
                 self.assertEqual(py.returncode, 0, py.stderr)
                 self.assertIn(", saved without its key (used)\n", py.stderr)
                 self.assertIn(f"warning: the backup has no secret for the sign subkey {info['FPR_S']}: that card "
