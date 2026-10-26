@@ -1,6 +1,7 @@
 """Shared test helpers: fixtures, running either implementation, fake hardware."""
 
 import base64
+import hashlib
 import importlib.util
 import os
 import select
@@ -162,6 +163,36 @@ def partial_import_folder(test, shape: str) -> Path:
             "forged": forged,
             "unsigned": without_uid_self_sigs(ed25519), "two-keys": ed25519 + no_uid, "rejected": no_uid}[shape]
     (root / "partial.gpg").write_bytes(data)
+    return root
+
+
+def loose_subkey_folder(test, armored: bool = False, public: bool = True, stubs: bool = False) -> Path:
+    """The rsa4096 fixture key as a backup that never held its main key's secret: public.asc (the public key, as
+    exported) and sk_<KEYID>.gpg, the encryption subkey's secret saved as a key of its own (a secret-key packet
+    with no user ID, signature or subkey). The file is armored with armored, and public.asc is left out when not
+    public. With stubs, a-stub.asc (first in walk order) holds the whole key as card stubs."""
+    info, packets, root = fixture_info("rsa4096"), _packets(), short_tempdir(test, "loose")
+    export = FIXTURES / "rsa4096" / "export"
+    subkeys = dearmor((export / f"secret-{info['KEY_ID']}-Subkeys.key").read_bytes())
+    for tag, body in packets.read_packets(subkeys):
+        if tag != 7:
+            continue
+        public_part = body[:packets.public_end(body)]
+        if hashlib.sha1(b"\x99" + len(public_part).to_bytes(2, "big") + public_part).hexdigest().upper() \
+                == info["FPR_E"]:
+            loose = packets.write_packet(5, body)
+            break
+    else:
+        raise AssertionError("the fixture has no encryption subkey secret")
+    name = f"sk_{info['FPR_E'][-16:]}.gpg"
+    (root / name).write_bytes(packets.armor(loose).encode() if armored else loose)
+    if public:
+        shutil.copy(next(export.glob("public-*.asc")), root / "public.asc")
+    if stubs:
+        whole = dearmor((export / f"secret-{info['KEY_ID']}-Certify.key").read_bytes())
+        carded = b"".join(packets.write_packet(tag, packets.stub(body, "card") if tag in (5, 7) else body)
+                          for tag, body in packets.read_packets(whole))
+        (root / "a-stub.asc").write_text(packets.armor(carded))
     return root
 
 

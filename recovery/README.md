@@ -109,7 +109,8 @@ A backup made with the main guide often holds both the exported key files (`secr
 - several keys in one file: pick one with `--key KEYID`;
 - unprotected exports, made without a passphrase: no passphrase is asked for them;
 - GnuPG 2.x home folders;
-- GnuPG 1.x home folders (`secring.gpg`).
+- GnuPG 1.x home folders (`secring.gpg`);
+- a subkey saved as a key of its own: a file holding only that subkey's secret, with no user ID, which gpg refuses to import by itself ("no user ID"). The folder must also hold the public key it belongs to, or any other backup file of that key. See [Subkey saved as a key of its own](#subkey-saved-as-a-key-of-its-own).
 
 A GnuPG 2.1+ home migrated from 1.x that still contains `secring.gpg` shows two candidates: the home itself and the old `secring.gpg` as an export of the same key. Pick one with `--source gnupghome` or `--source export`.
 
@@ -149,6 +150,24 @@ Exit codes:
 | 2 | backup or passphrase problem |
 | 3 | a card failed or was skipped |
 | 130 | aborted |
+
+### Subkey saved as a key of its own
+
+Some tools export a single subkey as a key of its own: the file holds the subkey's secret and nothing else, not even a user ID. gpg will not import such a file by itself. When the folder also holds a file with the key that subkey belongs to, the tool reports the file under that key and uses the two together:
+
+```console
+Backup files in /media/backup:
+  public.asc: key 1631931539BBCAFD: main public, 3 subkeys public (used)
+  sk_0CC921BA8DF63E26.gpg: key 1631931539BBCAFD: 1 subkey secret, saved without its key (used)
+```
+
+Such a backup has no Certify key, so only `clone` works. It puts on the card the subkeys whose secret the backup holds, and leaves the other slots empty with a warning naming each subkey it could not write:
+
+```console
+warning: the backup has no secret for the authentication subkey A4DCB5E19EF91A1C1CE934CF7E83EAE0306CFCB5: that card slot stays empty; SSH will not work from this card
+```
+
+Without the key it belongs to, the tool stops and says what the file is and what to add to the folder.
 
 ## After writing the cards
 

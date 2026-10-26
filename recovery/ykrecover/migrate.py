@@ -223,7 +223,8 @@ class Session:
         backup.check_user_ids(self.bundle)
         self.load_warnings.extend(backup.unsigned_uid_warnings(self.bundle))
         self.loaded_fprs = frozenset(k.fpr for k in self.bundle.subkeys)
-        self.targets = modes.select_targets(self.bundle)
+        # a backup with a loose subkey (backup.attach_loose) may hold no secret for the key's other subkeys
+        self.targets = modes.select_targets(self.bundle, bool(candidate.attached))
         return self.bundle
 
     def validate_bundle(self) -> None:
@@ -249,9 +250,14 @@ class Session:
             raise RecoveryError("the key has no subkeys to put on a card; use --mode renew or --mode rotate",
                                 EXIT_BACKUP)
         if mode == "clone":
+            held = modes.select_targets(self.bundle)
             for u in gaps:
                 extra = "; SSH will not work from this card" if u == "a" else ""
-                self.ui.warn(f"no {modes.SLOT_WORD[u]} subkey: that card slot stays empty{extra}")
+                if held[u]:
+                    self.ui.warn(f"the backup has no secret for the {modes.SLOT_WORD[u]} subkey {held[u]}: that card "
+                                 f"slot stays empty{extra}")
+                else:
+                    self.ui.warn(f"no {modes.SLOT_WORD[u]} subkey: that card slot stays empty{extra}")
 
     def describe(self) -> str:
         b = self.bundle
@@ -260,8 +266,12 @@ class Session:
             mark = " <- card" if k.fpr in self.targets.values() else ""
             expires = datetime.date.fromtimestamp(k.expires).isoformat() if k.expires else "never"
             lines.append(f"  [{k.usage.upper()}] {k.algo} {k.fpr} expires {expires}{mark}")
+        held = modes.select_targets(b)
         for u in modes.missing(self.targets):
-            lines.append(f"  [{u.upper()}] none (clone leaves it empty; renew and rotate create one)")
+            if held[u]:
+                lines.append(f"  [{u.upper()}] no secret in the backup (clone leaves it empty)")
+            else:
+                lines.append(f"  [{u.upper()}] none (clone leaves it empty; renew and rotate create one)")
         return "\n".join(lines)
 
     def unlock(self, passphrase: str) -> bool:

@@ -23,7 +23,7 @@ RETRY=() HOMES_CREATED=() STEP_STDIN=() STEP_NO=0 CURRENT_STEP="" CERTIFY_PASS="
 WORK="" STAGING="" CARDHOME="" VERIFYHOME="" CHOSEN=""
 KEY_FP="" KEY_ID="" HAS_SECRET=0 KEY_EXPIRES=0 KEY_ALGO="" KEY_VALIDITY="" UNPROTECTED=0 NOW=0
 LOADED_FPRS=()
-CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=()
+CAND_KIND=() CAND_PATH=() CAND_FILES=() CAND_KEY=() CAND_UNPROT=() CAND_BARE=() CAND_ATTACH=()
 KEY_FILES=() INV_UNRECOVERABLE=() INV_REPORT="" INV_FILES_FOUND=0 INV_UNREADABLE=0
 UIDS=() UIDS_UNSIGNED=()
 SUB_FPR=() SUB_USAGE=() SUB_CREATED=() SUB_EXPIRES=() SUB_VALIDITY=() SUB_ALGO=() SUB_SECRET=()
@@ -236,13 +236,14 @@ trap 'exit "$EXIT_INTERRUPT"' INT TERM HUP
 
 # --- backup detection and loading (sources are only read)
 
-add_candidate() { # add_candidate KIND DIR KEY UNPROT BARE FILE...
+add_candidate() { # add_candidate KIND DIR KEY UNPROT BARE ATTACH FILE...; ATTACH: loose subkey files, one per line
   CAND_KIND+=("$1")
   CAND_PATH+=("$2")
   CAND_KEY+=("$3")
   CAND_UNPROT+=("$4")
   CAND_BARE+=("$5")
-  shift 5
+  CAND_ATTACH+=("$6")
+  shift 6
   local IFS=$'\n'
   CAND_FILES+=("$*")
 }
@@ -272,7 +273,7 @@ walk_dir() { # walk_dir DIR DEPTH: GnuPG homes become candidates, key files go t
     for f in private-keys-v1.d pubring.kbx pubring.gpg trustdb.gpg; do
       if [[ -e $dir/$f ]]; then files+=("$dir/$f"); fi
     done
-    add_candidate gnupghome "$dir" "" 0 "" "${files[@]}"
+    add_candidate gnupghome "$dir" "" 0 "" "" "${files[@]}"
   fi
   for entry in "$dir"/*; do # LC_ALL=C: byte order; hidden names are not matched
     [[ -e $entry || -L $entry ]] || continue
@@ -353,6 +354,40 @@ describe_parts() { # describe_parts "ROLE STATE KEYID"... → "main secret, 2 su
   printf '%s' "$out"
 }
 
+rehome_loose() { # as Python's backup._rehome_loose: a file holding nothing but a secret key whose keyid is a
+  # subkey of another key in the folder holds that subkey, saved as a key of its own; its row moves to that key
+  local key i role state kid parent line kept remaining=()
+  local -A owner=() keys_in=()
+  for key in "${order[@]}"; do
+    for i in "${!KEY_FILES[@]}"; do
+      [[ -n ${parts_of[$i,$key]+set} ]] || continue
+      keys_in[$i]=$((keys_in[$i] + 1))
+      while read -r role state kid; do
+        if [[ $role == sub && -z ${owner[$kid]+set} ]]; then owner[$kid]=$key; fi
+      done <<<"${parts_of[$i,$key]%$'\n'}"
+    done
+  done
+  for key in "${order[@]}"; do
+    parent=${owner[$key]:-$key}
+    if [[ $parent == "$key" ]]; then remaining+=("$key"); continue; fi
+    kept=0
+    for i in "${!KEY_FILES[@]}"; do
+      [[ -n ${parts_of[$i,$key]+set} ]] || continue
+      line=${parts_of[$i,$key]%$'\n'}
+      read -r role state kid <<<"$line"
+      if (( keys_in[$i] == 1 )) && [[ $line != *$'\n'* && $role == main ]] && (( $(rank "$state") )); then
+        parts_of[$i,$parent]+="sub $state $key"$'\n'
+        unset "parts_of[$i,$key]"
+        loose[$i,$parent]=1
+      else
+        kept=1
+      fi
+    done
+    if (( kept )); then remaining+=("$key"); fi
+  done
+  order=("${remaining[@]}")
+}
+
 select_files() { # select_files KEY: the files that supply KEY's secrets (as Python's _select: first copy wins)
   local key=$1 i line role state kid secret main_secret max r new kind unprot bare=""
   local rows=() sorted=() used=() supplied_order=()
@@ -383,6 +418,23 @@ select_files() { # select_files KEY: the files that supply KEY's secrets (as Pyt
     done <<<"${parts_of[$i,$key]%$'\n'}"
     if (( new )); then used+=("$i"); fi
   done
+  local attach="" first first_public="" first_other="" main_used=0
+  for i in "${used[@]}"; do
+    if [[ -n ${loose[$i,$key]+set} ]]; then attach+="${attach:+$'\n'}${KEY_FILES[i]}"; fi
+  done
+  if [[ -n $attach ]]; then # as Python's _with_public: the loose subkey needs its main key, a public copy first
+    for i in "${!KEY_FILES[@]}"; do
+      [[ -n ${parts_of[$i,$key]+set} && $'\n'${parts_of[$i,$key]} == *$'\n'main\ * ]] || continue
+      if [[ $'\n'${parts_of[$i,$key]} == *$'\n'main\ public\ * ]]; then
+        if [[ -z $first_public ]]; then first_public=$i; fi
+      elif [[ -z $first_other ]]; then
+        first_other=$i
+      fi
+      if [[ " ${used[*]} " == *" $i "* ]]; then main_used=1; fi
+    done
+    first=${first_public:-$first_other}
+    if (( ! main_used )) && [[ -n $first ]]; then used=("$first" "${used[@]}"); fi
+  fi
   for i in "${sorted[@]}"; do
     if [[ " ${used[*]} " == *" $i "* ]]; then status[$i,$key]=used; continue; fi
     status[$i,$key]=ignored
@@ -399,11 +451,11 @@ select_files() { # select_files KEY: the files that supply KEY's secrets (as Pyt
   done
   local paths=()
   for i in "${used[@]}"; do paths+=("${KEY_FILES[i]}"); done
-  add_candidate "$kind" "${paths[0]%/*}" "$key" "$unprot" "$bare" "${paths[@]}"
+  add_candidate "$kind" "${paths[0]%/*}" "$key" "$unprot" "$bare" "$attach" "${paths[@]}"
 }
 
 build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() writes it
-  local root=$1 i key rel
+  local root=$1 i key rel saved
   local -a parts
   INV_REPORT=""
   (( ${#KEY_FILES[@]} )) || return 0
@@ -417,7 +469,9 @@ build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() wri
     for key in "${order[@]}"; do
       [[ -n ${parts_of[$i,$key]+set} ]] || continue
       mapfile -t parts <<<"${parts_of[$i,$key]%$'\n'}"
-      INV_REPORT+=$'\n'"  $rel: key $key: $(describe_parts "${parts[@]}") (${status[$i,$key]})"
+      saved=""
+      if [[ -n ${loose[$i,$key]+set} ]]; then saved=", saved without its key"; fi
+      INV_REPORT+=$'\n'"  $rel: key $key: $(describe_parts "${parts[@]}")$saved (${status[$i,$key]})"
     done
   done
   for key in "${INV_UNRECOVERABLE[@]}"; do
@@ -426,7 +480,7 @@ build_report() { # build_report ROOT: INV_REPORT as Python's backup.report() wri
 }
 
 sort_candidates() { # by path bytes, then gnupghome, export, subkeys-only; ties keep their order
-  local i n order_of=() kind=() path=() files=() key=() unprot=() bare=()
+  local i n order_of=() kind=() path=() files=() key=() unprot=() bare=() attach=()
   for i in "${!CAND_KIND[@]}"; do
     case ${CAND_KIND[i]} in gnupghome) n=0 ;; export) n=1 ;; *) n=2 ;; esac
     order_of+=("${CAND_PATH[i]}"$'\t'"$n"$'\t'"$i")
@@ -434,15 +488,15 @@ sort_candidates() { # by path bytes, then gnupghome, export, subkeys-only; ties 
   (( ${#order_of[@]} )) || return 0
   while IFS=$'\t' read -r _ _ i; do
     kind+=("${CAND_KIND[i]}"); path+=("${CAND_PATH[i]}"); files+=("${CAND_FILES[i]}")
-    key+=("${CAND_KEY[i]}"); unprot+=("${CAND_UNPROT[i]}"); bare+=("${CAND_BARE[i]}")
+    key+=("${CAND_KEY[i]}"); unprot+=("${CAND_UNPROT[i]}"); bare+=("${CAND_BARE[i]}"); attach+=("${CAND_ATTACH[i]}")
   done < <(printf '%s\n' "${order_of[@]}" | sort -t $'\t' -k1,1 -k2,2n -k3,3n)
   CAND_KIND=("${kind[@]}") CAND_PATH=("${path[@]}") CAND_FILES=("${files[@]}")
-  CAND_KEY=("${key[@]}") CAND_UNPROT=("${unprot[@]}") CAND_BARE=("${bare[@]}")
+  CAND_KEY=("${key[@]}") CAND_UNPROT=("${unprot[@]}") CAND_BARE=("${bare[@]}") CAND_ATTACH=("${attach[@]}")
 }
 
 detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and INV_FILES_FOUND
   local root=${BACKUP%/} i out main kid role state order=()
-  local -A parts_of=() seen_key=() status=() unreadable=()
+  local -A parts_of=() seen_key=() status=() unreadable=() loose=()
   [[ -d $root ]] || die "$EXIT_BACKUP" "backup folder not found: $root"
   KEY_FILES=() INV_UNRECOVERABLE=()
   walk_dir "$root" 0
@@ -455,6 +509,7 @@ detect() { # walks BACKUP, classifies key files, fills CAND_*, INV_REPORT and IN
       if [[ -z ${seen_key[$main]+set} ]]; then seen_key[$main]=1; order+=("$main"); fi
     done <<<"$out"
   done
+  rehome_loose
   for main in "${order[@]}"; do
     select_files "$main"
   done
@@ -701,8 +756,56 @@ skipped_line() { # skipped_line STDERR_FILE CODE: the gpg message a partial impo
   printf '%s' "${other:-gpg exited with status $2}"
 }
 
+# A subkey's secret saved as a key of its own: see LOOSE_KEY and attach_loose in ykrecover/backup.py.
+LOOSE_KEY="with no user ID, as a subkey looks when saved as a key of its own; put the public key it belongs to (or \
+any backup file of that key) in the backup folder and choose the folder again"
+
+loose_key() { # loose_key FILE: the keyid when FILE holds a single secret key packet, else fails
+  local out main kid role state
+  out=$(classify_file "$1") || return 1
+  [[ $out != *$'\n'* ]] || return 1
+  read -r main kid role state <<<"$out"
+  [[ $role == main ]] && (( $(rank "$state") )) || return 1
+  printf '%s' "$kid"
+}
+
+attach_loose() { # attach_loose FILE: as Python's backup.attach_loose
+  local src=$1 scratch source head grip rc=0
+  new_home loose scratch || die "$EXIT_BACKUP" "cannot import $src: cannot create a temporary GnuPG home"
+  readable_copy "$src" "$scratch" bom.key source || die "$EXIT_BACKUP" "cannot import $src: cannot read the file"
+  head=$(head -c 64 -- "$source" | tr '\000' '\001')
+  head=${head#"${head%%[![:space:]]*}"}
+  if [[ $head == '-----BEGIN PGP PRIVATE KEY BLOCK-----'* || $head == '-----BEGIN PGP PUBLIC KEY BLOCK-----'* ]]; then
+    GNUPGHOME=$scratch gpg --batch --yes --output "$scratch/loose.gpg" --dearmor -- "$source" 2>"$WORK/import.err" ||
+      die "$EXIT_BACKUP" "cannot import $src: $(cat "$WORK/import.err")"
+  else
+    cp -- "$source" "$scratch/loose.gpg" || die "$EXIT_BACKUP" "cannot import $src: cannot copy the file"
+  fi
+  printf '\xb4\x09ykrecover' >>"$scratch/loose.gpg" # a user ID packet; gpg imports no key without one
+  GNUPGHOME=$scratch gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$scratch/loose.gpg" \
+    >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
+  secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $src: $(cat "$WORK/import.err")"
+  grip=$(GNUPGHOME=$scratch gpg --batch --with-colons --with-keygrip --fixed-list-mode --list-secret-keys 2>/dev/null |
+    awk -F: '$1 == "grp" { print $10; exit }')
+  kill_agents "$STAGING"
+  if [[ ! -d $STAGING/private-keys-v1.d ]]; then mkdir -m 700 -- "$STAGING/private-keys-v1.d"; fi
+  if [[ -z $grip ]] ||
+    ! (umask 077 && cp -- "$scratch/private-keys-v1.d/$grip.key" "$STAGING/private-keys-v1.d/$grip.key"); then
+    die "$EXIT_BACKUP" "cannot import $src: the imported key file is missing"
+  fi
+  destroy_home "$scratch"
+}
+
+is_attached() { # is_attached FILE: FILE is one of the chosen candidate's loose subkey files
+  local a
+  while IFS= read -r a; do
+    if [[ -n $a && $a == "$1" ]]; then return 0; fi
+  done <<<"${CAND_ATTACH[CHOSEN]}"
+  return 1
+}
+
 load_candidate() {
-  local i=$1 f n=0 source rc
+  local i=$1 f n=0 source rc kid
   if [[ ${CAND_KIND[i]} == gnupghome ]]; then
     kill_agents "$STAGING"
     while IFS= read -r f; do
@@ -711,16 +814,25 @@ load_candidate() {
     chmod -R u+rwX,go-rwx "$STAGING"
   else
     while IFS= read -r f; do
+      if is_attached "$f"; then continue; fi
       readable_copy "$f" "$STAGING" "bom-$n.key" source || die "$EXIT_BACKUP" "cannot import $f: cannot read the file"
       n=$((n + 1))
       rc=0
       GNUPGHOME=$STAGING gpg --batch --allow-non-selfsigned-uid --status-fd 1 --import -- "$source" \
         >"$WORK/import.status" 2>"$WORK/import.err" || rc=$?
       if (( rc )); then
-        secret_keys_imported "$WORK/import.status" || die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
+        if ! secret_keys_imported "$WORK/import.status"; then
+          if kid=$(loose_key "$f"); then
+            die "$EXIT_BACKUP" "cannot import $f: it holds only the secret key $kid, $LOOSE_KEY"
+          fi
+          die "$EXIT_BACKUP" "cannot import $f: $(cat "$WORK/import.err")"
+        fi
         warn "gpg skipped part of $f: $(skipped_line "$WORK/import.err" "$rc")"
       fi
     done <<<"${CAND_FILES[i]}"
+    while IFS= read -r f; do
+      if [[ -n $f ]]; then attach_loose "$f"; fi
+    done <<<"${CAND_ATTACH[i]}"
     repair_ecdh_imports "$STAGING" "${CAND_BARE[i]}"
   fi
   load_bundle "$STAGING"
@@ -732,15 +844,20 @@ load_candidate() {
 
 usage_word() { case $1 in s) printf sign ;; e) printf encrypt ;; a) printf auth ;; esac; }
 
-select_targets() { # the newest non-revoked subkey for each usage; empty when the key has none
-  local u i best created
+select_targets() { # the newest non-revoked subkey for each usage; empty when the key has none. A backup with a
+  # loose subkey (attach_loose) may hold no secret for the key's other subkeys: only those it holds count there.
+  # select_targets ARRAY_NAME [all] fills that array (default TARGET); all: secrets or not
+  local -n _targets=${1:-TARGET}
+  local u i best created secret_only=0
+  if [[ -n ${CAND_ATTACH[CHOSEN]} && ${2:-} != all ]]; then secret_only=1; fi
   for u in s e a; do
     best="" created=-1
     for i in "${!SUB_FPR[@]}"; do
       [[ ${SUB_USAGE[i]} == *"$u"* && ${SUB_VALIDITY[i]} != r ]] || continue
+      if (( secret_only )) && [[ ${SUB_SECRET[i]} != 1 ]]; then continue; fi
       if (( SUB_CREATED[i] > created )); then created=${SUB_CREATED[i]}; best=${SUB_FPR[i]}; fi
     done
-    TARGET[$u]=$best
+    _targets["$u"]=$best
   done
 }
 
@@ -819,10 +936,16 @@ check_bundle() {
   if (( ${#gaps[@]} == 3 )); then
     die "$EXIT_BACKUP" "the key has no subkeys to put on a card; use --mode renew or --mode rotate"
   fi
+  local -A held=()
+  select_targets held all
   for u in "${gaps[@]}"; do
     extra=""
     if [[ $u == a ]]; then extra="; SSH will not work from this card"; fi
-    warn "no $(slot_word "$u") subkey: that card slot stays empty$extra"
+    if [[ -n ${held[$u]} ]]; then
+      warn "the backup has no secret for the $(slot_word "$u") subkey ${held[$u]}: that card slot stays empty$extra"
+    else
+      warn "no $(slot_word "$u") subkey: that card slot stays empty$extra"
+    fi
   done
 }
 
@@ -1119,7 +1242,15 @@ describe_key() {
     if (( SUB_EXPIRES[i] > 0 )); then expires=$(date -d "@${SUB_EXPIRES[i]}" +%F); fi
     info "  [${SUB_USAGE[i]^^}] ${SUB_ALGO[i]} ${SUB_FPR[i]} expires $expires$mark"
   done
-  for u in $(missing_slots); do info "  [${u^^}] none (clone leaves it empty; renew and rotate create one)"; done
+  local -A held=()
+  select_targets held all
+  for u in $(missing_slots); do
+    if [[ -n ${held[$u]} ]]; then
+      info "  [${u^^}] no secret in the backup (clone leaves it empty)"
+    else
+      info "  [${u^^}] none (clone leaves it empty; renew and rotate create one)"
+    fi
+  done
 }
 
 check_passphrase() { # check_passphrase PASS → status

@@ -19,11 +19,12 @@ LOOPBACK = ("gpg", "--batch", "--pinentry-mode", "loopback")
 UNIT_SECONDS = {"": 86400, "d": 86400, "w": 7 * 86400, "m": 30 * 86400, "y": 365 * 86400}
 
 
-def select_targets(bundle) -> dict:
-    """The newest non-revoked subkey for each usage; None when the key has none."""
+def select_targets(bundle, secret_only: bool = False) -> dict:
+    """The newest non-revoked subkey for each usage (with secret_only, of those the backup holds the secret of);
+    None when the key has none."""
     targets = {}
     for usage in USAGES:
-        usable = [k for k in bundle.subkeys if usage in k.usage and k.validity != "r"]
+        usable = [k for k in bundle.subkeys if usage in k.usage and k.validity != "r" and (k.secret or not secret_only)]
         targets[usage] = max(usable, key=lambda k: k.created).fpr if usable else None
     return targets
 

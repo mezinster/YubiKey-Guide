@@ -35,6 +35,7 @@ class Candidate:
     key_id: str = ""  # main-key keyid; empty for a GnuPG home
     unprotected: bool = False  # every secret part it supplies has no passphrase
     bare: tuple = ()  # keyids of the parts it supplies with no passphrase
+    attached: tuple = ()  # files holding a subkey saved as a key of its own (see attach_loose)
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class FileReport:
     key: str
     parts: tuple
     status: str  # used | not needed | ignored | unreadable
+    loose: bool = False  # the key's subkey, saved as a key of its own
 
 
 @dataclass(frozen=True)
@@ -231,6 +233,49 @@ def _select(key: str, rows: list) -> tuple:
     return used, supplied
 
 
+def _rehome_loose(rows_by_key: dict, order: list) -> set:
+    """A file that holds nothing but a secret key whose keyid is a subkey of another key in the folder holds that
+    subkey, saved as a key of its own (no user ID, so gpg will not import it): its row moves to that key, as the
+    subkey.
+
+    Returns the (path, key) rows moved."""
+    owner, keys_in = {}, {}
+    for key in order:
+        for _, path, parts in rows_by_key[key]:
+            keys_in[path] = keys_in.get(path, 0) + 1
+            for p in parts:
+                if p.role == "sub":
+                    owner.setdefault(p.keyid, key)
+    moved = set()
+    for key in list(order):
+        parent = owner.get(key, key)
+        if parent == key:
+            continue
+        kept = []
+        for index, path, parts in rows_by_key[key]:
+            if keys_in[path] == 1 and len(parts) == 1 and parts[0].role == "main" and RANK.get(parts[0].state, 0):
+                rows_by_key[parent].append((index, path, (Part(parent, key, "sub", parts[0].state),)))
+                moved.add((path, parent))
+            else:
+                kept.append((index, path, parts))
+        rows_by_key[key] = kept
+        if not kept:
+            order.remove(key)
+    return moved
+
+
+def _with_public(key: str, rows: list, used: list, loose: set) -> list:
+    """used, led by a file with the key's main key when a loose subkey needs it and no used file has one; a public
+    copy first, as a card stub of the main key would pass for its secret."""
+    if not any((path, key) in loose for path in used):
+        return used
+    mains = [(any(p.role == "main" and p.state != "public" for p in parts), index, path)
+             for index, path, parts in rows if any(p.role == "main" for p in parts)]
+    if any(path in used for _, _, path in mains):
+        return used
+    return [min(mains)[2], *used] if mains else used
+
+
 def inventory(folder: Path) -> Inventory:
     if not folder.is_dir():
         raise RecoveryError(f"backup folder not found: {folder}", EXIT_BACKUP)
@@ -251,9 +296,11 @@ def inventory(folder: Path) -> Inventory:
                     rows_by_key[key].append((index, path, tuple(p for p in parts if p.main_keyid == key)))
         finally:
             scan.destroy()
+    loose = _rehome_loose(rows_by_key, order)
     candidates, reports, unrecoverable, status = list(homes), [], [], {}
     for key in order:
         used, supplied = _select(key, rows_by_key[key])
+        used = _with_public(key, rows_by_key[key], used, loose)
         for _, path, parts in rows_by_key[key]:
             if path in used:
                 status[(path, key)] = "used"
@@ -264,14 +311,16 @@ def inventory(folder: Path) -> Inventory:
             continue
         kind = "export" if supplied.get(key, 0) else "subkeys-only"
         bare = tuple(keyid for keyid, rank in supplied.items() if rank == 1)
-        candidates.append(Candidate(kind, used[0].parent, tuple(used), key, len(bare) == len(supplied), bare))
+        attached = tuple(path for path in used if (path, key) in loose)
+        candidates.append(Candidate(kind, used[0].parent, tuple(used), key, len(bare) == len(supplied), bare,
+                                    attached))
     for path in paths:
         if path in unreadable:
             reports.append(FileReport(path, "", (), "unreadable"))
         for key in order:
             for _, row_path, parts in rows_by_key[key]:
                 if row_path == path:
-                    reports.append(FileReport(path, key, parts, status[(path, key)]))
+                    reports.append(FileReport(path, key, parts, status[(path, key)], (path, key) in loose))
     candidates.sort(key=lambda c: (os.fsencode(str(c.path)), KIND_ORDER[c.kind]))
     return Inventory(folder, tuple(reports), tuple(candidates), tuple(unrecoverable))
 
@@ -294,7 +343,8 @@ def report(inv: Inventory) -> str:
         if f.status == "unreadable":
             lines.append(f"  {rel}: not a readable key file (ignored)")
         else:
-            lines.append(f"  {rel}: key {f.key}: {_describe_parts(f.parts)} ({f.status})")
+            saved = ", saved without its key" if f.loose else ""
+            lines.append(f"  {rel}: key {f.key}: {_describe_parts(f.parts)}{saved} ({f.status})")
     lines += [f"  key {k}: not recoverable from this folder (card stubs / public key only)" for k in inv.unrecoverable]
     return "\n".join(lines)
 
@@ -576,6 +626,60 @@ def skipped_line(stderr: str, code: int) -> str:
     return (keys or other or [f"gpg exited with status {code}"])[0]
 
 
+# A subkey's secret saved as a key of its own is a lone secret-key packet: gpg refuses it ("no user ID"). With the
+# public key it belongs to in the folder, the inventory files it under that key (_rehome_loose) and attach_loose
+# brings its secret in; without, the import error says what the file is.
+LOOSE_KEY = ("cannot import {}: it holds only the secret key {}, with no user ID, as a subkey looks when saved as a "
+             "key of its own; put the public key it belongs to (or any backup file of that key) in the backup "
+             "folder and choose the folder again")
+LOOSE_UID = b"\xb4\x09ykrecover"  # an old-format user ID packet; gpg imports no key without one
+
+
+def _loose_key(path: Path, home: Home) -> str:
+    """The keyid when the file holds a single secret key packet and nothing gpg could import, else ""."""
+    parts = classify(path, home) or []
+    if len(parts) == 1 and parts[0].role == "main" and RANK.get(parts[0].state, 0):
+        return parts[0].keyid
+    return ""
+
+
+def attach_loose(src: Path, staging: Home) -> None:
+    """Imports a loose subkey (see LOOSE_KEY) into a scratch home with a user ID added, then copies its
+    gpg-agent key file into staging. A key file is named by its keygrip, which the key material alone decides,
+    so the main key's public key in staging finds it as its subkey's secret."""
+    scratch = Home.create("loose")
+    try:
+        source = readable_copy(src, scratch, "bom.key")
+        if source is None:
+            raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
+        binary = scratch.path / "loose.gpg"
+        with open(source, "rb") as f:
+            armored = f.read(64).lstrip().startswith(KEY_PREFIXES)
+        if armored:
+            result = scratch.run(["gpg", "--batch", "--yes", "--output", str(binary), "--dearmor", "--", str(source)])
+            if result.returncode != 0:
+                raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+        else:
+            shutil.copyfile(source, binary)
+        with open(binary, "ab") as f:
+            f.write(LOOSE_UID)
+        result = scratch.run(["gpg", "--batch", "--allow-non-selfsigned-uid", "--status-fd", "1", "--import", "--",
+                              str(binary)])
+        if not secret_keys_imported(result.stdout):
+            raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
+        grips = [line.split(":")[9] for line in scratch.run(LIST_SECRET).stdout.splitlines()
+                 if line.startswith("grp:")]
+        keys = staging.path / "private-keys-v1.d"
+        staging.kill_agents()
+        keys.mkdir(mode=0o700, exist_ok=True)
+        shutil.copyfile(scratch.path / "private-keys-v1.d" / f"{grips[0]}.key", keys / f"{grips[0]}.key")
+        (keys / f"{grips[0]}.key").chmod(0o600)
+    except (OSError, IndexError) as err:
+        raise RecoveryError(f"cannot import {src}: {err}", EXIT_BACKUP) from err
+    finally:
+        scratch.destroy()
+
+
 def load(candidate: Candidate, staging: Home, warn) -> list:
     """Imports the candidate into staging and lists its keys; warn(msg) receives what gpg took or skipped."""
     if candidate.kind == "gnupghome":
@@ -594,6 +698,8 @@ def load(candidate: Candidate, staging: Home, warn) -> list:
                 raise RecoveryError(f"cannot copy {src} into staging: {err}", EXIT_BACKUP) from err
     else:
         for index, src in enumerate(candidate.files):
+            if src in candidate.attached:
+                continue
             source = readable_copy(src, staging, f"bom-{index}.key")
             if source is None:
                 raise RecoveryError(f"cannot import {src}: cannot read the file", EXIT_BACKUP)
@@ -601,8 +707,13 @@ def load(candidate: Candidate, staging: Home, warn) -> list:
                                   "--", str(source)])
             if result.returncode != 0:
                 if not secret_keys_imported(result.stdout):
+                    loose = _loose_key(src, staging)
+                    if loose:
+                        raise RecoveryError(LOOSE_KEY.format(src, loose), EXIT_BACKUP)
                     raise RecoveryError(f"cannot import {src}: {result.stderr.strip()}", EXIT_BACKUP)
                 warn(f"gpg skipped part of {src}: {skipped_line(result.stderr, result.returncode)}")
+        for src in candidate.attached:
+            attach_loose(src, staging)
         repair_ecdh_imports(staging, candidate.bare)
     bundles = list_bundles(staging)
     if not bundles:
