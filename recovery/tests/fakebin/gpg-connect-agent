@@ -2,6 +2,7 @@
 """Test double for gpg-connect-agent: records the commands and answers OK.
 
 fail_at=learn answers like the real tool without a smartcard daemon: an ERR line and exit status 0.
+"scd learn --force" prints the status lines in learn.txt (SERIALNO, KEYPAIRINFO) when that file exists.
 """
 
 import os
@@ -17,4 +18,6 @@ if "learn --force" in sys.argv[1:] and wanted.exists() and wanted.read_text().st
     marker.touch()
     print("ERR 67108983 No SmartCard daemon <SCD>")
     sys.exit(0)
+if "scd learn --force" in sys.argv[1:] and (state / "learn.txt").exists():
+    print((state / "learn.txt").read_text(), end="")
 print("OK")

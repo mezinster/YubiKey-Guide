@@ -1542,10 +1542,49 @@ user_gnupg_home() { # user_gnupg_home VAR: the daily keyring as gpgconf reports 
   fi
 }
 
+token_serials() { # token_serials FILE: the card serials (AID characters 21-28) of its Token lines, one per line
+  awk '$1 == "Token:" && length($2) >= 28 { print toupper(substr($2, 21, 8)) }' "$1"
+}
+
+move_stubs() { # move_stubs HOME STUB...: into a new stub-backup-* folder in HOME (never deleted); prints where
+  local home=$1 dest f t
+  local -a moved=() left=()
+  shift
+  dest=$(mktemp -d "$home/stub-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX") || die "$EXIT_USAGE" "cannot create a backup directory in $home"
+  for f in "$@"; do
+    if ! mv -- "$f" "$dest/"; then
+      for t in "$@"; do [[ -e $t ]] && left+=("${t##*/}"); done
+      die "$EXIT_USAGE" "moving stubs failed; moved: ${moved[*]:-none}; not moved: ${left[*]}"
+    fi
+    moved+=("${f##*/}")
+  done
+  info "moved to $dest"
+}
+
+remove_stale_stubs() { # remove_stale_stubs HOME LEARNED: as Python's stale_stubs, from `scd learn --force` output
+  local home=$1 serial f grips
+  local -a stale=()
+  serial=$(awk '$1 == "S" && $2 == "SERIALNO" && length($3) >= 28 { s = toupper(substr($3, 21, 8)) } END { print s }' <<<"$2")
+  grips=$(awk '$1 == "S" && $2 == "KEYPAIRINFO" && $3 ~ /^[0-9A-Fa-f]+$/ && length($3) == 40 && $4 ~ /^OPENPGP\./ {
+    print toupper($3) }' <<<"$2")
+  [[ -n $serial && -n $grips ]] || return 0
+  shopt -s nullglob
+  for f in "$home"/private-keys-v1.d/*.key; do
+    if [[ $'\n'$grips$'\n' == *$'\n'"$(basename -- "${f%.key}" | tr '[:lower:]' '[:upper:]')"$'\n'* ]]; then continue; fi
+    # a slot written over leaves the stub of its old key, still naming this card (gpg never removes it)
+    if [[ $(token_serials "$f" | sort -u) == "$serial" ]]; then stale+=("$f"); fi
+  done
+  shopt -u nullglob
+  (( ${#stale[@]} )) || return 0
+  confirm "Move ${#stale[@]} stub(s) for keys no longer on card $serial out of the keyring?$(printf '\n  %s' "${stale[@]##*/}")
+" || return 0
+  move_stubs "$home" "${stale[@]}"
+}
+
 update_stubs() {
-  local import="" cards=1 home serial padded f dest i answer t rc=$EXIT_OK
+  local import="" cards=1 home serial padded f i answer t rc=$EXIT_OK
   local learned err learn_rc=0
-  local -a serials=() stubs=() moved=() left=()
+  local -a serials=() stubs=()
   while (( $# )); do
     case $1 in
       --import) (( $# >= 2 )) || bad_usage; import=$2; shift ;;
@@ -1580,26 +1619,18 @@ update_stubs() {
     if (( ${#stubs[@]} == 0 )); then info "no stubs reference card $serial"; continue; fi
     confirm "Move ${#stubs[@]} stub(s) for card $serial out of the keyring?$(printf '\n  %s' "${stubs[@]##*/}")
 " || continue
-    moved=()
-    dest=$(mktemp -d "$home/stub-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX") || die "$EXIT_USAGE" "cannot create a backup directory in $home"
-    for f in "${stubs[@]}"; do
-      if ! mv -- "$f" "$dest/"; then
-        left=()
-        for t in "${stubs[@]}"; do [[ -e $t ]] && left+=("${t##*/}"); done
-        die "$EXIT_USAGE" "moving stubs failed; moved: ${moved[*]:-none}; not moved: ${left[*]}"
-      fi
-      moved+=("${f##*/}")
-    done
-    info "moved to $dest"
+    move_stubs "$home" "${stubs[@]}"
   done
   for ((i = 1; i <= cards; i++)); do
     read_line "Insert card $i of $cards and press Enter" answer
     # gpg-connect-agent exits 0 even when a command answers ERR, so read its output too.
-    learned=$(gpg-connect-agent "scd serialno" "learn --force" /bye) || learn_rc=$?
+    learned=$(gpg-connect-agent "scd serialno" "scd learn --force" "learn --force" /bye) || learn_rc=$?
     err=$(grep -m 1 '^ERR' <<<"$learned" || true)
     if (( learn_rc )) || [[ -n $err ]]; then
       warn "learn failed for card $i: ${err:-exit status $learn_rc}"
       rc=$EXIT_CARD
+    else
+      remove_stale_stubs "$home" "$learned"
     fi
     learn_rc=0
     if ! gpg --batch --card-status >&2; then

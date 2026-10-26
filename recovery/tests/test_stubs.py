@@ -7,8 +7,13 @@ from tests.helpers import FIXTURES, LINUX, fake_hardware, fixture_info, run_impl
 OLD, OTHER = "22222222", "33333333"
 
 
-def stub(serial, slot):
-    return f"Key: (shadowed-private-key (ecc (curve Ed25519)))\nToken: D2760001240103040006{serial}0000 OPENPGP.{slot} - - -\n"
+def stub(serial, slot, *others):
+    tokens = "".join(f"Token: D2760001240103040006{s}0000 OPENPGP.{slot} - - -\n" for s in (serial, *others))
+    return f"Key: (shadowed-private-key (ecc (curve Ed25519)))\n{tokens}"
+
+
+NEW = "44444444"
+ON_CARD, STALE, SHARED = "E" * 40, "F" * 40, "1" * 40
 
 
 class StubsTests:
@@ -35,7 +40,42 @@ class StubsTests:
         (backup_dir,) = self.home.glob("stub-backup-*")
         self.assertEqual(sorted(p.name for p in backup_dir.iterdir()), ["AAAA.key", "BBBB.key"])
         calls = (Path(self.env["FAKE_HW_DIR"]) / "calls.log").read_text()
-        self.assertIn("gpg-connect-agent scd serialno | learn --force | /bye", calls)
+        self.assertIn("gpg-connect-agent scd serialno | scd learn --force | learn --force | /bye", calls)
+
+    def stale_setup(self):
+        """Card NEW holds ON_CARD; STALE points at NEW only, SHARED at NEW and OTHER."""
+        keys = self.home / "private-keys-v1.d"
+        (keys / f"{ON_CARD}.key").write_text(stub(NEW, 2))
+        (keys / f"{STALE}.key").write_text(stub(NEW, 2))
+        (keys / f"{SHARED}.key").write_text(stub(NEW, 3, OTHER))
+        (Path(self.env["FAKE_HW_DIR"]) / "learn.txt").write_text(
+            f"S SERIALNO D2760001240103040006{NEW}0000\n"
+            f"S KEYPAIRINFO {ON_CARD} OPENPGP.2 e 1791717024 rsa2048\n")
+        return keys
+
+    def test_moves_stubs_of_keys_no_longer_on_the_card(self):
+        keys = self.stale_setup()
+        result = self.run_stubs([], "\ny\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"no longer on card {NEW}", result.stderr)
+        self.assertEqual(sorted(p.name for p in keys.iterdir()),
+                         sorted(["AAAA.key", "BBBB.key", "CCCC.key", f"{ON_CARD}.key", f"{SHARED}.key"]))
+        (backup_dir,) = self.home.glob("stub-backup-*")
+        self.assertEqual([p.name for p in backup_dir.iterdir()], [f"{STALE}.key"])
+
+    def test_declining_keeps_stale_stubs(self):
+        keys = self.stale_setup()
+        result = self.run_stubs([], "\nn\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((keys / f"{STALE}.key").exists())
+        self.assertEqual(list(self.home.glob("stub-backup-*")), [])
+
+    def test_card_listing_no_keys_moves_nothing(self):
+        keys = self.stale_setup()
+        (Path(self.env["FAKE_HW_DIR"]) / "learn.txt").write_text(f"S SERIALNO D2760001240103040006{NEW}0000\n")
+        result = self.run_stubs([], "\n")  # no question asked: one more would end the input and abort
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(list(keys.iterdir())), 6)
 
     def test_declining_keeps_stubs(self):
         result = self.run_stubs(["--remove-serial", OLD], "n\n\n")
