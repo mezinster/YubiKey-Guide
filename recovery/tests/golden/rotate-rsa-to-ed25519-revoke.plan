@@ -44,14 +44,14 @@ STEP 14 card1 <CARDHOME> ykman --device <SERIAL1> openpgp reset -f
 STEP 15 card1 <CARDHOME> gpgconf --kill all
 STEP 16 card1 <CARDHOME> ykman --device <SERIAL1> openpgp access set-retries 5 5 5 -f -a <DEFAULT_ADMIN_PIN>
 STEP 17 card1 <CARDHOME> gpgconf --kill all
-STEP 18 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --change-pin
+STEP 18 card1 <CARDHOME> gpg --command-fd 0 --pinentry-mode loopback --change-pin
 STDIN 3
 STDIN <DEFAULT_ADMIN_PIN>
 STDIN <ADMIN_PIN>
 STDIN <ADMIN_PIN>
 STDIN q
 STEP 19 card1 <CARDHOME> gpgconf --kill all
-STEP 20 card1 <CARDHOME> gpg --batch --command-fd 0 --pinentry-mode loopback --change-pin
+STEP 20 card1 <CARDHOME> gpg --command-fd 0 --pinentry-mode loopback --change-pin
 STDIN 1
 STDIN <DEFAULT_USER_PIN>
 STDIN <USER_PIN>

@@ -11,6 +11,8 @@ DEFAULT_USER_PIN = "123456"
 SLOTS = (("s", "1", "sig"), ("e", "2", "dec"), ("a", "3", "aut"))
 TOUCH_POLICIES = ("off", "on", "fixed", "cached", "cached-fixed")
 CARD_GPG = ("gpg", "--batch", "--command-fd", "0", "--pinentry-mode", "loopback")
+# gpg --change-pin refuses --batch outright ("can't do this in batch mode"); --command-fd still feeds it.
+PIN_GPG = ("gpg", "--command-fd", "0", "--pinentry-mode", "loopback", "--change-pin")
 
 
 @dataclass(frozen=True)
@@ -51,9 +53,9 @@ def card_steps(index: int, key_fp: str, targets: dict, settings: CardSettings, b
         # Retries first: changing the retry counters may reset the PINs to defaults.
         kill, Step(phase, CARDHOME, ("ykman", "--device", serial, "openpgp", "access", "set-retries",
                                      *settings.retries, "-f", "-a", "<DEFAULT_ADMIN_PIN>")),
-        kill, Step(phase, CARDHOME, (*CARD_GPG, "--change-pin"),
+        kill, Step(phase, CARDHOME, PIN_GPG,
                    ("3", "<DEFAULT_ADMIN_PIN>", "<ADMIN_PIN>", "<ADMIN_PIN>", "q")),
-        kill, Step(phase, CARDHOME, (*CARD_GPG, "--change-pin"),
+        kill, Step(phase, CARDHOME, PIN_GPG,
                    ("1", "<DEFAULT_USER_PIN>", "<USER_PIN>", "<USER_PIN>", "q")),
         kill, Step(phase, CARDHOME, (*CARD_GPG, "--edit-card"), (*holder, "quit")),
     ]

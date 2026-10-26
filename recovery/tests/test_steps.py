@@ -99,7 +99,11 @@ class CardTests(unittest.TestCase):
                     self.assertEqual(steps[i - 1].argv, ("gpgconf", "--kill", "all"))
                     self.assertEqual(steps[i - 1].home, step.home)
             if step.argv[0] == "gpg":
-                self.assertIn("--batch", step.argv)
+                # gpg --change-pin aborts with "can't do this in batch mode"
+                if "--change-pin" in step.argv:
+                    self.assertNotIn("--batch", step.argv)
+                else:
+                    self.assertIn("--batch", step.argv)
 
     def test_keytocard_scripts(self):
         steps = [s for s in card.card_steps(2, FP, self.TARGETS, card.CardSettings()) if "--edit-key" in s.argv]
