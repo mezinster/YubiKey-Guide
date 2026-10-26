@@ -45,6 +45,10 @@ def main():
         return 0
     if "--change-pin" in ARGS or "--edit-card" in ARGS or "--card-edit" in ARGS:
         kind = "change-pin" if "--change-pin" in ARGS else "edit-card"
+        if kind == "change-pin" and "--batch" in ARGS:
+            # real gpg: change_pin() refuses --batch even when --command-fd supplies the answers
+            print("gpg: can't do this in batch mode", file=sys.stderr)
+            return 2
         script = sys.stdin.read()
         log(kind)
         with open(STATE / f"{kind}.txt", "a", encoding="utf-8") as f:

@@ -13,6 +13,8 @@ readonly DEFAULT_ADMIN_PIN=12345678 DEFAULT_USER_PIN=123456
 readonly TOUCH_POLICIES="off on fixed cached cached-fixed"
 readonly LOOPBACK=(gpg --batch --pinentry-mode loopback)
 readonly CARD_GPG=(gpg --batch --command-fd 0 --pinentry-mode loopback)
+# gpg --change-pin refuses --batch outright ("can't do this in batch mode"); --command-fd still feeds it.
+readonly PIN_GPG=(gpg --command-fd 0 --pinentry-mode loopback --change-pin)
 
 BACKUP="" MODE=clone CARDS=1 OUT="" EXPIRE=2y ALGO="" REVOKE_OLD=0 PINS=generate SAME_PINS=0
 RETRIES=5,5,5 TOUCH=on TOUCH_SIG="" TOUCH_ENC="" TOUCH_AUT="" NAME="" LOGIN="" URL=""
@@ -945,10 +947,10 @@ card_steps() { # card_steps INDEX
     return 1
   kill_step "$phase" "$h" || return 1
   STEP_STDIN=(3 '<DEFAULT_ADMIN_PIN>' '<ADMIN_PIN>' '<ADMIN_PIN>' q)
-  step "$phase" "$h" '' "${CARD_GPG[@]}" --change-pin || return 1
+  step "$phase" "$h" '' "${PIN_GPG[@]}" || return 1
   kill_step "$phase" "$h" || return 1
   STEP_STDIN=(1 '<DEFAULT_USER_PIN>' '<USER_PIN>' '<USER_PIN>' q)
-  step "$phase" "$h" '' "${CARD_GPG[@]}" --change-pin || return 1
+  step "$phase" "$h" '' "${PIN_GPG[@]}" || return 1
   kill_step "$phase" "$h" || return 1
   STEP_STDIN=("${holder[@]}" quit)
   step "$phase" "$h" '' "${CARD_GPG[@]}" --edit-card || return 1
