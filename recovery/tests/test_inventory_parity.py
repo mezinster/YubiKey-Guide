@@ -5,8 +5,9 @@ import subprocess
 import unittest
 
 from tests.helpers import (FIXTURES, LINUX, MALLORY, REAL_GPG, bare_first_folder, bom_crlf_folder, fixture_info,
-                           partial_import_folder, repeated_key_folder, revoked_uid_folder, run_impl,
-                           short_tempdir)
+                           loose_subkey_folder, partial_import_folder, repeated_key_folder, revoked_uid_folder,
+                           run_impl, short_tempdir)
+from ykrecover.backup import LOOSE_KEY
 
 FOLDERS = ["tests/fixtures/flexible/asc backup", "tests/fixtures/ed25519", "tests/fixtures/ed25519/export",
            "tests/fixtures/split", "tests/fixtures/unprotected", "tests/fixtures/gnupg1", "tests/fixtures/multikey",
@@ -136,6 +137,25 @@ class InventoryParityTests(unittest.TestCase):
 
     def test_rejected_secret_block_is_an_import_error(self):
         self.assert_same_import_error(partial_import_folder(self, "rejected"))
+
+    def test_loose_subkey_is_cloned_with_its_key(self):
+        info = fixture_info("rsa4096")
+        for armored in (False, True):
+            with self.subTest(armored=armored):
+                py = self.assert_same_run(loose_subkey_folder(self, armored=armored))
+                self.assertEqual(py.returncode, 0, py.stderr)
+                self.assertIn(", saved without its key (used)\n", py.stderr)
+                self.assertIn(f"warning: the backup has no secret for the sign subkey {info['FPR_S']}: that card "
+                              "slot stays empty\n", py.stderr)
+                keytocard = [line for line in py.stdout.splitlines() if line.startswith("STDIN key ")]
+                self.assertEqual(keytocard, [f"STDIN key {info['FPR_E']}"])
+
+    def test_loose_subkey_without_its_key_is_explained(self):
+        root = loose_subkey_folder(self, public=False)
+        kid = fixture_info("rsa4096")["FPR_E"][-16:]
+        py = self.assert_same_run(root)
+        self.assertEqual(py.returncode, 2, py.stderr)
+        self.assertTrue(py.stderr.endswith(f"error: {LOOSE_KEY.format(root / f'sk_{kid}.gpg', kid)}\n"), py.stderr)
 
     def test_repeated_key_first_copy_wins(self):
         py = self.assert_same_run(repeated_key_folder(self))

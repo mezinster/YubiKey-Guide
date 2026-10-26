@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from tests.helpers import (FIXTURES, LINUX, PASSPHRASE, REAL_GPG, _runtime_base, fake_hardware, fixture_info,
-                           read_until, run_impl, short_tempdir, spawn_impl)
+                           loose_subkey_folder, read_until, run_impl, short_tempdir, spawn_impl)
 
 S1, S2 = "11111111", "22222222"
 
@@ -266,6 +266,17 @@ class FakeHardwareTests:
         self.assertEqual(len(scripts), 3)
         for script, slot in zip(scripts, ("1", "2", "3")):
             self.assertRegex(script, rf"^key [0-9A-F]{{40}}\nkeytocard\n{slot}\n\d{{8}}\n$")
+
+    def test_clone_loose_subkey(self):
+        info = fixture_info("rsa4096")
+        result, out, calls, state = self.migrate("rsa4096", [], f"{PASSPHRASE}\ny\n\nRESET {S1}\n",
+                                                 folder=loose_subkey_folder(self))  # an absolute folder
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.card_fprs(state, S1), ["", info["FPR_E"], ""])
+        self.assertIn("decrypt", calls)
+        self.assertNotIn("sign", calls)
+        self.assertTrue(list(out.glob(f"public-{info['KEY_ID']}-*.asc")), list(out.iterdir()))
+        self.assertFalse(list(out.glob("ssh-*.pub")))
 
 
 class PythonFakeHardwareTests(FakeHardwareTests, unittest.TestCase):

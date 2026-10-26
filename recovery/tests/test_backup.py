@@ -6,8 +6,8 @@ from unittest import mock
 from pathlib import Path
 
 from tests.helpers import (FIXTURES, LINUX, MALLORY, PASSPHRASE, RECOVERY, REAL_GPG, REVOKED_UID,
-                           bare_first_folder, bom_crlf_folder, fixture_info, import_unprotected, partial_import_folder,
-                           repeated_key_folder, revoked_uid_folder, short_tempdir)
+                           bare_first_folder, bom_crlf_folder, fixture_info, import_unprotected, loose_subkey_folder,
+                           partial_import_folder, repeated_key_folder, revoked_uid_folder, short_tempdir)
 from ykrecover import EXIT_BACKUP, RecoveryError, backup, osdeps
 from ykrecover.gpg import Home, gpg_version
 
@@ -377,6 +377,61 @@ class PartialImportTests(unittest.TestCase):
         self.assertEqual(backup.skipped_line("gpg: Total number processed: 1\n", 2), "gpg exited with status 2")
         accepted = 'gpg: key CCCC3333DDDD4444: accepted non self-signed user ID "C <c@example.org>"\n'
         self.assertEqual(backup.skipped_line(accepted + stderr, 2), "key CCCC3333DDDD4444: no valid user IDs")
+
+
+class LooseSubkeyTests(unittest.TestCase):
+    """A subkey's secret saved as a key of its own (no user ID): gpg refuses to import it alone ("no user ID")."""
+
+    def setUp(self):
+        self.info = fixture_info("rsa4096")
+        self.loose = f"sk_{self.info['FPR_E'][-16:]}.gpg"
+
+    def load(self, root):
+        candidate = backup.choose(backup.detect(root))
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        (bundle,) = backup.load(candidate, staging, self.fail)
+        return candidate, bundle
+
+    def test_inventory_files_it_under_its_key(self):
+        root = loose_subkey_folder(self)
+        inv = backup.inventory(root)
+        (candidate,) = inv.candidates
+        self.assertEqual((candidate.kind, candidate.key_id), ("subkeys-only", self.info["KEY_ID"]))
+        self.assertEqual(candidate.files, (root / "public.asc", root / self.loose))
+        self.assertEqual(candidate.attached, (root / self.loose,))
+        self.assertEqual(backup.report(inv), "\n".join([
+            f"Backup files in {root}:",
+            f"  public.asc: key {self.info['KEY_ID']}: main public, 3 subkeys public (used)",
+            f"  {self.loose}: key {self.info['KEY_ID']}: 1 subkey secret, saved without its key (used)"]))
+
+    def test_loads_as_the_subkey_of_its_key(self):
+        for armored in (False, True):
+            with self.subTest(armored=armored):
+                _, bundle = self.load(loose_subkey_folder(self, armored=armored))
+                self.assertEqual(bundle.key_fp, self.info["KEY_FP"])
+                self.assertFalse(bundle.has_certify_secret)
+                self.assertEqual({k.fpr: k.secret for k in bundle.subkeys},
+                                 {self.info["FPR_S"]: False, self.info["FPR_E"]: True, self.info["FPR_A"]: False})
+                self.assertEqual(bundle.uids, ("Recovery Test (rsa4096) <test@example.org>",))
+
+    def test_passphrase_unlocks_the_subkey(self):
+        candidate, bundle = self.load(loose_subkey_folder(self))
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        backup.load(candidate, staging, self.fail)
+        self.assertFalse(backup.check_passphrase(staging, bundle, "wrong"))
+        self.assertTrue(backup.check_passphrase(staging, bundle, PASSPHRASE))
+
+    def test_without_its_key_the_error_says_what_is_missing(self):
+        root = loose_subkey_folder(self, public=False)
+        candidate = backup.choose(backup.detect(root))
+        staging = Home.create("t")
+        self.addCleanup(staging.destroy)
+        with self.assertRaises(RecoveryError) as ctx:
+            backup.load(candidate, staging, self.fail)
+        self.assertEqual((ctx.exception.code, str(ctx.exception)), (EXIT_BACKUP, backup.LOOSE_KEY.format(
+            root / self.loose, self.info["FPR_E"][-16:])))
 
 
 class HomeRegistryTests(unittest.TestCase):
